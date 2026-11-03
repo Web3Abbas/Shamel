@@ -654,9 +654,10 @@ flowchart TD
   `credential_session_mode: single_holder` (default) the call must go to a session of the identity's **session
   holder** instance (`bwb:<t>:credrole:<upstream>:<cred_id>`, cached locally and updated by `credrole_changed`,
   §7.1); with `per_connector` any connected instance qualifies. Only instances whose `hello` advertised the
-  operation's endpoint ids are eligible. Within the eligible sessions: the session class matching the operation's
-  `CostClass` (§8.5), then least in-flight, preferring sessions whose last `shamel_probe` succeeded. Fast-fails if
-  the circuit breaker for the operation's cost class is open or no eligible session exists anywhere (after a
+  operation's endpoint ids are eligible. Within the eligible sessions: the session class matching the call's cost
+  class (`report` and `list` calls use the bulk session, §8.5), then least in-flight, preferring sessions whose last
+  `shamel_probe` succeeded. Fast-fails if the circuit breaker for the call's size class (small or large, §7.9) is
+  open or no eligible session exists anywhere (after a
   `tunnel.connector_grace` of 2 s for brief flaps).
 - **Needs:** compiled `upstreams` section, local tunnel table, tunnel registry (`bwb:tun:<upstream>`, cached
   locally and refreshed on change events), holder records, breaker state.
@@ -697,7 +698,11 @@ flowchart TD
   `refrenceId→reference_id`, `Classificaiton→classification`, `Branchs→branches`), voucher type ints → snake_case
   names, dates → `YYYY-MM-DD`, timestamps → RFC 3339 in the upstream's business timezone (default
   `Asia/Hebron`), monetary/quantity values kept as exact decimal text (never round-tripped through `float64`),
-  unknown upstream fields dropped and counted (`bawaba_upstream_schema_drift_total{op,field}`). Catalog images: in
+  unknown upstream fields dropped and counted (`bawaba_upstream_schema_drift_total{op,field}`). For `Snapshot`
+  operations the leader also precomputes, once per record, the CLDR collation keys
+  (`Collator.KeyFromString`, `language.Arabic`, `collate.Numeric`; collators from a `sync.Pool`) of every text or
+  code field in the route's sort allowlist and the normalized search keys (03 §5.5–§5.6); they are stored with the
+  snapshot record, never returned to clients, and count toward `pagination.snapshot_max_bytes`. Catalog images: in
   tunnel mode the connector has already replaced each `image_path` with an opaque `cref`; the gateway maps it to a
   stable `med_<id>` (`media_objects`) and emits a presigned `/v1/media/{media_id}?tok=…&exp=…&sig=…` URL (02 §5.4);
   while `media.enabled=false` (default) `image_url` is `null`. Runs once per coalesced fetch (in the leader),
@@ -711,15 +716,19 @@ flowchart TD
 - **Does:** per requester: applies the S8 row filter over the normalized records using the operation's
   `Dimensions` (store, salesman, customer, currency, price class, voucher type), filters sub-collections (e.g. item
   stock rows by allowed store, price columns by allowed price class), then client filters/search/sort, producing
-  the page and — for paginated results — a **view** stored in Valkey (§9.5): ascending positions when the view is in
-  the snapshot's default order and keeps ≥ 50 % of its records, otherwise materialized records. On cursor reads the
+  the page and — for paginated results — a **view** stored in Valkey (§9.5). A default-order view only filters the
+  snapshot's stored default order and needs no sort; any other sort is a stable sort of positions comparing the
+  precomputed collation keys with `bytes.Compare` (typed values for decimals, dates and booleans; `null` last; ties
+  in upstream order), and `q` ranking is a stable partition (03 §5.5–§5.6). A view is stored as ascending positions
+  when it is in the snapshot's default order and keeps ≥ 50 % of its records, otherwise as materialized records.
+  On cursor reads the
   view must be bound to the token's current `policy_version` (else `409 cursor_invalidated`), and each record is
   still re-checked against the current policy as defense in depth.
-- **Needs:** decision, flight result or snapshot chunks.
+- **Needs:** decision, flight result (or the snapshot's key column and chunks).
 - **Failure:** none client-visible besides Valkey write failure for multi-page results → `503
   pagination_unavailable` (never silent truncation).
-- **Perf:** allow-set lookups per record over the compact record column (no chunk decode for filtering);
-  positions encoded as delta-varint pages.
+- **Perf:** allow-set lookups and key comparisons over the key column (no chunk decode for filtering
+  or sorting; no collator call per comparison); positions encoded as delta-varint pages.
 
 #### S15 — Field hiding
 - **Does:** effective mask = policy mask ∧ client sparse-fieldset (`?fields=`). The generated encoder for each
@@ -753,13 +762,17 @@ Inserted without changing stage order:
 
 1. **S7:** `Idempotency-Key` required on Shamel writes (`400 idempotency_key_required`).
 2. **S8:** voucher-type scope; approval flag.
-3. **S11 (writes):** `SET bwb:<t>:idem:<lineage_id>:<sha256(key)> <record> NX PX 86400000`, record encrypted
-   (purpose `idempotency`) = `{state:"in_progress", fingerprint, …}` (03 §15.2). The namespace is the token's
-   **lineage** (04 §2.4.5), so a rotated successor that resends the same key replays instead of double-posting.
-   Same fingerprint → behaviour per 03 §15.2 (replay with `Bawaba-Idempotent-Replay: true`, `409
-   request_in_progress`, or the approval's `202`); different fingerprint → `409 idempotency_conflict`. A missing
-   Valkey record is checked against the PostgreSQL backstop `idempotency_keys` (03 §15.2) before a new reservation.
-   Valkey unavailable → `503 idempotency_unavailable` (fail closed).
+3. **S11 (writes):** `SET bwb:<t>:idem:<lineage_id>:<sha256(idempotency_key)> <record> NX PX 86400000`, record
+   encrypted (purpose `idempotency`, AAD bound to the lineage and key hash, 02 §9.3) =
+   `{state:"in_progress", fingerprint, token_id, …}` (03 §15.2). The namespace is the token's **lineage**
+   (04 §2.4.5; `LineageID` is part of the compiled policy, 04 §9.1), not the token id: a rotated token's successor
+   shares its predecessor's namespace, so a write resent with the same key after a rotation returns the stored
+   outcome instead of posting a duplicate voucher. Same fingerprint → behaviour per 03 §15.2 (replay with
+   `Bawaba-Idempotent-Replay: true`, `409 request_in_progress`, or the approval's `202`); different fingerprint →
+   `409 idempotency_conflict`. A missing Valkey record is checked against the PostgreSQL backstop
+   `idempotency_keys`, primary key `(tenant_id, lineage_id, key_hash)` with `key_hash = sha256(idempotency_key)`
+   (03 §15.2), before a new reservation. Valkey unavailable → `503 idempotency_unavailable` (fail closed). Views and
+   cursors stay token-bound (§9.5, §9.6).
 4. **Write-ahead audit:** synchronous `INSERT` into `audit_writes` (full payload, status `pending`) and
    `idempotency_keys` in one PostgreSQL transaction before contacting Shamel; failure → `503 audit_unavailable`.
 5. **Approval hold:** if required, store the prepared upstream request (encrypted, `approval_payload`) as an
@@ -1038,8 +1051,9 @@ The common path has **no per-request network call**.
    (oversubscribed, so load-balancer skew never idles capacity; the connector FIFO absorbs the excess) and the
    currently leased slots in direct mode. `N` comes from the node registry; recomputed on membership change.
 3. **Classes and reservations.** Priority classes: `interactive` (API reads), `write` (API writes and the
-   approved-write executor), `background` (webhook change detection). Cost classes from `Operation.CostClass`:
-   `large` calls (full lists, reports, list-shaped sub-calls of combined endpoints) may hold at most
+   approved-write executor), `background` (webhook change detection). Size classes from the call's cost class
+   (03 §23.3): `large` calls (class `report` or `list`: full lists, reports, voucher date-range slices, list-shaped
+   sub-calls of combined endpoints) may hold at most
    `large_max_share` (default 50 %, min 1) of the node's slots, so small single-entity reads always find a slot.
    **Background** slots are allocated cluster-wide: `background_slots = max(1, round(cap × background_max_share))`
    (default 25 % → 2 of 8), acquired by the singleton job leaders from `bwb:<t>:sem:<upstream>:bg` before they take
@@ -1066,8 +1080,9 @@ usage rollups); owner alert when saturation persists > 5 min, naming the top tok
 |---|---|---|
 | Overall request deadline | 90 s (must stay < Cloudflare's 100 s origin timeout) | `server.request_timeout` |
 | Direct dial / TLS handshake | 5 s / 5 s | `upstreams[].direct.dial_timeout` |
-| Single-record and master-data reads (`CostClass: small`) | 30 s | `Operation.Timeout`, override per upstream |
-| Large lists (`GetItems`, `GetCustomers`, `GetItemsStores`, price rows, `GetVouchers`) | 75 s | 〃 |
+| Single-record and master-data reads (cost class `small`) | 30 s | `Operation.Timeout`, override per upstream |
+| Large lists (`GetItems`, `GetCustomers`, `GetItemsStores`, price rows, catalog) | 75 s | 〃 |
+| Voucher date-range slices (`GetVouchers`, `GetExtraVouchers`, §7.11) | 30 s per slice; the whole plan within the remaining request deadline | 〃 |
 | Reports (`GetAccountsheet`, cost-center sheet, last price) | 60 s | 〃 |
 | Writes | 60 s | 〃 |
 | Login | 15 s | `session.login_timeout` |
@@ -1090,10 +1105,11 @@ budget; a `not_holder` re-selection is not a retry. Writes are never retried by 
 
 ### 7.9 Circuit breaker
 
-Per (node, upstream, cost class), `sony/gobreaker/v2` semantics: trips when, over a rolling 30 s window with ≥ 20
+Per (node, upstream, size class) — `small`, or `large` for calls of cost class `report`/`list` —
+`sony/gobreaker/v2` semantics: trips when, over a rolling 30 s window with ≥ 20
 requests, the failure ratio ≥ 50 %, or after 5 consecutive `transport_unavailable`/`timeout` outcomes. Only
 `transport_unavailable`, `timeout` and `bad_response` count — application errors (`upstream_error`,
-`business_rejected`), `busy`, `not_holder` and `too_large` do not. Keying by cost class means legitimately slow
+`business_rejected`), `busy`, `not_holder` and `too_large` do not. Keying by size class means legitimately slow
 large fetches can open only the `large` breaker, never the one guarding small reads. Open duration 5 s, doubling up
 to 60 s; half-open admits 3 probes. Open → `503 upstream_unavailable` immediately with `Retry-After`. Breaker
 transitions are published (`bwb:events`) for the dashboard and alerting; they are not shared as state (each node
@@ -1115,6 +1131,18 @@ executor (`errgroup` with the request deadline). Every sub-call goes through coa
 individually (with its own cost class, charged to the calling token), so a combined call never exceeds the upstream
 cap. A failed mandatory sub-call fails the request; a sub-call marked `optional` yields `null` plus a
 `Bawaba-Warning: partial_result`.
+
+**Range-split plans** (03 §12.2, §12.3). `GetVouchers` has no paging and returns full vouchers, so a long date range
+would exceed every response cap and timeout. A `/v1/vouchers` range (at most `api.vouchers.max_range_days`,
+default 31) longer than `api.vouchers.slice_days` (7) becomes consecutive slices `[from, from+6]`,
+`[from+7, from+13]`, …, `[…, to]`; `/v1/voucher-summaries` (`GetExtraVouchers`, light rows) uses
+`api.voucher_summaries.slice_days` (31) up to `api.voucher_summaries.max_range_days` (366). Slices are fetched
+**sequentially**, each as its own upstream call admitted by the limiter (class `report`) and coalesced on its own
+key (§9.1), so tools asking for overlapping ranges share slices; pushdowns apply to every slice. The normalized
+slices are appended in slice order into the build arena of **one** snapshot (§9.4), so the client sees an ordinary
+list with one cursor walk; a voucher appears once because its date falls into exactly one slice. The whole plan
+must finish within the page-1 deadline, otherwise the request fails with `504 upstream_timeout` and no partial
+snapshot is kept. S6 charges one `report` unit set per slice.
 
 ---
 
@@ -1266,7 +1294,7 @@ confirms the format (ISCO-20).
 ### 8.5 High availability
 
 - Each connector instance opens `tunnel.sessions` parallel sessions (default 2) with **classes**: session 0
-  `interactive` (small operations, writes, control traffic), session 1 `bulk` (operations with `CostClass: large`).
+  `interactive` (small calls, writes, control traffic), session 1 `bulk` (calls of cost class `report` or `list`).
   If one session is lost its class falls back to the other session of the instance until it reconnects. Bulk
   transfers therefore never delay interactive streams or control frames.
 - Run ≥ 2 connector instances per upstream (different hosts where possible). In `single_holder` mode (default)
@@ -1401,9 +1429,11 @@ remote follower is registered; on cancellation or node shutdown the leader publi
 remote followers re-elect at once.
 
 The flight result is immutable and shared read-only: (a) the snapshot chunks as compressed byte slices in default
-sort order (the same plaintext bytes that are encrypted and written to Valkey), (b) a compact per-record column of
-dimension values and precomputed sort/filter keys (≈ 32–64 B per record), used by S14 without decoding chunks,
-(c) the snapshot id. Followers decode only the chunks their page needs, through the node-local chunk cache (§9.4).
+sort order (the same plaintext bytes that are encrypted and written to Valkey), (b) the **key column**: per record
+its upstream position, dimension values, filterable typed values, collation sort keys and search keys
+(03 §5.5–§5.6), typically 100–300 B per record (≈ 5–15 MiB for 50,000 records), used by S14 to filter, sort and
+search without decoding chunks, (c) the snapshot id. Followers decode only the chunks their page needs, through the
+node-local chunk cache (§9.4).
 
 ### 9.3 Distributed coordination (operations with `Snapshot: true`)
 
@@ -1439,13 +1469,16 @@ contain balances and prices; Valkey persistence files and replicas must be as us
 database. AES-GCM with AES-NI runs at several GB/s per core, far below zstd cost.
 
 **Build.** The leader decodes and normalizes the stream into a compact build arena (internal binary record
-encoding plus precomputed sort/filter keys and dimension values). At the end of the stream it sorts by the
-operation's `DefaultSort` (a permutation; skipped when records already arrived in order, which is detected on the
-fly, and then records stream straight into chunks without the arena), cuts chunks of 512 records, compresses each
-with zstd and drops the arena. Peak memory per flight ≈ the compact size of the result (≈ 0.3–0.5 × the upstream
-JSON; ≈ 25 MiB for 50,000 items) during the build, then the compressed chunks plus ≈ 48 B per record. Builds are
-admitted against the node budget `pagination.flight_mem_max` (default 25 % of `GOMEMLIMIT`, §7.6). Default-ordered
-views are therefore monotonic and touch only contiguous chunks.
+encoding) and fills the key column (§9.2: upstream position, dimension values, collation sort keys and search keys,
+precomputed once per record, 03 §5.5). At the end of the stream it computes the permutation for the operation's
+`DefaultSort` with a stable sort on the precomputed keys (`bytes.Compare`; skipped when records already arrived in
+order, which is detected on the fly, and then records stream straight into chunks without the arena) and **stores
+the snapshot in that order**: chunks of 512 records are cut along the permutation, compressed with zstd, and the
+arena is dropped. Each record keeps its upstream position, which is the final tie-breaker of every other sort, so
+ties still keep upstream order as 03 §5.5 requires. Peak memory per flight ≈ the compact size of the result
+(≈ 0.3–0.5 × the upstream JSON; ≈ 25 MiB for 50,000 items) during the build, then the compressed chunks plus the key
+column. Builds are admitted against the node budget `pagination.flight_mem_max` (default 25 % of `GOMEMLIMIT`,
+§7.6). Default-ordered views are therefore monotonic and touch only contiguous chunks.
 
 **Lazy materialization.** The leader writes the snapshot to Valkey only when (a) a requester on its node (the leader
 request or a local follower) needs more than one page, or (b) remote followers are registered for its generation
@@ -1457,14 +1490,16 @@ non-null `next_cursor` is sent only after the snapshot and view writes are ackno
 | Key | Content | TTL |
 |---|---|---|
 | `bwb:<t>:snap:{<sid>}:m` | meta: `ck`, `created_at`, `expires_at`, record count, chunk count, chunk size, sort key, resource type, normalizer version, key id | 60 s absolute |
-| `bwb:<t>:snap:{<sid>}:c:<n>` | chunk *n*: 512 normalized records in default sort order (compact internal binary encoding) → zstd → AES-256-GCM (purpose `snapshot`, AAD `snapshot/<sid>/<n>`) | same |
+| `bwb:<t>:snap:{<sid>}:c:<n>` | chunk *n*: 512 normalized records in default sort order (compact internal binary encoding, with their sort and search keys) → zstd → AES-256-GCM (purpose `snapshot`, AAD `snapshot/<sid>/<n>`) | same |
+| `bwb:<t>:snap:{<sid>}:k` | the key column (§9.2) → zstd → AES-256-GCM (AAD `snapshot/<sid>/k`), so a remote follower builds its view without decoding record chunks | same |
 
 - `{<sid>}` is the Valkey hash tag, so all keys of one snapshot share a slot. Encryption uses the record envelope of
   02 §9.3 (fresh HKDF subkey per message, key id in the envelope).
 - TTL is absolute from creation (`pagination.snapshot_ttl`, default 60 s) and reported as
   `snapshot_expires_at`; it is not extended by reads.
-- **Memory limits:** `pagination.snapshot_max_bytes` (default 64 MiB compressed per snapshot; exceeded when
-  materializing → the request fails with `422 result_too_large` advising narrower filters),
+- **Memory limits:** `pagination.snapshot_max_bytes` (default 64 MiB compressed per snapshot, records plus sort and
+  search keys; exceeded while building → page 1 fails with `422 result_too_large`, whose advice is to narrow the
+  request with **pushdown** filters, the only filters that shrink the unfiltered upstream result, 03 §5.3–§5.4),
   `pagination.max_views_per_token` (default 32 live views), and Valkey `maxmemory` with `volatile-ttl` eviction (all
   snapshot/view keys carry TTLs). Early eviction surfaces as `409 snapshot_expired`, never as wrong data. Metric
   `bawaba_snapshot_bytes` estimates resident bytes of snapshots and materialized views (written − expired by
@@ -1480,7 +1515,8 @@ non-null `next_cursor` is sent only after the snapshot and view writes are ackno
 ### 9.5 Views
 
 A view is created on page 1 per (token, query) for results that need more than one page. TTL = the snapshot's
-remaining TTL; all values encrypted (purpose `view`, AAD `view/<vid>/<token_id>/<policy_version>`).
+remaining TTL; all values encrypted (purpose `view`, AAD `view/<vid>/<token_id>/<policy_version>` extended with the
+key suffix `m`, `p/<n>` or `c/<n>`, so pages and chunks cannot be swapped within a view).
 
 | Key | Content |
 |---|---|
@@ -1539,7 +1575,7 @@ snapshots never let a token see a record or field its own policy would hide.
 | Cursor page reads (no upstream) | ≥ 10,000 req/s per node |
 | Valkey commands per small read in steady state | ≈ 0 (rate leases ≈ 1 call per batch, advice merged every 1 s) |
 | Horizontal scaling efficiency to 8 nodes | ≥ 85 % of linear |
-| Heap per large flight | build arena (≈ compact result size) during the build, then O(compressed snapshot + ≈ 48 B × records); node-wide cap `pagination.flight_mem_max` |
+| Heap per large flight | build arena (≈ compact result size) during the build, then O(compressed snapshot + key column, typically 100–300 B × records); node-wide cap `pagination.flight_mem_max` |
 | Heap per cursor page | O(⌈limit/chunk⌉ decoded chunks + output buffer) |
 | Tunnel: 50,000-item `GetItems` (≈ 70 MB JSON, ≈ 8 MB zstd) | ≤ 10 s on a 10 Mbit/s office uplink; ≤ 40 s at the 2 Mbit/s minimum, inside the 75 s large-list budget |
 
@@ -1840,7 +1876,7 @@ Single Go module (module path TBD, placeholder `github.com/<org>/bawaba`), Go �
 | Kind | Where | Contents | Changed by |
 |---|---|---|---|
 | **Bootstrap** | `/etc/bawaba/bawaba.yaml` (data plane) or `/etc/bawaba/control.yaml` (control plane) + env overrides + secret files | node id/roles, listeners, TLS files, edge mode, PostgreSQL/Valkey/blob connection, key file paths, spool dirs, sandbox mode, memory budgets, tunnel transport, logging, limits that require restart | Operator (file), restart or SIGHUP for reloadable keys |
-| **Runtime** | PostgreSQL → compiled config | upstreams (incl. `direct.*`, `credential_session_mode`, concurrency, fairness and share settings), identities, connectors, tokens, policies, firewall lists, rate defaults, CORS origins, alert rules, error mappings, auth signatures, webhook poll interval, pagination TTL/limits, retention | Owner via control plane (dashboard/CLI); versioned and audited; propagates in < 1 s |
+| **Runtime** | PostgreSQL → compiled config | upstreams (incl. `direct.*`, `credential_session_mode`, concurrency, fairness and share settings), identities, connectors, tokens, policies, firewall lists, rate defaults and cost weights (`limits.*`, 03 §23.3), voucher range and slice sizes, CORS origins, alert rules, error mappings, auth signatures, webhook poll interval, pagination TTL/limits, retention | Owner via control plane (dashboard/CLI); versioned and audited; propagates in < 1 s |
 
 Keys written `upstreams[].…` in 02 §19 and 03 §26 are runtime upstream settings (compiled config section
 `upstreams`, set with `bawaba upstream set`), not bootstrap YAML.

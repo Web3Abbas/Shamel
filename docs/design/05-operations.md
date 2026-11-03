@@ -98,7 +98,7 @@ CREATE TABLE audit_events (
   resp_body       bytea,
   params_enc      bytea,                 -- audit_meta envelope(zstd(canonical JSON)) under the node's epoch DEK
                                          -- (§1.4.5): raw path+query, route vars, normalized typed request,
-                                         -- cursor {view_id, snapshot_id, offset, policy_version}, policy_version,
+                                         -- cursor {view_id, snapshot_id, offset}, token policy_version,
                                          -- Idempotency-Key hash, client correlation id, CF-Ray, decision trace
   subject_keys    bigint[],              -- blind index (§1.3.3)
   stage_timings   bytea,                 -- per-stage µs, only when slow (> audit.slow_threshold, 1 s) or error
@@ -383,7 +383,7 @@ zero-loss read auditing switch to `strict` at a small latency cost.
 |---|---|---|
 | Ring has space (events and bytes) | Normal path. | `bawaba_audit_queue_depth`, `bawaba_audit_ring_bytes` |
 | Ring full by count or by `ring_max_bytes` (workers CPU-bound, or very large bodies) | S16 hands the event to the **spill goroutine** through a bounded channel (`audit.spill_queue`: 4,096 events or 64 MiB of charge) with a non-blocking send and returns. The spill goroutine appends the **raw** event (zstd level 1, `audit_spool`) to the overflow spool with group fsync and releases the event's buffers; workers drain the spool after the ring. | `bawaba_audit_events_total{result="spilled"}` |
-| Spill channel also full | The `audit.on_spool_full` policy applies to this event at once: `reject` → this request gets `503 audit_unavailable`; `metadata_only` → its metadata row is kept, bodies dropped, `bodies_dropped` flag, `audit_gaps` row. Alert `audit_unavailable`. | alert |
+| Spill channel also full | The `audit.on_spool_full` policy applies to this event at once: `reject` → this request gets `503 audit_unavailable`; `metadata_only` → the event is stripped of its bodies (charge 0, `bodies_dropped` flag, `audit_gaps` row) and enqueued into a reserve of 1 % of `ring_size` kept for such events; if that reserve is full too, `reject` applies. Alert `audit_unavailable`. | alert |
 | PostgreSQL or blob store slow/down | WAL and staged packs grow on local disk; requests unaffected. Dedup degrades to the local cache (more new objects written). | `bawaba_audit_lag_seconds`, `bawaba_audit_wal_bytes` |
 | WAL + spool + capture temp files ≥ 50 % of `audit.spool_max_bytes` (10 GiB, 02 §16) | Continue; alert `audit_spool_filling` (warning), ≥ 80 % critical. | alert |
 | WAL + spool + capture temp files = 100 % | `audit.on_spool_full: reject` (default) → new requests get `503 audit_unavailable` (fail closed, 01 S16). `metadata_only` → metadata rows are kept, bodies dropped, rows flagged `bodies_dropped`, `audit_gaps` row written. Alert `audit_unavailable` (critical). | alert |
@@ -673,10 +673,10 @@ audit_caps: { pg_bytes: 200GiB, blob_bytes: 500GiB, alert_at: [0.70, 0.85, 0.95]
 | Indexed rows per request | ≈ 2.8: 1 `audit_events` + 0.745 `audit_upstream_calls` + ≈ 1.05 `audit_blobs` (§1.7.3) |
 | PostgreSQL bytes per request | ≈ 630 B: 505 B metadata (§1.7.2) + 1.05 × 120 B object index |
 | Ingest rating of one primary | **≤ 2,000 req/s sustained** (≈ 5,600 rows/s, ≈ 1.3 MB/s of table and index data, ≈ 3 MB/s of PostgreSQL WAL) on a dedicated 8 vCPU / NVMe primary, leaving room for autovacuum, the control plane and investigations. A CI load test (`audit-pg-ingest`) must sustain 1.5× the rating with `bawaba_audit_lag_seconds` p99 < 5 s. |
-| Storage | `pg_bytes` ≥ req/day × 630 B × `metadata_hot` days + `audit_writes` + ≈ 5 GB. The default cap (200 GiB, 90 d hot) therefore supports ≈ 3.8 M req/day (≈ 2,600 req/min average); beyond that the owner raises `pg_bytes`, lowers `metadata_hot`, or switches mode. |
+| Storage | `pg_bytes` ≥ req/day × 630 B × `metadata_hot` days + `audit_writes` + ≈ 5 GB. The default cap (200 GiB ≈ 215 GB, 90 d hot, ≈ 21 GB for `audit_writes` and the rest) therefore supports ≈ 3.4 M req/day (≈ 2,400 req/min average); beyond that the owner raises `pg_bytes`, lowers `metadata_hot`, or switches mode. |
 
 So the cluster-wide audited request rate in `postgres` mode is bounded by one PostgreSQL primary, well below the
-01 §10.1 per-node throughput targets multiplied by 8 nodes (≈ 34,000 req/s would mean ≈ 94,000 indexed rows/s and
+01 §10.1 per-node throughput targets multiplied by 8 nodes (≈ 34,000 req/s would mean ≈ 95,000 indexed rows/s and
 ≈ 1.8 TB/day). 01's targets hold per node; cluster-wide they hold only in `segment_first` mode (requirement on 01
 §10.1 to say so). The alert `audit_ingest_near_capacity` (§3.3) fires when the 1-h average of audit rows/s exceeds
 70 % of `audit.capacity.pg_rows_per_second` (90 % → high), when `bawaba_audit_lag_seconds` p95 stays above 30 s
@@ -929,7 +929,7 @@ webhook_tracked_orders(stream_id, manual_code, order_code, customer_code, create
 ```
 webhook_events(id evt_, tenant_id, stream_id, type, sequence bigint, resource_key_hash, detected_at,
                cycle_started_at, payload_enc)            -- monthly partitions, 30 d
-webhook_subscriptions(id whs_, tenant_id, token_id, environment, delivery_mode push|pull,
+webhook_subscriptions(id whs_, tenant_id, token_id, lineage_id (ownership, 04 §2.4.5), environment, delivery_mode push|pull,
                url_enc (purpose webhook_url, 02 §5.5), url_host, event_types[],
                filters jsonb, secret_enc, secret_prev_enc (purpose webhook_secret), secret_prev_expires_at, status, description,
                created_at, updated_at, consecutive_failures, failing_since)
@@ -2213,11 +2213,12 @@ backup:
 
 | From | Requirement |
 |---|---|
-| Pipeline (01 §6) | S6 runs `advice.lua` in the existing pipelined Valkey call and records warnings in `reqctx`; S14 reports snapshot size and walk completion; S16 passes body buffers by reference and the decoder tees raw upstream bytes into the audit capture buffer; S17 writes `Bawaba-Warning` (max 3). |
-| Operation registry (01 §6.1) | `PollInterval`, webhook event alternatives, dictionary class for audit compression, blind-index dimension extractors, `x-bawaba-*` doc metadata. |
-| Security design (02) | New key purposes `audit_index` (MAC), `webhook_event` (AEAD), `webhook_ledger` (MAC). Additional `bawaba_data` grants beyond 02 §12.4: `SELECT (id, retain_until)` + `UPDATE (retain_until)` on `audit_blobs`; INSERT on `audit_batches`; SELECT on `audit_zstd_dicts`; DML on the worker tables `webhook_streams`, `webhook_ledger`, `webhook_events`, `webhook_deliveries`, `webhook_delivery_attempts`, `webhook_tracked_orders`, `alert_instances`, `alert_outbox`, `alert_digest_items`, `token_flags`, `usage_*`. Valkey ACL patterns for `adv:*`, `behav:*`, `alert:*`, `m:*`, `lease:*` keys. |
-| API design | final schemas for `/v1/me`, `/v1/webhooks…`, `/v1/webhooks/{id}/events`, `/v1/docs/legacy`, `Bawaba-Warning` grammar, error codes `audit_unavailable`, `webhook_target_not_allowed`; an incremental-sync filter on customer and item lists (this document assumes the name `updated_since`, mapped to Shamel's `lastupdatedate`). |
-| Data model | final DDL for the tables named here; `UNIQUE (tenant_id, token_id, idempotency_key)` on `audit_writes`. |
+| Pipeline (01 §6) | S6 runs `advice.lua` in the existing pipelined Valkey call (with the three rate-limit buckets of 03 §23.3) and records warnings in `reqctx`; S14 reports the view's visible record count and walk completion; S16 copies small bodies and passes larger pooled buffers by reference count (§1.5.1), the decoder tees raw upstream bytes into the audit capture buffer; S17 writes `Bawaba-Warning` (max 3). |
+| Operation registry (01 §6.1) | `PollInterval`, webhook event alternatives, dictionary class for audit compression, blind-index dimension extractors, `x-bawaba-*` doc metadata, and per Shamel endpoint `identity_sensitive` (default `true`, §2.3). |
+| Architecture (01) | §10.1: state that the cluster-wide audited throughput in `postgres` metadata mode is bounded by one PostgreSQL primary (≈ 2,000 req/s rating) and that the per-node targets scale linearly only in `segment_first` mode (§1.12). Accept the config keys `audit.metadata_mode`, `audit.ring_max_bytes`, `audit.copy_max`, `audit.spill_queue`, `audit.blocked.*`, `audit.capacity.*`, `audit.segment_first.*`, `webhooks.max_pending_target_requests_per_token`, `webhooks.delivery.replay_delivered_max_age`. The alert manager, evaluator, digest job and SMTP sender are control-plane singletons (§3.1). Optional: the coalescing key (01 §9.1) can drop the identity for `identity_sensitive = false` endpoints in the same way. |
+| Security design (02) | Already in the revised 02: two key files, epoch DEKs sealed to `audit_seal`, purposes `audit_index`, `webhook_event`, `webhook_ledger`, `audit_spool`, the `audit_epoch_keys` grant and the Valkey ACL patterns `adv:*`, `behav:*`, `alert:*`, `m:*`, `lease:*`. **Still requested:** (a) the data-plane AEAD purpose `audit_dict` (compression dictionaries, AAD `audit_dict/<dict_id>`, §1.4.4); (b) these `bawaba_data` grants beyond 02 §12.4 (02 points here for them): `SELECT (id, retain_until)` + `UPDATE (retain_until)` on `audit_blobs`; INSERT on `audit_blobs`, `audit_batches`, `audit_gaps`, `audit_segments` (`segment_first`); INSERT and `UPDATE (state, bytes_total, epoch_key_ids, sealed_at)` on its own `audit_packs` rows; SELECT on `audit_zstd_dicts`; INSERT on `alert_outbox` (state `raw` only) and `webhook_target_requests`; DML on the worker tables `webhook_streams`, `webhook_ledger`, `webhook_events`, `webhook_deliveries`, `webhook_delivery_attempts`, `webhook_tracked_orders`, `token_flags`, `usage_*`; SELECT on `webhook_target_approvals` and `upstream_endpoint_scoping`. The data plane needs no grant on `alert_instances` or `alert_digest_items` (control plane only). (c) 02 §5.5: in egress-proxy mode the dial-time check is done by the gateway, which sends `CONNECT <validated-IP>` (§2.7.3). |
+| API design (03) | Already in the final 03: `/v1/me`, `/v1/webhooks…`, `GET /v1/docs/legacy`, the `Bawaba-Warning` grammar and codes, `updated_since` (03 §5.7), `audit_unavailable`, `webhook_target_not_allowed`, `delivery_not_retryable`. **Still requested:** §17.3 should require an owner-approved target host in every egress mode (it still conditions the allowlist on `webhooks.egress.mode=direct`) and mention target requests (§2.7.4); 05 §2.8 keeps HTTPS for sandbox targets while 03 §17.3 allows `http://` for allowlisted sandbox hosts — one of the two must change (this document's position: HTTPS only, since `http://` would put signed payloads and the signature in clear); optional additive `/v1/me` usage fields `upstream_units` and `webhook_deliveries` (§4.4). |
+| Data model | final DDL for the tables named here (including `audit_epoch_keys` from 02, `webhook_target_requests`, `webhook_target_approvals`, `upstream_endpoint_scoping`); `UNIQUE (tenant_id, token_id, idempotency_key)` on `audit_writes` (04 keys the idempotency namespace by `lineage_id`; the backstop key follows it). |
 
 ---
 
@@ -2231,7 +2232,10 @@ backup:
 2. The medium workload mix in §1.7.1 (5 % page-1 list fetches, 2 % chunk change rate between consecutive fetches)
    is an estimate for AI-built dashboards; the caps' defaults keep ≈ 2× headroom.
 3. Gateway nodes have persistent local disk for the audit WAL/spool (as 01 already assumes for the spool).
-4. Webhook receivers are mainly the owner's own tools, so a host allowlist is an acceptable default.
+4. Webhook receivers are mainly the owner's own tools, so requiring owner approval of every target host costs little
+   and keeps webhook egress inside the "request, you approve" model.
+5. The PostgreSQL ingest rating of §1.12 (≈ 2,000 audited req/s per primary) is a design estimate to be confirmed by
+   the `audit-pg-ingest` load test before release.
 
 **Questions for ISCO** (to merge into the consolidated list)
 
@@ -2248,21 +2252,20 @@ backup:
 
 **Reconciliation notes for the design set**
 
-- **Request id format**: 01 §6.3 specifies UUIDv7 (time-ordered), 02 LV-24 a 128-bit random value. Audit works with
-  either (§1.3.1), but UUIDv7 makes request-id lookups a single index probe and keeps the trace id time-ordered;
-  this document prefers 01's format.
-- **Audit spool size**: 01 §15.2 sets `audit.spool_max_bytes: 10GiB`, 02 §16 says 1 GiB. This document keeps
-  10 GiB: at the medium workload 1 GiB covers only ≈ 2–12 h of a PostgreSQL/blob outage before reads fail closed
-  (§1.5.3).
-- **Warning code**: 01 S6's example `polling_too_fast` → canonical `polling_too_frequent` (§4.2); the API design
-  fixes the header grammar (this document proposes RFC 9651 lists without a `docs` parameter).
-- **Listener ports** differ between 01 §5.2 (control 7443, ops 9090) and 02 §12.1 (control 7700, ops 9180); this
-  document names listeners only.
-- **Key naming**: 01 §15.3 HKDF purposes (`audit`, `blobid`) vs 02 §9.2 purpose keys (`audit_body`, `audit_addr`);
-  this document follows 02.
+- **Resolved by the revised 02:** request ids are UUIDv7 (02 LV-24 = 01 S2); the audit spool limit is 10 GiB (02 §16
+  = 01 §15.2); listener ports are control 7443 and ops 9090 (02 §12.1 = 01 §15.2).
+- **Warning code**: 01 S6's example `polling_too_fast` → canonical `polling_too_frequent` (§4.2, 03 §23.4).
+- **Key hierarchy**: 01 §15.3 (one key file, HKDF purposes `audit`, `blobid`) vs 02 §9.2 (two key files, KEK per
+  plane, purpose keys `audit_body`, `audit_addr`, audit epoch DEKs); this document follows 02, and 02 §20.1 already
+  asks 01 to change.
+- **Webhook config names**: 02 §19 lists `webhooks.timeout` and `webhooks.max_response_read`; this document nests
+  them as `webhooks.delivery.timeout` and `webhooks.delivery.max_response_bytes` (§2.9). One spelling should be
+  chosen when 01 §15.2 fixes the config schema.
+- **Removed-event reason**: `no_longer_visible` in 03 §17.2, 04 §4.7 and here (§2.2, §2.6).
 - **Credential terminology**: 01 "identity" vs 02 "credential" (`cred_id`); the CLI accepts both
   (`upstream credential`, alias `identity`).
 - **Webhook leases**: 01 §5.6 lists one singleton per (upstream, event type); this document refines the unit to the
-  poll stream (adds credential/identity, variant and detector) for the reason of 01 §9.7.
+  poll stream (adds credential/identity, variant and detector) for the reason of 01 §9.7, and drops the identity
+  again for endpoints calibrated as not identity-scoped (§2.3).
 - **ID prefixes** (`whs_`, `evt_`, `whd_`, `alr_`, `apr_`, …) and upstream ids (`up_1` in 01, `ups_main` in 02)
   should be harmonised with the data model.
