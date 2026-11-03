@@ -62,7 +62,7 @@
 
 ### 2.1 Bearer tokens
 
-Every `/v1` and `/legacy` request (except CORS preflight and presigned media URLs, §10.9) carries:
+Every `/v1` and `/legacy` request (except CORS preflight and presigned media URLs, §10.6) carries:
 
 ```http
 Authorization: Bearer bwb_live_<43 base62 chars><6 char checksum>
@@ -90,7 +90,7 @@ Format, checksum and storage are defined in 02 §9.7. Rules visible to clients:
 | Endpoint group | `tool` | `agent` | `publishable` |
 |---|---|---|---|
 | `/v1` reads (§8–§14) | yes, by scope | yes, by scope | yes: read scopes only, `GET` only, `Origin` must be in the token's list |
-| Media (§10.9) | yes | yes | yes |
+| Media (§10.6) | yes | yes | yes |
 | `/v1` writes and batch (§15) | yes | yes | no (`403 token_kind_not_allowed`) |
 | Approvals of own writes (§16) | yes | yes | no |
 | Webhooks (§17) | yes | yes | no |
@@ -159,7 +159,7 @@ permissions model owns how restrictions are configured; this section fixes their
 | DS-1 | **Lists** silently omit records outside the scope. `page.total` counts visible records only. |
 | DS-2 | **Single-resource lookups** of an out-of-scope record return `404 not_found`, indistinguishable from a missing record, after the same upstream fetch (02 LV-11). |
 | DS-3 | **Filter values** naming an out-of-scope entity (`store_id=9` when store 9 is not allowed) produce an empty result, never an error, so scopes cannot be probed. |
-| DS-4 | **Sub-collections** are filtered per row: item `prices[]` by price class and currency, stock rows by store, customer `balances[]` by currency. Aggregates (`total_quantity`, statement totals) are computed over visible rows only. |
+| DS-4 | **Sub-collections** are filtered per row: item `prices[]` by price class and currency, stock rows by store, per-currency balance rows (including the customer overview's `balances`) by currency. Aggregates (`total_quantity`, statement totals) are computed over visible rows only. |
 | DS-5 | **Vouchers are atomic.** A voucher is visible only if *every* dimension value it carries is allowed: `customer_code`, `salesman_code`, `currency_code`, `order_store_id` and every `lines[].store_id`. Bawaba never returns a voucher with lines removed, because partial vouchers misstate totals. |
 | DS-6 | **Derived salesman dimension.** For salesman-restricted tokens, records that carry a customer code but no salesman (balances, customer prices, voucher summaries, statements, last prices) are checked through the customer's `salesman_code`, resolved by one extra live `GetCustomers` call (coalesced, no `getBalance`) inside the same request. |
 | DS-7 | **Unevaluable dimensions fail closed.** If a restricted dimension cannot be evaluated on an endpoint's records, the endpoint either requires a narrowing parameter (`403 data_scope_filter_required`, `details` names the parameter) or is unavailable to that token (`403 data_scope_unsupported`). |
@@ -201,8 +201,8 @@ permissions model owns how restrictions are configured; this section fixes their
 
 Fields flagged `x-bawaba-sensitive: true` in OpenAPI are candidates for default hiding presets: item
 `purchase_price`, `credit_account_code`, `debit_account_code`, `units[].unit_price`; customer `credit_limit`,
-`discount`, `balance`, `id_number`; customer balance `balance`; voucher `customer_balance`; voucher summary
-`customer_balance_before`; customer price `price`, `discount`.
+`discount`, `balance`, `id_number`; customer balance `balance`; voucher `customer_balance` and
+`customer_balance_before`; voucher summary `customer_balance_before`; customer price `price`, `discount`.
 
 ### 2.6 Shamel identity and salesman scoping
 
@@ -294,7 +294,7 @@ Shamel entities are addressed by their **business codes** (customer code, item c
   1–64 characters, without control or bidi characters.
 - Codes that contain characters outside printable ASCII cannot be sent in upstream headers (Q48). For those, Bawaba
   performs the lookup as a full live list fetch plus an exact snapshot match; the result is identical, only slower.
-- The OpenAPI path-parameter pattern is `^(~[A-Za-z0-9_-]{2,88}|[A-Za-z0-9._-]{1,64})$`.
+- The OpenAPI path-parameter pattern is `^(~[A-Za-z0-9_-]{2,344}|[A-Za-z0-9._-]{1,64})$`.
 
 ### 4.3 Methods and status codes
 
@@ -475,6 +475,10 @@ always `application/json` (images on media routes).
 | `page.total` | Number of records in the token's view (after data scope, filters and search), counted over the whole snapshot. |
 | `sync` | Only on routes that support `updated_since` (§5.7). |
 | `summary` | Only on statement routes (§13): totals over the whole view, not just the page. |
+
+Lists of Bawaba-owned objects (approvals, access requests, webhooks, deliveries, pull events, `/v1/me/requests`) are
+served from PostgreSQL with durable keyset cursors, not snapshots: `snapshot_expires_at` is always `null`, `total` is
+absent, and a cursor stays valid as long as the records it points past exist (pull events: §17.6).
 
 ### 5.2 Paging parameters
 
@@ -1133,11 +1137,10 @@ Whether Shamel salesman-scopes items is unknown (Q17).
 `itm` maps exactly as §10.1; `itmStores` becomes:
 
 ```json
-"stock": {
-  "total_quantity": "143",
-  "main_unit": "عبوة",
-  "stores": [ { "store_id": 1, "quantity": "120", "shelf": "A-3" }, { "store_id": 4, "quantity": "23", "shelf": null } ]
-}
+{ "stock": {
+    "total_quantity": "143",
+    "main_unit": "عبوة",
+    "stores": [ { "store_id": 1, "quantity": "120", "shelf": "A-3" }, { "store_id": 4, "quantity": "23", "shelf": null } ] } }
 ```
 
 `stores[]` is filtered by store scope and `total_quantity` sums the visible rows (DS-4). Store names: §14.2.
@@ -1946,7 +1949,8 @@ Posts up to `api.batch.max_operations` (100) writes in one request. Shamel has n
     { "id": "op-1", "method": "POST", "path": "/v1/customers", "idempotency_key": "b7f0c2a4-cust-1",
       "body": { "name": "مؤسسة الأمل", "city_id": 2 } },
     { "id": "op-2", "method": "POST", "path": "/v1/vouchers/order", "idempotency_key": "b7f0c2a4-ord-1",
-      "body": { "customer_code": "C1001", "currency_code": "NIS", "rate": "1", "lines": [ … ] } }
+      "body": { "customer_code": "C1001", "currency_code": "NIS", "rate": "1",
+                "lines": [ { "item_code": "ITM-0001", "store_id": 1, "quantity": "6", "price": "38" } ] } }
   ]
 }
 ```
@@ -1955,7 +1959,7 @@ Posts up to `api.batch.max_operations` (100) writes in one request. Shamel has n
 |---|---|
 | Allowed operations | `POST` to the four write routes only; anything else → `422 validation_failed` (detail `not_allowed`) for the whole batch. |
 | Idempotency | Each operation **must** carry `idempotency_key` (same semantics as §15.2, same per-token namespace as the header). The batch request takes no `Idempotency-Key` header: resending a batch replays finished operations and executes the rest. |
-| Validation | All operations are validated (schema, scopes, data scope) before any executes; any failure → `422 validation_failed` with `details[].field` = `/operations/<i>/…`; nothing runs. |
+| Validation | All operations are validated (schema, scopes, data scope) before any executes; any failure → `422 validation_failed` with `details[].field` = `/operations/<i>/…`; nothing runs. Reference pre-checks (§15.7) run per operation at execution time, because an earlier operation may create the referenced record. |
 | Execution | Sequential; `stop_on_error=true` (default) marks the remaining operations `not_attempted` after the first failure. |
 | Deadline | If the request deadline would be exceeded, remaining operations are `not_attempted` with code `batch_deadline_exceeded`; resend the batch. |
 | Approval | For approval-required tokens the whole batch becomes **one** approval (`kind: "batch"`), answered `202`; on approval the executor runs it with the same rules and the approval `result` holds the per-operation results. |
@@ -1969,7 +1973,9 @@ Response `200` (the batch was processed; individual outcomes inside):
     "batch_id": "bat_01JC2R0M5W8E3N1K7H2P4Q6S9T",
     "results": [
       { "id": "op-1", "outcome": "completed", "status": 201, "body": { "data": { "code": "C2045", "write_id": "wrt_…" } } },
-      { "id": "op-2", "outcome": "completed", "status": 422, "body": { "error": { "code": "reference_not_found", "…": "…" } } }
+      { "id": "op-2", "outcome": "completed", "status": 422, "body": { "error": { "code": "reference_not_found", "message": "The request refers to a record that does not exist.",
+        "message_ar": "يشير الطلب إلى سجل غير موجود.", "request_id": "req_01JC2R0N…", "docs_url": "https://api.example.com/docs/errors/reference_not_found",
+        "details": [ { "field": "/lines/0/store_id", "code": "reference_not_found", "message": "Unknown record.", "message_ar": "سجل غير معروف." } ] } } }
     ]
   }
 }
@@ -2062,7 +2068,7 @@ time, not the business change time; worst-case latency is one poll interval plus
 `data` objects use the `/v1` encoders, so names, typo fixes, dates and decimals match the API exactly (05 §2.2).
 Subscriptions may narrow events with `filters`: `voucher_types`, `store_ids`, `customer_codes`, `item_codes`.
 
-`GET /v1/event-types` (any kind except publishable) returns the catalogue with `type`, `required_scopes`,
+`GET /v1/event-types` (any token kind) returns the catalogue with `type`, `required_scopes`,
 `description`, `description_ar` and `eligible` (whether the calling token holds the scopes).
 
 **Envelope**
@@ -2364,3 +2370,776 @@ item or voucher 15 s; balances, stock and reports 60 s; order status 30 s; appro
 single lookups by code → full lists.
 
 ---
+## 20. Legacy passthrough
+
+### 20.1 Model
+
+`/legacy/<Controller>/<Action>` accepts Shamel-style requests at Shamel's original paths, so an existing
+integration can migrate by changing its base URL and its authentication (00 §9). It is **opt-in per token**
+(`legacy.enabled` plus an endpoint allowlist on the token) and runs the same pipeline as `/v1` (01 §6.5): Bawaba
+token auth, scopes, data scope, field hiding, firewall, rate limits, coalescing and full audit. Responses are
+**rebuilt** from Bawaba's typed upstream structs, never relayed (02 OH-2). There is no pagination: a legacy list
+returns the whole (scoped) list, as Shamel does, bounded by `http.max_response_bytes`.
+
+### 20.2 Allowlist
+
+Matching is case-insensitive on the path; the canonical printed spelling (U §1) is used upstream. Methods follow the
+upstream method table, which is per-upstream configurable until verified live (Q4).
+
+| Legacy path | Method | Operation (§6) | Inputs read from the client | Scope | M |
+|---|---|---|---|---|---|
+| `/legacy/Files/GetCurrencies` | GET | `currencies.list` | – | `master_data:read` | M1 |
+| `/legacy/Files/GetCurrencyRates` | GET | `currency_rates.list` | – | `master_data:read` | M1 |
+| `/legacy/Files/GetBanks` | GET | `banks.list` | – | `master_data:read` | M1 |
+| `/legacy/Files/GetBanksBranchs` | GET | `bank_branches.list` | – | `master_data:read` | M1 |
+| `/legacy/Files/GetCities` | GET | `cities.list` | – | `master_data:read` | M1 |
+| `/legacy/Files/GetStores` | GET | `stores.list` | – | `master_data:read` | M1 |
+| `/legacy/Files/GetPriceClasses` | GET | `price_classes.list` | – | `master_data:read` | M1 |
+| `/legacy/Files/GetSalesmen` | GET | `salesmen.list` | – | `master_data:read` | M1 |
+| `/legacy/Customer/GetCustomers` | GET | `customers.list` | hdr `lastupdatedate`, `code`, `vatreg`, `getBalance`, `getStopped`, `getClassifications`, `getContacts`, `getAll` | `customers:read` | M1 |
+| `/legacy/Customer/GetCustomerBalances` | GET | `customer_balances.list` | hdr `customerCode`, `vatreg` | `customers:read` | M1 |
+| `/legacy/Customer/GetCustomerPricesAsRows` | GET | `customer_prices.list` | – | `customers:read` | M1 |
+| `/legacy/Item/GetItems` | GET | `items.list` | hdr `lastupdatedate`, `serial`, `itemCode`, `store`, `model` | `items:read` | M1 |
+| `/legacy/Item/GetItemsStores` | GET | `stock.list` | hdr `lastupdatedate`, `itemcode` | `stock:read` | M1 |
+| `/legacy/Item/getItemDetails` | GET | `items.get` (+ stock) | hdr `itemCode` | `items:read` + `stock:read` | M1 |
+| `/legacy/Item/GetItemsGroups` | GET | `item_groups.list` | – | `items:read` | M1 |
+| `/legacy/Item/GetItemsCatalog` | GET | `item_images.list` | – | `items:read` | M1 |
+| `/legacy/Item/GetItemsSerials` | GET | `item_serials.list` | hdr `customer`, `serial` | `items:read` | M1 |
+| `/legacy/Report/GetLastPriceReport` | GET | `reports.last_prices` | hdr `ItemCode`, `barcode` | `reports:read` | M1 |
+| `/legacy/Report/GetAccountsheet` | POST | `reports.account_statement` | form `obj` | `reports:read` | M1 |
+| `/legacy/Voucher/GetDelivery` | GET | `deliveries.prepared` | – | `vouchers:read` | M1 |
+| `/legacy/Voucher/GetStatus` | GET | `orders.status` | hdr `manual` | `vouchers:read` | M1 |
+| `/legacy/Voucher/GetVoucher` | GET | `vouchers.get` | hdr `voucher_code`, `getCustomerBalance` | `vouchers:read` | M1 |
+| `/legacy/Voucher/GetVouchers` | GET | `vouchers.list` | hdr `filters` (JSON), `getCustomerBalance` | `vouchers:read` | M1 |
+| `/legacy/Voucher/GetExtraVouchers` | GET | `voucher_summaries.list` | hdr `filters` (JSON), `getCustomerBalance` | `vouchers:read` | M1 |
+| `/legacy/CostCenter/GetCostCenterAccountsheet` | POST | `reports.cost_center_statement` | form `filters` | `reports:read` + `cost_centers:read` | M1 |
+| `/legacy/Customer/Post` | POST | `customers.create` | form `obj` | `customers:write` | M2 |
+| `/legacy/Item/Post` | POST | `items.create` | form `obj` | `items:write` | M2 |
+| `/legacy/Voucher/Post2` | POST | `vouchers.create` | form `obj`; type from `obj.header.type` | `vouchers:write:<type>` | M2 |
+| `/legacy/CostCenter/Post` | POST | `cost_centers.create` | form `obj` | `cost_centers:write` | M2 |
+| `/legacy/Main/Login` | – | never | – | – | `400 shamel_credentials_not_accepted` (§20.5) |
+| `/legacy/Voucher/Post` and anything else | – | never | – | – | `404 route_not_found` |
+
+### 20.3 Request handling
+
+- Path canonicalization, character class and no-query-string rule: 02 §11.3. Token not entitled → `403
+  legacy_not_enabled`.
+- Only the documented parameters of the endpoint are read; every value is validated by kind and re-emitted by the
+  header builder (02 §11.1). Booleans accept `true`/`false` case-insensitively; omitted means false.
+- `filters` (JSON header) and `obj`/`filters` (form) are decoded strictly into the upstream structs: names
+  case-insensitive (Shamel compatibility), unknown fields and duplicate keys rejected (02 §11.2). Form posts must be
+  `application/x-www-form-urlencoded` with exactly the one documented field.
+- `getAll` is forwarded only if the client sent it **and** the policy allows it (§2.6); otherwise it is dropped and
+  the response carries `Bawaba-Warning: parameter_ignored;name="getAll"`. A `getBalance` for hidden balances is
+  dropped with `fields_hidden`.
+- **Writes (M2):** the decoded struct gets the same voucher-type scope check (the type is read from
+  `obj.header.type`), code-prefix rule, per-type matrix and data-scope checks as `/v1`; Bawaba-owned fields are
+  overwritten (`system_id`, `voucher_code`/`name` cleared, `pos` must be `0…n−1` in order), and the struct is
+  re-serialized with the exact printed names. `Idempotency-Key` is optional on legacy writes (honoured with §15.2
+  semantics when sent); a token can make it mandatory with `legacy.require_idempotency_key`.
+- Tokens whose writes require approval cannot write through `/legacy` (`403 approval_not_supported_in_legacy`): a
+  Shamel-shaped client cannot represent a pending approval, and a silent `Success=false` would invite duplicates.
+
+### 20.4 Response encoding
+
+- Shamel shapes: bare JSON arrays or objects, Shamel field names and casing (as confirmed by live capture, Q46),
+  Shamel types (doubles as JSON numbers written from the exact decimal text, integer flags as integers, dates as
+  strings). `GetStatus` returns the status integer in the representation Shamel uses.
+- Data scope removes rows; hidden fields are omitted; upstream fields Bawaba does not know never appear.
+- The decoder records presence, so `null`, `""` and absent properties are re-emitted as Shamel sent them (unlike
+  `/v1`, which folds them into `null`, §4.8).
+- `ItemCatalog.image_path` is replaced by the absolute presigned media URL (§10.6) or `null` when media is disabled.
+- Bawaba headers apply: `Bawaba-Request-Id`, `Bawaba-Environment`, `RateLimit-*`, `Bawaba-Warning`.
+- Legacy and `/v1` requests that produce the same upstream call for the same identity share coalesced fetches.
+
+### 20.5 Errors and `/Main/Login`
+
+| Situation | Legacy response |
+|---|---|
+| Authentication, authorization, firewall, rate limit, validation of reads, upstream unavailable/busy/timeout/error | the real status with the **Bawaba error envelope** (Shamel's clients already treat any non-200 as failure) |
+| Write rejected for business reasons (`validation_failed`, `reference_not_found`, `voucher_code_*`, `journal_not_balanced`, `upstream_rejected`, `duplicate_code`) | `200` with **Shamel's result shape** and `Success: false`, so clients that check `Success` keep working. `ErrorMessage` (string or string array, per endpoint, Q3) = `"bawaba:<code> <English catalogue message> (<request_id>)"`; `value` / `refrenceId` = `null`. Never Shamel's text. |
+| Write succeeded | `200` with Shamel's result shape (`Success: true`, `value` or `refrenceId`) |
+| `/legacy/Main/Login` | `400 shamel_credentials_not_accepted`; the body is neither parsed nor stored (audit keeps metadata with `body_redacted`); owner alerted that Shamel credentials may be exposed |
+| Shamel `username`, `token` or `password` headers on any legacy route | `400 shamel_credentials_not_accepted` + owner alert (02 §11.3, LV-28) |
+
+**Login decision: reject, do not stub.** A stub returning a dummy token would keep old clients running unchanged,
+but it would also keep them sending Shamel passwords across the internet to an endpoint that accepts them, and it
+would hide the migration. Rejecting is explicit and the error message tells the integrator what to do: delete the
+login call and send `Authorization: Bearer bwb_…`.
+
+```http
+# before (direct to Shamel)                      # after (through Bawaba)
+GET /Item/GetItemsStores HTTP/1.1                 GET /legacy/Item/GetItemsStores HTTP/1.1
+Host: <shamel-host>                               Host: api.example.com
+username: <shamel-user>                           Authorization: Bearer bwb_live_<token>
+token: <session-token from /Main/Login>           itemcode: ITM-0001
+itemcode: ITM-0001
+```
+
+The legacy reference (`api/openapi/bawaba.legacy.yaml`) is served at `/docs/legacy/openapi.json` only to bearer
+tokens with legacy enabled (02 LV-13).
+
+---
+
+## 21. Sandbox
+
+### 21.1 Routing and contract
+
+`bwb_test_` and `bwb_pk_test_` tokens are routed to `bawaba-mock` (embedded by default, 01 §11); a test token can
+never reach a live upstream (01 S9). The **contract is identical**: same routes, schemas, validation, scopes, data
+scopes, field hiding, idempotency, approvals, webhooks, errors, rate limits and audit. Every authenticated response
+carries `Bawaba-Environment: sandbox` (live tokens: `Bawaba-Environment: live`), and webhook envelopes carry
+`"environment": "sandbox"`. If the owner disabled the sandbox, test tokens get `503 sandbox_disabled`.
+
+### 21.2 Data and writes
+
+- Deterministic synthetic data from `sandbox.seed` and `sandbox.dataset_version` (Arabic names, realistic codes,
+  24 months of vouchers of every type, consistent balances and statements, 01 §11). Same version ⇒ same data, so
+  agents can write stable assertions. `GET /v1/me` reports `sandbox.dataset_version`.
+- Writes are applied to an overlay namespace (default: per token, 7-day TTL) and are visible to that namespace's
+  later reads; the owner resets it with `bawaba sandbox reset --token tok_…`.
+- Media returns synthetic placeholder images; webhooks receive generated activity (05 §2.8).
+
+### 21.3 Fault injection: `Bawaba-Mock-Scenario`
+
+Honoured only for test tokens (stripped for live tokens). One value per request:
+
+| Value | Effect seen by the client |
+|---|---|
+| `slow` | +3 s upstream latency |
+| `timeout` | reads: `504 upstream_timeout`; writes: `504 write_outcome_unknown` |
+| `upstream_error` | `502 upstream_error` |
+| `unavailable` | `503 upstream_unavailable` |
+| `busy` | `503 upstream_busy` + `Bawaba-Warning: upstream_saturated` |
+| `auth_expired` | the mock expires the session; Bawaba re-logs in transparently (the client sees success) |
+| `rejected` | writes: `422 upstream_rejected` |
+| `outcome_unknown` | writes: `504 write_outcome_unknown` while the overlay records the write, to practise reconciliation |
+| `approve_after_10s`, `reject_after_10s` | approval-held writes resolve automatically (sandbox approvals only) |
+| `snapshot_expire` | the next cursor read of this view returns `409 snapshot_expired` |
+
+(This extends the list in 01 §11 with `unavailable`, `rejected`, `outcome_unknown`, the approval and snapshot
+values.)
+
+### 21.4 Exhaustive differences from live
+
+Data source and overlay; `Bawaba-Environment: sandbox`; `Server-Timing` stage timings on responses (live tokens
+never get it, 01 §10.3); `Bawaba-Mock-Scenario`; placeholder media; generated webhook activity; `http://` webhook
+targets for allowlisted hosts; the `sandbox` object in `/v1/me`. Promotion to production is a token swap
+(`bwb_test_` → `bwb_live_` with the same policy); no code change.
+
+---
+
+## 22. Errors
+
+### 22.1 Envelope
+
+```json
+{
+  "error": {
+    "code": "validation_failed",
+    "message": "The request failed validation. See details.",
+    "message_ar": "فشل التحقق من صحة الطلب. راجع التفاصيل.",
+    "request_id": "req_01JC2S4B6N8M0K2J4H6G8F0D2S",
+    "docs_url": "https://api.example.com/docs/errors/validation_failed",
+    "details": [
+      { "field": "/lines/0/quantity", "code": "out_of_range",
+        "message": "Must be greater than 0.", "message_ar": "يجب أن تكون القيمة أكبر من صفر." }
+    ]
+  }
+}
+```
+
+| Field | Rule |
+|---|---|
+| `code` | stable snake_case catalogue code (open enum, §3.2) |
+| `message`, `message_ar` | static catalogue text; never contain client values (02 LV-19) or upstream text (02 OH-3) |
+| `request_id` | equals `Bawaba-Request-Id` |
+| `docs_url` | `https://<public-host>/docs/errors/<code>` (bilingual page) |
+| `details` | optional array. `field` is a JSON Pointer into the body, or `query:<name>`, `path:<name>`, `header:<name>`; `code` is a detail code; optional `scope` (missing atom) or `param`. |
+
+**Several problems.** Bawaba reports every problem it finds in one response. Body decoding problems (`unknown_field`,
+`duplicate_key`, `invalid_type`) are reported first as `400 invalid_request`; semantic problems as `422`. A specific
+top-level code (`voucher_code_prefix_invalid`, `journal_not_balanced`, `reference_not_found`, …) is used only when it
+is the sole problem; otherwise the top-level code is `validation_failed` and each problem is a `details` entry.
+
+Detail codes: `required`, `unknown_field`, `duplicate_key`, `invalid_type`, `invalid_format`, `invalid_enum`,
+`out_of_range`, `too_long`, `too_many_items`, `not_allowed`, `must_match_prefix`, `mismatch`, `unbalanced`,
+`missing_scope`, `field_hidden`, `missing_manual_code`, `not_an_order`, `reference_not_found`, plus the
+`exceeds_own_grant` violation codes (§18.3).
+
+### 22.2 Catalogue
+
+"Retry" refers to §19.
+
+| Code | HTTP | English message | Arabic message | When | Retry |
+|---|---|---|---|---|---|
+| `invalid_request` | 400 | The request is malformed. | الطلب غير صالح من حيث الصياغة. | bad JSON, unknown body field, duplicate key, bad header value, unclean path | no |
+| `unknown_parameter` | 400 | Unknown or repeated query parameter. | معامل استعلام غير معروف أو مكرر. | parameter not allowlisted for the route, or repeated | no |
+| `invalid_cursor` | 400 | The cursor is not valid for this request. | مؤشر الصفحات غير صالح لهذا الطلب. | tampered cursor, other token/route/query | no |
+| `token_in_url` | 400 | Access tokens must not be sent in the URL. | يجب عدم إرسال رمز الوصول ضمن عنوان URL. | token-shaped string in path or query | no |
+| `shamel_credentials_not_accepted` | 400 | Accounting-system credentials are not accepted. Authenticate with a Bawaba token in the Authorization header. | لا تُقبل بيانات اعتماد النظام المحاسبي. استخدم رمز وصول Bawaba في ترويسة Authorization. | `/legacy/Main/Login`; Shamel credential headers on `/legacy` | no |
+| `idempotency_key_required` | 400 | This write requires an Idempotency-Key header. | عملية الكتابة هذه تتطلب ترويسة Idempotency-Key. | Shamel write without the header | no |
+| `unauthenticated` | 401 | Authentication required. Send the access token in the Authorization header. | المصادقة مطلوبة. أرسل رمز الوصول في ترويسة Authorization. | no `Authorization` header | no |
+| `invalid_token` | 401 | The access token is invalid. | رمز الوصول غير صالح. | malformed, unknown, revoked, suspended; bad media signature | no |
+| `token_expired` | 401 | The access token has expired. | انتهت صلاحية رمز الوصول. | past `expires_at` | no |
+| `ip_blocked` | 403 | Requests from this address are not allowed. | الطلبات من هذا العنوان غير مسموح بها. | ban, global or token IP rule | no |
+| `origin_not_allowed` | 403 | This origin is not allowed to use this token. | هذا المصدر (Origin) غير مسموح له باستخدام رمز الوصول هذا. | publishable token from an unlisted origin | no |
+| `secret_token_in_browser` | 403 | Secret tokens must not be used from a browser. Use a publishable token. | لا يجوز استخدام رمز وصول سري من المتصفح. استخدم رمزًا قابلًا للنشر. | non-publishable token with `Origin` | no |
+| `insufficient_scope` | 403 | The token lacks a permission required for this operation. | رمز الوصول لا يملك صلاحية مطلوبة لهذه العملية. | missing scope atom (`details[].scope`) | no |
+| `token_kind_not_allowed` | 403 | This kind of token cannot perform this operation. | لا يمكن لهذا النوع من رموز الوصول تنفيذ هذه العملية. | publishable writing or using webhooks; non-agent access request | no |
+| `legacy_not_enabled` | 403 | Legacy access is not enabled for this token or endpoint. | الوصول القديم (legacy) غير مفعّل لهذا الرمز أو لهذه النقطة. | §20 | no |
+| `exceeds_own_grant` | 403 | The request asks for more than this agent token holds. | الطلب يتجاوز الصلاحيات التي يملكها رمز الوكيل نفسه. | subset rule (§18.3) | no |
+| `data_scope_filter_required` | 403 | Your token's data scope requires an additional filter on this endpoint. | نطاق بيانات رمز الوصول يتطلب عامل تصفية إضافيًا لهذه النقطة. | DS-7 (`details[].param`) | no |
+| `data_scope_unsupported` | 403 | This endpoint is not available under your token's data scope. | هذه النقطة غير متاحة ضمن نطاق بيانات رمز الوصول الخاص بك. | DS-7 | no |
+| `approval_not_supported_in_legacy` | 403 | Writes that require approval are not available on the legacy interface. Use /v1. | عمليات الكتابة التي تتطلب موافقة غير متاحة عبر الواجهة القديمة. استخدم ‎/v1. | §20.3 | no |
+| `not_found` | 404 | The resource was not found. | المورد غير موجود. | missing or outside the data scope | no |
+| `route_not_found` | 404 | No such route. | المسار غير موجود. | unknown route (after authentication) | no |
+| `method_not_allowed` | 405 | This HTTP method is not allowed on this route. | طريقة HTTP هذه غير مسموح بها على هذا المسار. | §4.3 | no |
+| `snapshot_expired` | 409 | The data snapshot for this cursor has expired. Start again from the first page. | انتهت صلاحية لقطة البيانات الخاصة بهذا المؤشر. ابدأ من الصفحة الأولى. | cursor after TTL or eviction | restart |
+| `cursor_invalidated` | 409 | The token's permissions changed and this cursor is no longer valid. Start again from the first page. | تغيّرت صلاحيات رمز الوصول ولم يعد هذا المؤشر صالحًا. ابدأ من الصفحة الأولى. | policy version changed (DS-9) | restart |
+| `cursor_expired` | 409 | This cursor is older than the retention period. | هذا المؤشر أقدم من مدة الاحتفاظ بالبيانات. | pull-events cursor beyond retention | restart |
+| `idempotency_conflict` | 409 | This Idempotency-Key was already used with a different request. | استُخدم مفتاح Idempotency-Key هذا من قبل مع طلب مختلف. | §15.2 | no |
+| `request_in_progress` | 409 | A request with this Idempotency-Key is still being processed. | ما زال طلب بمفتاح Idempotency-Key نفسه قيد المعالجة. | §15.2 | yes, same key |
+| `approval_not_pending` | 409 | This request is no longer pending. | هذا الطلب لم يعد قيد الانتظار. | cancel of a non-pending approval or access request | no |
+| `secret_already_claimed` | 409 | The secret was already retrieved or the retrieval period has ended. | تم استلام السر مسبقًا أو انتهت مدة استلامه. | §18.3 | no |
+| `delivery_not_retryable` | 409 | This delivery cannot be retried in its current state. | لا يمكن إعادة محاولة هذا التسليم في حالته الحالية. | §17.5 | no |
+| `duplicate_code` | 409 | The code already exists in the accounting system. | الرمز موجود مسبقًا في النظام المحاسبي. | mapped Shamel rejection (§22.3) | no |
+| `payload_too_large` | 413 | The request body is too large. | حجم جسم الطلب أكبر من المسموح. | §4.10 | no |
+| `uri_too_long` | 414 | The request URL is too long. | عنوان URL للطلب أطول من المسموح. | 02 §10.6 | no |
+| `unsupported_media_type` | 415 | Unsupported content type. Use application/json. | نوع المحتوى غير مدعوم. استخدم application/json. | §4.10 | no |
+| `headers_too_large` | 431 | The request headers are too large. | ترويسات الطلب أكبر من المسموح. | 02 §10.6 | no |
+| `validation_failed` | 422 | The request failed validation. See details. | فشل التحقق من صحة الطلب. راجع التفاصيل. | semantic validation (`details`) | no |
+| `upstream_rejected` | 422 | The accounting system rejected the operation. | رفض النظام المحاسبي العملية. | `Success=false` or rejection without a mapped code | no |
+| `result_too_large` | 422 | The result is too large. Narrow it with filters. | النتيجة كبيرة جدًا. ضيّقها باستخدام عوامل التصفية. | snapshot above `pagination.snapshot_max_bytes` | no |
+| `date_range_too_large` | 422 | The date range exceeds the allowed maximum. | نطاق التاريخ يتجاوز الحد المسموح. | §12.2, §13 | no |
+| `reference_not_found` | 422 | The request refers to a record that does not exist. | يشير الطلب إلى سجل غير موجود. | write references a missing or out-of-scope entity (DS-8) | no |
+| `voucher_code_prefix_invalid` | 422 | The voucher code must start with the letter assigned to this voucher type. | يجب أن يبدأ رقم السند بالحرف المخصص لنوع السند. | §15.7 | no |
+| `voucher_code_not_allowed` | 422 | A voucher code cannot be supplied for this voucher type. | لا يمكن تحديد رقم السند لهذا النوع من السندات. | `purchase_delivery` | no |
+| `journal_not_balanced` | 422 | Total debits must equal total credits in a journal voucher. | يجب أن يساوي مجموع المدين مجموع الدائن في سند القيد. | §15.7 | no |
+| `voucher_feature_unavailable` | 422 | This voucher feature is not configured on this server. | هذه الميزة من ميزات السندات غير مهيأة على هذا الخادم. | `accounts[].side` without a configured mapping | no |
+| `webhook_target_not_allowed` | 422 | This webhook URL is not allowed. | عنوان استقبال الإشعارات (webhook) هذا غير مسموح به. | §17.3 | no |
+| `subscription_limit_reached` | 422 | The maximum number of webhook subscriptions for this token has been reached. | تم بلوغ الحد الأقصى لاشتراكات الإشعارات (webhook) لهذا الرمز. | §17.3 | no |
+| `batch_too_large` | 422 | The batch contains too many operations. | تحتوي الدفعة على عدد عمليات أكبر من المسموح. | §15.8 | no |
+| `rate_limited` | 429 | Rate limit exceeded. Retry after the time given in Retry-After. | تم تجاوز حد معدل الطلبات. أعد المحاولة بعد المدة المحددة في Retry-After. | per-token or pre-auth limit | yes |
+| `access_request_limit_reached` | 429 | Too many access requests. Wait for pending requests to be decided. | طلبات الوصول كثيرة جدًا. انتظر البت في الطلبات المعلّقة. | 20 pending / 50 per day | later |
+| `internal_error` | 500 | An internal error occurred in Bawaba. | حدث خطأ داخلي في Bawaba. | Bawaba bug (no detail) | once |
+| `upstream_error` | 502 | The accounting system could not complete the request. | تعذّر على النظام المحاسبي إتمام الطلب. | unclassified upstream failure, bad response, credential problem (02 §5.6) | reads once |
+| `upstream_response_too_large` | 502 | The accounting system's response exceeded the size limit. | تجاوزت استجابة النظام المحاسبي الحد المسموح للحجم. | above `upstream.max_response_bytes` | no |
+| `upstream_unavailable` | 503 | The accounting system is currently unreachable. | يتعذّر الوصول إلى النظام المحاسبي حاليًا. | no tunnel, breaker open, connect failure | yes |
+| `upstream_busy` | 503 | The accounting system is busy. Retry shortly. | النظام المحاسبي مشغول. أعد المحاولة بعد قليل. | upstream queue full or timed out | yes |
+| `service_unavailable` | 503 | The service is temporarily unavailable. | الخدمة غير متاحة مؤقتًا. | lockdown, stale policy (02 §16) | yes |
+| `pagination_unavailable` | 503 | Paged results are temporarily unavailable. | النتائج المجزأة إلى صفحات غير متاحة مؤقتًا. | view could not be stored (01 S14) | yes |
+| `audit_unavailable` | 503 | The audit log is unavailable, so the request was not executed. | سجل التدقيق غير متاح، لذلك لم يُنفَّذ الطلب. | audit fail-closed (01 S16, §6.4) | yes |
+| `idempotency_unavailable` | 503 | Idempotency records are temporarily unavailable. The write was not executed. | سجلات منع التكرار غير متاحة مؤقتًا. لم تُنفَّذ عملية الكتابة. | §15.2 | yes, same key |
+| `sandbox_disabled` | 503 | The sandbox is disabled on this server. | بيئة التجربة معطّلة على هذا الخادم. | test token while `sandbox.mode=disabled` | no |
+| `upstream_timeout` | 504 | The accounting system did not respond in time. | لم يستجب النظام المحاسبي في الوقت المحدد. | read deadline exceeded | reads once |
+| `write_outcome_unknown` | 504 | The write was sent but no reply arrived in time; its outcome is unknown. Do not resend with a new Idempotency-Key. | أُرسلت عملية الكتابة ولم يصل رد في الوقت المحدد؛ نتيجتها غير معروفة. لا تُعِد الإرسال بمفتاح Idempotency-Key جديد. | timeout after send (01 §6.4) | same key only |
+
+Batch-only result code (inside `results[]`, not an HTTP error): `batch_deadline_exceeded` — "Not attempted: the batch
+ran out of time. Resend the batch." / "لم تُنفَّذ: انتهى وقت الدفعة. أعد إرسال الدفعة."
+
+The catalogue lives in `api/openapi/errors.yaml` (code, status, messages, retry class) and generates the Go `apierr`
+constants, the OpenAPI error responses and the `/docs/errors/<code>` pages, so the three can never drift.
+
+### 22.3 Mapping Shamel rejections
+
+Shamel reports failures as HTTP 500 or `Success=false` with free text (Q1–Q3). The upstream classifier (02 §5.6)
+matches curated, fixture-tested patterns and may return only catalogue codes, initially: `duplicate_code` (409),
+`reference_not_found` (422, with `details[].field` when the pattern identifies the field) and `validation_failed`
+(422). Everything unmatched becomes `upstream_rejected` (writes) or `upstream_error` (reads). Shamel's text goes to
+the encrypted audit log only.
+
+---
+
+## 23. Response headers, rate limits, warnings and CORS
+
+### 23.1 Response headers
+
+| Header | When | Value |
+|---|---|---|
+| `Bawaba-Request-Id` | every response, including errors, preflight and media | `req_…`, opaque; quote it in support requests |
+| `Bawaba-Environment` | every authenticated response | `live` or `sandbox` |
+| `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` | every authenticated response | §23.3 |
+| `Retry-After` | `429`, `503`, `409 request_in_progress` | seconds |
+| `Bawaba-Warning` | advisory conditions | §23.4 |
+| `Bawaba-Idempotent-Replay` | replayed write responses | `true` |
+| `Location` | `201`, `202` | relative URL of the created resource or approval |
+| `Deprecation`, `Sunset` | deprecated operations or parameters used | §3.5 |
+| `Server-Timing` | sandbox only | stage timings |
+| `Content-Type` | always | `application/json; charset=utf-8` (images on media) |
+| `Cache-Control` | always | `no-store` (`private, no-store` on media) |
+| `Content-Encoding`, `Vary` | compressed responses, CORS | `gzip`/`zstd`; `Accept-Encoding`, `Origin` |
+| Security headers | always | as 02 §10.7 (`X-Content-Type-Options`, CSP, `Referrer-Policy`, CORP, HSTS) |
+| CORS headers | publishable tokens from an allowed origin | §23.5 |
+
+No `Server`, `ETag`, `Last-Modified` or upstream-derived header is ever sent. `Bawaba-Environment`,
+`Bawaba-Idempotent-Replay`, `Location`, `Deprecation`, `Sunset` and `Server-Timing` must be added to the response
+header allowlist (`internal/httpx/respheaders.go`, 02 §10.7).
+
+### 23.2 Request ids
+
+`Bawaba-Request-Id` is generated by Bawaba for every request, appears in the error body and in `/v1/me/requests`, and
+links to the full audit record for the owner. Client-supplied ids go in `Bawaba-Client-Request-Id` and are recorded,
+never used as the request id.
+
+### 23.3 Rate limits
+
+Per-token GCRA limits evaluated in one Valkey round trip (01 S6). Defaults are generous and adjustable per token
+(00 §8); they are runtime settings (`limits.defaults.<kind>`):
+
+| Bucket | `tool` | `agent` | `publishable` |
+|---|---|---|---|
+| reads (requests per 60 s, burst) | 1200, 300 | 600, 150 | 600, 150 per token and 120 per token per client IP |
+| writes (requests per 60 s, burst) | 60, 20 | 60, 20 | – |
+
+- **Cost:** 1 unit per request, including cursor pages; combined endpoints cost the number of upstream sub-calls
+  actually made (maximum in `x-bawaba-cost`); a batch costs its number of operations in the writes bucket.
+- **Headers** describe the bucket the route consumes: `RateLimit-Limit` = units per 60 s window,
+  `RateLimit-Remaining` = units available now (floor), `RateLimit-Reset` = seconds until the bucket is full again
+  (ceil). They never describe the global upstream cap (02 LV-22).
+- **Exceeded:** `429 rate_limited` with `Retry-After`. Ignoring `Retry-After` produces `retry_too_fast` warnings and
+  can lead to an IP ban (02 §10.3).
+- **Upstream saturation is not a rate limit:** it surfaces as `503 upstream_busy` + `Bawaba-Warning:
+  upstream_saturated`.
+- The pre-authentication per-IP limiter (02 §10.4) answers `429` without `RateLimit-*` headers.
+
+### 23.4 `Bawaba-Warning`
+
+An RFC 9651 structured-field **List** of tokens with parameters, at most 3 per response (most important first). The
+request is still served. Each code is documented at `/docs/warnings/<code>`. Warnings never contain client or
+upstream text, so agents can trust them as platform signals (02 §13.4).
+
+```http
+Bawaba-Warning: polling_too_frequent;observed=8;recommended=60, use_webhooks;events="customer.created customer.updated"
+```
+
+| Code | Emitted when | Parameters |
+|---|---|---|
+| `polling_too_frequent` | same token + operation + query repeated faster than `x-bawaba-poll-interval` ≥ 5 times | `observed`, `recommended` (s) |
+| `use_webhooks` | with tight polling or repeated full-list walks on a resource that has events | `events` |
+| `use_updated_since` | repeated full customer/item/stock lists | `param` |
+| `use_cursor_snapshot` | page 1 re-requested within the TTL while the previous `next_cursor` was unused | `ttl` |
+| `large_unfiltered_request` | snapshot > 5,000 records without any filter | `records` |
+| `duplicate_request` | ≥ 3 identical requests within 2 s | `count`, `window` |
+| `retry_too_fast` | request before a previous `Retry-After` elapsed | `retry_after` |
+| `repeated_error` | the same request produced the same `4xx` ≥ 20 times in a minute | `count` |
+| `upstream_saturated` | upstream queue saturated | – |
+| `partial_result` | an optional section of a combined endpoint failed | `missing` |
+| `deprecated` | deprecated operation or parameter used | `sunset` |
+| `token_expiring` | token expires within 7 days | `expires_at` |
+| `fields_hidden` | `fields=` or `include=` asked for fields hidden by policy | `fields` |
+| `parameter_ignored` | a legacy parameter was not forwarded by policy (§20.3) | `name` |
+
+Detection heuristics, scoring and owner escalation are owned by 05 §4.3; `fields_hidden` and `parameter_ignored` are
+API additions to the 05 §4.2 list.
+
+### 23.5 CORS (publishable tokens only)
+
+- **Preflight** (`OPTIONS`, no token by nature): allowed only if `Origin` is in the union of all active publishable
+  tokens' origins; answered `204` with `Access-Control-Allow-Origin: <that origin>`, `Vary: Origin`,
+  `Access-Control-Allow-Methods: GET`, `Access-Control-Allow-Headers: Authorization, Content-Type,
+  Bawaba-Client-Request-Id`, `Access-Control-Max-Age: 600`. Other origins: `403` without CORS headers.
+- **Actual request:** `Origin` must be in **this** token's list (1–10 exact origins), else `403 origin_not_allowed`.
+  Responses (errors included) carry `Access-Control-Allow-Origin: <origin>`, `Vary: Origin` and
+  `Access-Control-Expose-Headers: Bawaba-Request-Id, Bawaba-Environment, Bawaba-Warning, RateLimit-Limit,
+  RateLimit-Remaining, RateLimit-Reset, Retry-After`.
+- Never `*`, never `Access-Control-Allow-Credentials`, no cookies. Non-publishable tokens with `Origin` →
+  `403 secret_token_in_browser`.
+- Presigned media URLs work in `<img>` without CORS (`Cross-Origin-Resource-Policy: cross-origin`).
+- An origin lock does not stop non-browser clients that forge `Origin`; publishable tokens are public by design
+  (02 §10.7) and must carry only data the owner accepts as public.
+
+---
+## 24. OpenAPI 3.1, code generation and documentation
+
+### 24.1 Design-first
+
+The OpenAPI document is the **source of truth** for the public contract. Every API change starts as a spec change
+in review; handlers, decoders, encoders, the error catalogue, the client and the docs are generated from it. The
+upstream translation (§8–§15 "Upstream" blocks) is deliberately **not** in the spec: it lives in hand-written plans
+(`internal/ops/plans`) so the public document cannot leak upstream names (02 LV-13).
+
+### 24.2 Repository layout
+
+```
+api/openapi/
+  bawaba.v1.yaml            root: info, servers, security, tags, paths, webhooks
+  components/
+    schemas/                one file per resource (customer.yaml, item.yaml, voucher.yaml, approval.yaml, …)
+    parameters.yaml         limit, cursor, sort, q, fields, include, updated_since, code path parameter
+    headers.yaml            RateLimit-*, Bawaba-Request-Id, Bawaba-Environment, Bawaba-Warning, Idempotency-Key
+    responses.yaml          error responses (generated from errors.yaml)
+  errors.yaml               error catalogue (§22.2): code, status, en, ar, retry class
+  warnings.yaml             warning catalogue (§23.4)
+  events.yaml               event catalogue (§17.2)
+  i18n/ar.yaml              Arabic summaries and descriptions keyed by operationId and schema pointer
+  examples/                 generated request/response pairs (§24.6), never hand-written, never real captures
+  released/                 frozen copies of released contract versions (breaking-change baseline)
+  bawaba.legacy.yaml        legacy reference (served only to legacy-enabled tokens)
+  .spectral.yaml            lint ruleset
+```
+
+### 24.3 Spec conventions
+
+- `openapi: 3.1.0` (JSON Schema 2020-12); nullable fields as `type: [string, "null"]`.
+- `servers: [{url: "https://{host}/v1", variables: {host: {default: "api.example.com"}}}]` — never a real host.
+- `components.securitySchemes.bearer`: `{type: http, scheme: bearer, bearerFormat: "bwb_…"}`, applied globally;
+  presigned media is documented with an alternative `apiKey`-in-query scheme for `sig`.
+- `operationId` = operation id (§6); tags: `master-data`, `customers`, `items`, `stock`, `vouchers`, `reports`,
+  `writes`, `approvals`, `webhooks`, `self-service`.
+- Decimals: `type: string`, `format: decimal`, the §4.6 pattern, `x-bawaba-decimal-kind: money|quantity|rate|percent`.
+  Dates `format: date`, timestamps `format: date-time`.
+- Event payloads in the top-level 3.1 `webhooks:` section, one entry per event type, with the `Bawaba-Signature`
+  header documented.
+- Bawaba extensions:
+
+| Extension | On | Purpose |
+|---|---|---|
+| `x-bawaba-scopes`, `x-bawaba-kinds` | operation | required scope atoms, allowed token kinds |
+| `x-bawaba-milestone` | operation | `M1`/`M2`/`M3` |
+| `x-bawaba-snapshot`, `x-bawaba-poll-interval`, `x-bawaba-webhook-events` | operation | AI guidance (05 §4.6) |
+| `x-bawaba-cost` | operation | maximum rate-limit units |
+| `x-bawaba-errors`, `x-bawaba-warnings` | operation | codes the operation can return |
+| `x-bawaba-filters`, `x-bawaba-sort`, `x-bawaba-search-fields`, `x-bawaba-include` | operation | allowlists |
+| `x-bawaba-pushdown` | parameter | filter evaluated by the upstream (cheaper) |
+| `x-bawaba-sensitive`, `x-bawaba-hideable`, `x-bawaba-provisional`, `x-bawaba-dimension` | schema property | field hiding catalogue, provisional status, data-scope dimension (`store`, `salesman`, `customer`, `currency`, `price_class`) |
+| `x-bawaba-open-enum` | schema | enum may grow (§3.2) |
+
+### 24.4 Code generation in Go
+
+**Decision: an in-house generator, `cmd/bawaba-apigen`, built on `github.com/pb33f/libopenapi` (OpenAPI 3.1
+parsing) and `text/template`.**
+
+| Option | Assessment |
+|---|---|
+| `oapi-codegen` | Mature, but its generated code relies on reflection-based JSON, has no notion of field masks, scopes or data-scope dimensions, and its 3.1 support is partial. |
+| `ogen` | Fast generated encoders, but it owns routing and validation and would have to be bent around the fixed pipeline (01 §6.3). |
+| **In-house generator (chosen)** | Emits exactly what the pipeline needs (route table, strict decoders, masked encoders, metadata) with no runtime reflection (01 §10.2). Cost: a few thousand lines of generator code, covered by golden-file tests. |
+
+Generated into `internal/api/gen/` (committed, `// Code generated … DO NOT EDIT.`):
+
+1. **Routes** — method + `ServeMux` pattern → operation id.
+2. **Operation metadata** — scopes, kinds, snapshot flag, poll interval, cost, allowlists; merged with
+   `internal/ops/plans` into the registry (01 §6.1). A test asserts a 1:1 match between spec operations and plans.
+3. **Request types and strict decoders** — typed query structs with pattern, range and enum validation; JSON bodies
+   with `encoding/json/v2` semantics (02 §10.5); decimals into an exact decimal type.
+4. **Resource types and encoders** — `AppendJSON(dst []byte, mask FieldMask) []byte` per schema, field catalogues
+   (mask bit positions) and dimension maps.
+5. **Catalogues** — `apierr` constants from `errors.yaml`, warning codes, event types.
+6. **Go client** — `pkg/bawabaclient`, used by the `bawaba` CLI's agent-mode commands and by integration tests.
+7. **Docs inputs** — reference pages and the reference part of `llms-full.txt`.
+
+`go generate ./...` runs the generator; CI fails if the working tree differs afterwards. External tool authors can
+use any OpenAPI 3.1 generator (the docs recommend `openapi-typescript` for TypeScript types), because the spec uses
+only standard constructs plus `x-` extensions.
+
+### 24.5 Documentation rendering
+
+- `cmd/bawaba-docs` builds a static site at release time from `docs/product/{en,ar}/` (guides in Markdown) and the
+  bundled spec; it is embedded in the binary (`embed.FS`) and served under `/docs` with no runtime CDN. Arabic pages
+  use `lang="ar" dir="rtl"`; every HTML page has a Markdown twin (05 §4.6).
+- The interactive reference is a vendored, version-pinned copy of Scalar API Reference reading
+  `/docs/v1/openapi.en.json` or `/docs/v1/openapi.ar.json` (the Arabic file overlays `i18n/ar.yaml`). Its "try it"
+  feature is **disabled**: a secret token used from the docs page would be refused (`secret_token_in_browser`) and
+  should not be pasted into a browser anyway; every operation shows `curl` examples instead.
+- Paths: `/docs/en/…`, `/docs/ar/…`, `/docs/v1/openapi.{en,ar}.json`, `/docs/llms.txt` (alias `/llms.txt`),
+  `/docs/llms-full.txt`, `/docs/errors/<code>`, `/docs/warnings/<code>`, `/docs/events/<type>`, `/docs/changelog`,
+  `/docs/legacy/openapi.json` (bearer token with legacy enabled).
+- `docs.public` (default `true`); when `false`, `/docs` requires any valid token. The upstream is always called
+  `docs.backend_display_name` (default "accounting system"), never by product name (02 LV-13).
+
+### 24.6 Examples, linting and contract tests
+
+- **Examples** are produced by `make examples`: a Go test boots the gateway with the embedded mock (fixed seed, fake
+  clock, deterministic id generator), performs every documented request with test tokens and writes the pairs to
+  `api/openapi/examples/`. Every operation has at least one success and one error example.
+- **Lint** (Spectral, `.spectral.yaml`): snake_case properties and parameters, kebab-case path segments, required
+  Bawaba extensions present, Arabic summary present, decimals declared as `format: decimal`, list operations use the
+  list envelope, writes declare `Idempotency-Key`, and a forbidden-marker scan (upstream paths, Shamel field
+  spellings such as `parice`/`orgnization`/`refrenceId`, the product name, private IP patterns).
+- **Contract tests**: every response in the integration suite is validated against the spec with
+  `pb33f/libopenapi-validator`; fuzzers (02 §18.2) derive inputs from the spec.
+- **Breaking-change gate**: `oasdiff breaking` between the latest file in `released/` and HEAD fails CI on any
+  breaking change under `/v1` (§3.3).
+
+---
+
+## 25. Full examples
+
+Values come from the sandbox dataset; tokens are placeholders.
+
+### 25.1 Arabic search with cursor pagination
+
+```http
+GET /v1/customers?q=%D9%86%D9%88%D8%B1&include=balance&limit=2&fields=code,name,city_name,salesman_code,balance HTTP/1.1
+Host: api.example.com
+Authorization: Bearer bwb_test_<token>
+Accept-Encoding: gzip
+```
+
+`q` is `نور`; after normalization it matches `شركة النور للتجارة العامة` and `مؤسسة نور الهدى` alike.
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Cache-Control: no-store
+Bawaba-Request-Id: req_01JC2T0A4C6E8G0J2L4N6Q8S0U
+Bawaba-Environment: sandbox
+RateLimit-Limit: 1200
+RateLimit-Remaining: 1198
+RateLimit-Reset: 1
+
+{"data":[
+  {"code":"C1001","name":"شركة النور للتجارة العامة","city_name":"نابلس","salesman_code":"S07",
+   "balance":{"current":"1250.5","unpaid_cheques":"300","returned_cheques":"0"}},
+  {"code":"C1088","name":"مؤسسة نور الهدى","city_name":"جنين","salesman_code":"S03",
+   "balance":{"current":"0","unpaid_cheques":"0","returned_cheques":"0"}}],
+ "page":{"next_cursor":"c1.eyJmYWtlIjoiZXhhbXBsZSJ9","snapshot_expires_at":"2026-11-03T12:21:00+02:00","total":5},
+ "sync":{"next_updated_since":"2026-11-03T12:20:00+02:00"}}
+```
+
+Page 2 needs only the cursor (the filters travel inside it):
+
+```http
+GET /v1/customers?cursor=c1.eyJmYWtlIjoiZXhhbXBsZSJ9&limit=3 HTTP/1.1
+Host: api.example.com
+Authorization: Bearer bwb_test_<token>
+```
+
+```http
+HTTP/1.1 200 OK
+Bawaba-Request-Id: req_01JC2T0D8F0H2K4M6P8R0T2V4X
+Bawaba-Environment: sandbox
+RateLimit-Limit: 1200
+RateLimit-Remaining: 1197
+RateLimit-Reset: 2
+
+{"data":[{"code":"C1204","name":"مكتبة النور","city_name":"رام الله","salesman_code":"S07","balance":{"current":"88","unpaid_cheques":"0","returned_cheques":"0"}},
+         {"code":"C1530","name":"صيدلية نور الشفاء","city_name":"الخليل","salesman_code":"S11","balance":{"current":"412.75","unpaid_cheques":"0","returned_cheques":"0"}},
+         {"code":"C1977","name":"معرض النور للأثاث","city_name":"طولكرم","salesman_code":"S03","balance":{"current":"0","unpaid_cheques":"0","returned_cheques":"0"}}],
+ "page":{"next_cursor":null,"snapshot_expires_at":null,"total":5},
+ "sync":{"next_updated_since":"2026-11-03T12:20:00+02:00"}}
+```
+
+Had the second request arrived after `12:21:00`, the answer would have been:
+
+```json
+{"error":{"code":"snapshot_expired","message":"The data snapshot for this cursor has expired. Start again from the first page.",
+ "message_ar":"انتهت صلاحية لقطة البيانات الخاصة بهذا المؤشر. ابدأ من الصفحة الأولى.",
+ "request_id":"req_01JC2T1F…","docs_url":"https://api.example.com/docs/errors/snapshot_expired"}}
+```
+
+### 25.2 Creating an order through the approval queue
+
+```http
+POST /v1/vouchers/order HTTP/1.1
+Host: api.example.com
+Authorization: Bearer bwb_live_<token>
+Content-Type: application/json
+Idempotency-Key: 01JC2V8T3M5Q7R9S1U3W5Y7A9C
+
+{"date":"2026-11-03","time":"10:15:00","currency_code":"NIS","rate":"1","customer_code":"C1001",
+ "manual_code":"APP-000731","order_store_id":1,"note":"طلبية من تطبيق المندوب",
+ "lines":[{"item_code":"ITM-0001","unit_index":1,"store_id":1,"quantity":"12","price":"38","vat_per_unit":"5.52"},
+          {"item_code":"ITM-0107","unit_index":2,"store_id":1,"quantity":"1","price":"440"}]}
+```
+
+The token holds `vouchers:write:order` and has `writes_require_approval`:
+
+```http
+HTTP/1.1 202 Accepted
+Content-Type: application/json; charset=utf-8
+Location: /v1/approvals/apr_01JC2V8V0B2D4F6H8K0M2P4R6T
+Bawaba-Request-Id: req_01JC2V8T9X1Z3B5D7F9H1K3M5P
+Bawaba-Environment: live
+RateLimit-Limit: 60
+RateLimit-Remaining: 59
+RateLimit-Reset: 1
+
+{"data":{"approval":{"id":"apr_01JC2V8V0B2D4F6H8K0M2P4R6T","kind":"write","status":"pending",
+ "operation":"vouchers.create","method":"POST","path":"/v1/vouchers/order","voucher_type":"order",
+ "payload_sha256":"3b1f…","created_at":"2026-11-03T10:15:02+02:00","expires_at":"2026-11-10T10:15:02+02:00",
+ "decided_at":null,"executed_at":null,"reason":null,"owner_note":null,"result":null,"poll_after_seconds":30}}}
+```
+
+After the owner approves on the server and the executor posts to Shamel:
+
+```http
+GET /v1/approvals/apr_01JC2V8V0B2D4F6H8K0M2P4R6T HTTP/1.1
+Host: api.example.com
+Authorization: Bearer bwb_live_<token>
+```
+
+```json
+{"data":{"id":"apr_01JC2V8V0B2D4F6H8K0M2P4R6T","kind":"write","status":"succeeded","operation":"vouchers.create",
+ "method":"POST","path":"/v1/vouchers/order","voucher_type":"order","payload_sha256":"3b1f…",
+ "created_at":"2026-11-03T10:15:02+02:00","expires_at":"2026-11-10T10:15:02+02:00",
+ "decided_at":"2026-11-03T10:41:10+02:00","executed_at":"2026-11-03T10:41:11+02:00","reason":null,"owner_note":null,
+ "result":{"status":201,"body":{"data":{"voucher_type":"order","code":"O20412","reference_id":"O20412",
+           "write_id":"wrt_01JC2WQ3A5C7E9G1J3L5N7Q9S1"}}},"poll_after_seconds":30}}
+```
+
+Re-sending the original `POST` with the same key and body now returns the stored result
+(`201`, `Bawaba-Idempotent-Replay: true`, `Location: /v1/vouchers/O20412`); the same key with a different body
+returns `409 idempotency_conflict`.
+
+### 25.3 Validation failure with several problems
+
+```http
+POST /v1/vouchers/sales_invoice HTTP/1.1
+Host: api.example.com
+Authorization: Bearer bwb_test_<token>
+Content-Type: application/json
+Idempotency-Key: 01JC2X1Q3S5U7W9Y1A3C5E7G9J
+
+{"code":"S5001","currency_code":"NIS","rate":"1","customer_code":"C1001",
+ "lines":[{"item_code":"ITM-0001","store_id":1,"quantity":"0","price":"38"}]}
+```
+
+```http
+HTTP/1.1 422 Unprocessable Content
+Content-Type: application/json; charset=utf-8
+Bawaba-Request-Id: req_01JC2X1R5V7X9Z1B3D5F7H9K1M
+Bawaba-Environment: sandbox
+
+{"error":{"code":"validation_failed","message":"The request failed validation. See details.",
+ "message_ar":"فشل التحقق من صحة الطلب. راجع التفاصيل.","request_id":"req_01JC2X1R5V7X9Z1B3D5F7H9K1M",
+ "docs_url":"https://api.example.com/docs/errors/validation_failed",
+ "details":[
+  {"field":"/code","code":"must_match_prefix","message":"Must start with the prefix letter of this voucher type.",
+   "message_ar":"يجب أن يبدأ بالحرف المخصص لنوع السند."},
+  {"field":"/lines/0/quantity","code":"out_of_range","message":"Must be greater than 0.",
+   "message_ar":"يجب أن تكون القيمة أكبر من صفر."}]}}
+```
+
+`S5001` belongs to `sales_return` (prefix `S`); a sales invoice needs prefix `I`. Had the body also contained a
+Bawaba-owned field such as `system_id`, the strict decoder would have answered `400 invalid_request` (detail
+`unknown_field`) before semantic validation. Nothing reached Shamel and the idempotency key was released, so the
+corrected request may reuse it.
+
+### 25.4 Legacy call with a Bawaba token
+
+```http
+GET /legacy/Customer/GetCustomers HTTP/1.1
+Host: api.example.com
+Authorization: Bearer bwb_live_<token>
+code: C1001
+getBalance: true
+```
+
+The token has legacy enabled for this endpoint and hides `credit_limit`:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Bawaba-Request-Id: req_01JC2Y4D6F8H0K2M4P6R8T0V2X
+Bawaba-Environment: live
+RateLimit-Limit: 1200
+RateLimit-Remaining: 1143
+RateLimit-Reset: 48
+
+[{"code":"C1001","name":"شركة النور للتجارة العامة","phone":"<phone>","street":"شارع فيصل","street2":"",
+  "referee1":"","referee2":"","salesman_code":"S07","price_class":2,"discount":0,"city":1,"currency":"NIS",
+  "level":1,"town":"","city_name":"نابلس","citizen_code":"","attr":0,"man_name":"","trans_permissions":0,
+  "VATReg":"<vat-number>","creditType":0,"balance":1250.5,"notPayedCheqsBalance":300,"returnedCheqsBalance":0,
+  "stopped":false,"latitude":"32.2211","longitude":"35.2544","id_number":"","taxable":true,"paymentTermsCode":"",
+  "classifications":null,"contacts":null}]
+```
+
+Shamel's names, types and bare-array shape are kept; `credit_limit` is omitted by policy; Shamel's own `username`
+and `token` headers are neither needed nor accepted.
+
+---
+
+## 26. Configuration reference (API-owned keys)
+
+Keys marked "(01)", "(02)" or "(05)" are owned by those documents and listed for convenience. All are runtime
+settings distributed through the compiled config unless noted.
+
+| Key | Default | § |
+|---|---|---|
+| `api.public_base_url` | required (bootstrap) | `docs_url`, absolute media URLs in `/legacy` |
+| `pagination.default_limit` / `pagination.max_limit` | `100` / `1000` | 5.2 |
+| `pagination.snapshot_ttl` / `snapshot_max_bytes` / `max_views_per_token` (01) | `60s` / `64MiB` / `32` | 5.3 |
+| `search.fold_hamza_carriers` | `false` | 5.6 |
+| `search.min_query_chars` / `max_query_chars` / `max_terms` | `2` / `100` / `8` | 5.6 |
+| `api.updated_since.overlap` | `6h` | 5.7 |
+| `normalization.decimal_max_scale` | `{money: 6, quantity: 6, percent: 6, rate: 10}` | 4.6 |
+| `api.vouchers.max_range_days` | `366` | 12.2 |
+| `api.reports.max_range_days` | `1096` | 13 |
+| `api.combined.statement_days` | `90` | 14.1 |
+| `api.idempotency.ttl` | `24h` | 15.2 |
+| `api.batch.max_operations` | `100` | 15.8 |
+| `api.me.requests_window` | `7d` | 18.2 |
+| `approvals.ttl` / `approvals.poll_after` | `168h` / `30s` | 16 |
+| `writes.precheck_references` | `true` | 15.7 |
+| `writes.max_future_days` / `writes.max_voucher_lines` | `31` / `500` | 15.7 |
+| `writes.voucher_rules` | matrix of §15.7 | 15.7 |
+| `upstreams[].writes.system_id` | `1500` (must be 1000–2000) | 15.7 |
+| `upstreams[].enums.debit_credit` / `upstreams[].enums.cr_dr` | unset | 12.1, 12.3, 15.7 |
+| `upstreams[].timezone` (01) | `Asia/Hebron` | 4.5 |
+| `limits.defaults.{tool,agent,publishable}.{reads,writes}` | §23.3 | 23.3 |
+| `agents.request_ttl` / `agents.secret_claim_replay_window` | `336h` / `10m` | 18.3 |
+| `agents.secret_pickup_window`, `agents.max_pending_requests`, `agents.max_requests_per_day` (02) | `72h`, `20`, `50` | 18.3 |
+| `media.enabled` / `media.url_ttl` (02) | `false` / `15m` | 10.5 |
+| `http.max_body_bytes` / `http.max_body_bytes_batch` (02) | `256KiB` / `2MiB` | 4.10 |
+| `webhooks.*` (05 §2.9) | – | 17 |
+| `sandbox.mode` / `sandbox.seed` / `sandbox.dataset_version` (01) | `embedded` / – / – | 21 |
+| `docs.public` / `docs.backend_display_name` (02) | `true` / `"accounting system"` | 24.5 |
+
+---
+
+## 27. Cross-document notes, assumptions and open questions
+
+### 27.1 Reconciliations with other design documents
+
+| # | Topic | Decision here | Affects |
+|---|---|---|---|
+| 1 | Access-request paths | kebab-case `/v1/access-requests`; the secret is retrieved with `POST …/claim-secret`, never on `GET` | 02 §13.3 (`/v1/access_requests`, secret on `GET`) |
+| 2 | Catalog image URLs | presigned `/v1/media/{media_id}` as in 02 §5.4 | 01 S13 (`/v1/items/{code}/image`) |
+| 3 | Oversized body | `413 payload_too_large` (02 §10.9); 405/413/414/415/431 are protocol-level statuses | 01 S7 (`400 request_too_large`) |
+| 4 | `/legacy/Main/Login` | `400 shamel_credentials_not_accepted` instead of `404` for this one never-allowlisted path; `/Voucher/Post` stays `404` | 02 §11.3 |
+| 5 | `HEAD` | not supported | 01 S5 mentions `GET`/`HEAD` for publishable tokens |
+| 6 | Response headers | add `Bawaba-Environment`, `Bawaba-Idempotent-Replay`, `Location`, `Deprecation`, `Sunset`, `Server-Timing` to the allowlist; CORS also exposes `Bawaba-Environment` | 02 §10.7 |
+| 7 | Warnings and events | canonical `polling_too_frequent`; new `fields_hidden`, `parameter_ignored`; new event `approval.resolved`; event fields use v1 names (`store_id`, `store_ids`, `currency_code`, `status_id`) | 01 S6, 05 §2.2, §4.2 |
+| 8 | Sandbox scenarios | extended list (§21.3) | 01 §11 |
+| 9 | Error codes | codes added here beyond 02 §10.9: `token_kind_not_allowed`, `data_scope_filter_required`, `data_scope_unsupported`, `approval_not_supported_in_legacy`, `idempotency_key_required`, `cursor_invalidated`, `cursor_expired`, `idempotency_unavailable`, `sandbox_disabled`, write and webhook codes | 02 §10.9 |
+| 10 | Open between other documents | webhook `allowed_ports` (02 §19 `[443]` vs 05 §2.9 `[443, 8443]`); report deadline (02 §10.6 120 s vs 01 §7.7 90 s; the edge's 100 s limit favours ≤ 90 s); request-id format (01 S2 vs 02 LV-24). The API treats ports as configuration and request ids as opaque. | 01, 02, 05 |
+
+### 27.2 Assumptions made in this document
+
+- Money, quantities and rates are decimal strings; Shamel double artefacts are rounded at the configured scale.
+- Item units and the six price classes are restructured into `units[]` and `prices[]` arrays.
+- The per-type voucher rules (§15.7) are conservative initial defaults, adjustable at runtime, to be verified
+  against a live capture before M2.
+- `system_id` defaults to 1500 per upstream.
+- The account statement accepts customer codes; other account codes work only if Shamel accepts them.
+- `customer_code` on item serials can only be a pushdown (Shamel returns no customer field).
+- Milestone grouping beyond "reads first" (M2 writes/approvals/access requests, M3 webhooks) is a proposal.
+
+### 27.3 Questions for ISCO (API-specific; to merge into the ISCO list of 00 §11)
+
+| Id | Question | Ref |
+|---|---|---|
+| I-1 | What does `/Files/GetSalesmen` return (fields, types)? | Q24 |
+| I-2 | Does `GetCustomerPricesAsRows` accept filters (customer, item)? Does it return all customers' rows? What are `code`, `discount_type` and `tax`? | Q25 |
+| I-3 | What are the values of `VoucherAccounts.debit_credit` and `ExtraVoucher.cr_dr`? | U §6.4 |
+| I-4 | Are `accounts` allowed in non-journal vouchers? How is the cash amount of a receipt or payment expressed (`balance`?) | Q41 |
+| I-5 | Code prefix for `PurchaseDelivery`; allowed format after the prefix (length, digits only?) | Q40 |
+| I-6 | Are duplicate `code` or `manual_code` values rejected? Exact rejection message formats, for mapping. | Q39 |
+| I-7 | Is `VoucherHeader.balance` net of the invoice discount? Does it include VAT? | Q41 |
+| I-8 | Are `fromDate`/`toDate` inclusive? Any maximum range? Which timezone? | – |
+| I-9 | `GetStatus`: response representation; behaviour for unknown `manual`; are manual codes unique? | U §4.6 |
+| I-10 | `GetDelivery` with zero or several prepared deliveries? | Q23 |
+| I-11 | `lastupdatedate`: date or datetime, exclusive or inclusive, timezone, which changes update it (stock movements, balances)? | Q18 |
+| I-12 | Does `GetAccountsheet` accept any account code or only customers? | – |
+| I-13 | `LastPriceRepColumn.customer`: code or name? Is the report global or per customer? | Q21 |
+| I-14 | `InternalDelivery`: how is the destination store specified? | – |
+| I-15 | Number format of `AccountsheetColumns` amounts; meaning of `start_date`. | Q35 |
+| I-16 | Semantics of the `store` header on `GetItems`; which endpoints apply salesman scoping? | Q17 |
+| I-17 | Meaning and inclusive bounds of `system_id`. | Q38 |
+| I-18 | `Customer.MobileNumber`: fax or mobile? Meaning of `referee2`, `man_name`, `citizen_code`, `attr`. | Q29, Q30 |
+| I-19 | Wire JSON property casing; `null` vs empty-string conventions. | Q46 |
+| I-20 | Values and labels of every undocumented enum in U §6.4. | U §6.4 |
+| I-21 | Meaning of `Currency.units` / `division`; is `Currency.code` stable as a key? | Q36 |
+| I-22 | `GetCurrencyRates`: latest 10 in total or per currency? | Q31 |
