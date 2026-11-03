@@ -1,0 +1,328 @@
+{
+  "entities": [
+    {
+      "name": "Voucher",
+      "plain_name": "Voucher (complete document)",
+      "plain_name_ar": "الحركة الكاملة (السند)",
+      "domain": "vouchers",
+      "description": "One accounting or stock document of any of the 13 voucher types (invoice, return, receipt, payment, order, journal, delivery...), made of a header plus item, cheque and account lines. Printed as class Voucher on p. 13 (Post2 input) and p. 17 (GetVoucher output); GetDelivery (p. 16) returns a variant without accounts, GetVouchers says only 'array of Voucher' without naming the class (ISCO-40a), and GetExtraVouchers uses a different short class of the same name (see ExtraVoucher).",
+      "returned_by": ["/Voucher/GetVoucher", "/Voucher/GetVouchers", "/Voucher/GetDelivery"],
+      "accepted_by": ["/Voucher/Post2"],
+      "page": 13,
+      "fields": [
+        {"name": "header", "type": "VoucherHeader", "meaning": "Voucher information: type, number, date, customer, totals", "source": "manual-ar", "note": "«معلومات الحركة» = voucher information. See VoucherHeader."},
+        {"name": "items", "type": "List<VoucherItems>", "meaning": "Item lines of the voucher", "source": "manual-ar", "note": "«تفاصيل اصناف الحركة» = details of the voucher's items. Used by item-based types: invoices, returns, orders, deliveries, stock-out (inferred). See VoucherItems."},
+        {"name": "cheqs", "type": "List<VoucherCheqs>", "meaning": "Cheques attached to the voucher", "source": "manual-ar", "note": "«الشيكات» = the cheques. Typically receipts and payments (inferred; ISCO-47b). See VoucherCheqs."},
+        {"name": "accounts", "type": "List<VoucherAccounts>", "meaning": "Account (ledger) lines; mandatory only in journal vouchers", "source": "manual-ar", "note": "«الحسابات، اجبارية في سند القيد فقط» = accounts, mandatory in journal vouchers (Journal = 28) only. Not present in the GetDelivery variant (p. 16). Whether allowed in other types: ISCO-47a. See VoucherAccounts."}
+      ],
+      "business_value": "The heart of any integration: one structure lets tools create and read sales invoices, returns, receipts, payments, orders and journal entries in Shamel."
+    },
+    {
+      "name": "VoucherHeader",
+      "plain_name": "Voucher header",
+      "plain_name_ar": "رأس الحركة",
+      "domain": "vouchers",
+      "description": "The top part of every voucher: its type, number, date and time, currency, customer, salesman, totals and status flags (pp. 13–14). The same header is used for all voucher types; some fields only apply to orders or invoices.",
+      "returned_by": ["/Voucher/GetVoucher", "/Voucher/GetVouchers", "/Voucher/GetDelivery"],
+      "accepted_by": ["/Voucher/Post2"],
+      "page": 13,
+      "fields": [
+        {"name": "type", "type": "int", "meaning": "Voucher type (see VoucherTypes)", "source": "manual-ar", "note": "«نوع الحركة» = voucher type. Must be one of VoucherTypes (p. 15, stated in English)."},
+        {"name": "code", "type": "string", "meaning": "Voucher number; Shamel assigns one if not sent", "source": "manual-ar", "note": "«رقم الحركة، اذا لم يتم ارسال رقم الحركة يتم اعطائها رقم من الشامل» = voucher number; if no number is sent, Shamel gives it one. If filled it must start with the type's prefix letter (p. 15, VoucherTypes.code_prefix). Format after the letter and uniqueness unknown (ISCO-45). Post2 returns the created number in Result.refrenceId."},
+        {"name": "date", "type": "string", "meaning": "Voucher date (yyyy-MM-dd)", "source": "manual-ar", "note": "«تاريخ الحركة» (yyyy-MM-dd) = voucher date."},
+        {"name": "time", "type": "string", "meaning": "Voucher time (hhmmss)", "source": "manual-ar", "note": "«وقت الحركة» (hhmmss) = voucher time. 24-hour clock assumed, not stated (ISCO-24c)."},
+        {"name": "currency", "type": "string", "meaning": "Currency code, e.g. NIS or $", "source": "manual-ar", "note": "«كود العملة» (eg. \"NIS\",\"$\") = currency code. Links to Currency.code (inferred); codes are not ISO 4217."},
+        {"name": "rate", "type": "double", "meaning": "Exchange rate of the voucher currency", "source": "manual-ar", "note": "«سعر صرف العملة» = currency exchange rate."},
+        {"name": "customer_code", "type": "string", "meaning": "Customer number", "source": "manual-ar", "note": "«رقم الزبون» = customer number. Links to Customer.code (inferred)."},
+        {"name": "city", "type": "int", "meaning": "City of the voucher", "source": "inferred", "note": "No comment in the manual. Probably City.id from /Files/GetCities (inferred from name and int type)."},
+        {"name": "manual_code", "type": "string", "meaning": "Paper reference number, if any", "source": "manual-ar", "note": "«يتم استخدامه لتدوين رقم المرجعي الورقي ان وجد» = used to record the paper reference number, if one exists. Probably what the GetStatus header 'manual' expects (inferred; ISCO-42a). Whether duplicates are rejected is unknown (ISCO-43b)."},
+        {"name": "is_posted", "type": "bool", "meaning": "Enter the voucher as posted or not", "source": "manual-ar", "note": "«هل يتم ادخال حالة الحركة مرحلة ام لا» = whether the voucher is entered with status posted or not. Effect of each value: ISCO-46e."},
+        {"name": "is_printed", "type": "bool", "meaning": "Enter the voucher as printed or not", "source": "manual-ar", "note": "«هل يتم ادخال حالة الحركة مطبوعة ام لا» = whether the voucher is entered with status printed or not."},
+        {"name": "discount", "type": "double", "meaning": "Total invoice discount (an amount)", "source": "manual-ar", "note": "«قيمة الخصم الكلي للفاتورة» = value of the invoice's total discount. An amount, whereas VoucherItems.discount is a percentage. Invoice-type vouchers (per the comment)."},
+        {"name": "balance", "type": "double", "meaning": "Invoice value with the invoice discount", "source": "manual-ar", "note": "«قيمة الفاتورة مع خصم الفاتورة» = invoice value with the invoice discount. Unclear whether net of the discount, and whether it must be sent or is computed (ISCO-46a, ISCO-46d)."},
+        {"name": "update_date", "type": "string", "meaning": "Date the voucher was last updated", "source": "inferred", "note": "No comment; meaning read from the name. Format not stated; whether to fill on insert unknown."},
+        {"name": "note", "type": "string", "meaning": "Note", "source": "manual-ar", "note": "«ملاحظة» = note."},
+        {"name": "note2", "type": "string", "meaning": "Second note", "source": "manual-ar", "note": "«ملاحظة 2» = note 2."},
+        {"name": "vat", "type": "double", "meaning": "Tax (VAT) amount", "source": "manual-ar", "note": "«قيمة الضريبة» = tax value. Presumably the voucher total, while VoucherItems.vat is per unit (inferred; ISCO-46c)."},
+        {"name": "delivery_id", "type": "string", "meaning": "Number of the consignment (on-sale) delivery", "source": "manual-ar", "note": "«رقم الارسالية برسم البيع» = number of the delivery sent 'for sale' (consignment). Probably used for 'invoice from delivery' and type 5 returns (inferred; ISCO-47c, ISCO-47g)."},
+        {"name": "salesman", "type": "string", "meaning": "Salesman (sales rep) number", "source": "manual-ar", "note": "«رقم المندوب» = salesman number. Probably the salesman code (AuthResult.salesmanCode; /Files/GetSalesmen is undocumented) (inferred)."},
+        {"name": "cheq_balance", "type": "double", "meaning": "Total value of the cheques", "source": "manual-ar", "note": "«مجموع قيمة الشيكات» = sum of the cheques' value, i.e. total of the cheqs list (inferred). Receipts and payments (inferred; ISCO-47b)."},
+        {"name": "date_to_deliver", "type": "string", "meaning": "Delivery date for the order", "source": "manual-ar", "note": "«تاريخ التسليم للطلبية» = delivery date for the order. Orders (type 0)."},
+        {"name": "time_to_deliver", "type": "string", "meaning": "Delivery time for the order", "source": "manual-ar", "note": "«وقت التسليم للطلبية» = delivery time for the order. Orders (type 0). Format not stated."},
+        {"name": "payment_type", "type": "int", "meaning": "Payment type (values undocumented)", "source": "manual-ar", "note": "«نوع الدفعة» = payment type. Values not documented and no lookup endpoint (ISCO-49)."},
+        {"name": "order_store", "type": "int", "meaning": "Store (warehouse) of the order", "source": "manual-ar", "note": "«مستودع الطلبية» = the order's store. Links to Store.id from /Files/GetStores (inferred). Orders (type 0)."},
+        {"name": "customer_balance", "type": "double", "meaning": "Customer balance at voucher time, when requested", "source": "inferred", "note": "No comment. Filled when header getCustomerBalance=true on GetVoucher/GetVouchers; otherwise '0 is returned' (p. 17), so 0 is ambiguous (ISCO-31). GetVouchers excludes the voucher itself; GetVoucher does not say. Not meaningful on insert (inferred)."},
+        {"name": "system_id", "type": "int", "meaning": "Number between 1000 and 2000; purpose not stated", "source": "manual", "note": "'value must be between 1000 and 2000'. Purpose undocumented; probably identifies the integrating system. Whether 1000/2000 are allowed is unknown (ISCO-44)."}
+      ],
+      "business_value": "Carries the who, when and how-much of each document, so tools can create or display invoices, receipts and orders with customer, salesman, currency and totals."
+    },
+    {
+      "name": "VoucherItems",
+      "plain_name": "Voucher item lines",
+      "plain_name_ar": "أصناف الحركة",
+      "domain": "vouchers",
+      "description": "One line per item in a voucher: item, unit, store, quantity, price, bonus, discount, tax and up to six cost centers (p. 14). Some fields are filled by Shamel only (voucher_code, name) and some are not used (measure, color, serials).",
+      "returned_by": ["/Voucher/GetVoucher", "/Voucher/GetVouchers", "/Voucher/GetDelivery"],
+      "accepted_by": ["/Voucher/Post2"],
+      "page": 14,
+      "fields": [
+        {"name": "voucher_code", "type": "string", "meaning": "Voucher number this line belongs to", "source": "manual-ar", "note": "«رقم الحركة، لا يجب تعبئته في الادخال» = voucher number; do not fill on insert."},
+        {"name": "pos", "type": "int", "meaning": "Line order in the voucher, starting from 0", "source": "manual-ar", "note": "«ترتيب الصنف في الحركة، يبدا من صفر» = the item's order in the voucher, starts from zero."},
+        {"name": "code", "type": "string", "meaning": "Item number", "source": "manual-ar", "note": "«رقم الصنف» = item number. Links to Item.code (inferred)."},
+        {"name": "name", "type": "string", "meaning": "Item name", "source": "manual-ar", "note": "«اسم الصنف، لا يجب تعبئته في الادخال» = item name; do not fill on insert (output only)."},
+        {"name": "unit", "type": "int", "meaning": "Item unit", "source": "manual-ar", "note": "«وحدة الصنف» = item unit. Probably an index 1–6 into Item.unit1..unit6 (inferred; ISCO-49)."},
+        {"name": "store", "type": "int", "meaning": "Store (warehouse) of the line", "source": "manual-ar", "note": "«المستودع» = the store. Links to Store.id from /Files/GetStores (inferred)."},
+        {"name": "measure", "type": "int", "meaning": "Item size; not used", "source": "manual-ar", "note": "«قياس الصنف، غير مستخدم» = item size/measure; not used."},
+        {"name": "color", "type": "int", "meaning": "Item colour; not used", "source": "manual-ar", "note": "«لون الصنف، غير مستخدم» = item colour; not used."},
+        {"name": "quantity", "type": "double", "meaning": "Item quantity", "source": "manual-ar", "note": "«كمية الصنف» = item quantity."},
+        {"name": "price", "type": "double", "meaning": "Price", "source": "manual-ar", "note": "«السعر» = the price. Presumably per unit (inferred)."},
+        {"name": "bonus", "type": "double", "meaning": "Bonus (free) quantity", "source": "manual-ar", "note": "«كمية البونص» = bonus quantity."},
+        {"name": "discount", "type": "double", "meaning": "Line discount percentage, 0–100", "source": "manual-ar", "note": "«نسبة الخصم» 0-100 = discount percentage. A percentage, whereas VoucherHeader.discount is an amount."},
+        {"name": "vat", "type": "double", "meaning": "Tax amount for a quantity of 1", "source": "manual-ar", "note": "«قيمة الضريبة لكمية 1» = tax value for a quantity of 1 (per unit)."},
+        {"name": "sold_qnty", "type": "double", "meaning": "Sold quantity", "source": "manual-ar", "note": "«الكمية المباعة» = the quantity sold. Probably the part of a consignment delivery already sold (inferred)."},
+        {"name": "delivery_pos", "type": "double", "meaning": "Line number of the item in the consignment delivery", "source": "manual-ar", "note": "«رقم الصنف في الارسالية برسم البيع» = the item's number in the 'for sale' delivery. Pairs with VoucherHeader.delivery_id (inferred). A position typed as double."},
+        {"name": "note", "type": "string", "meaning": "Item note", "source": "manual-ar", "note": "«ملاحظة اصنف» [sic, for ملاحظة الصنف] = item note."},
+        {"name": "serials", "type": "string[]", "meaning": "Serial numbers; not used", "source": "manual-ar", "note": "«غير مستخدم» = not used."},
+        {"name": "costcenter1", "type": "string", "meaning": "Cost-center code, slot 1", "source": "inferred", "note": "No comment. Probably CostCenterDTO.code; six cost-center slots per line. No endpoint lists cost centers (ISCO-39b)."},
+        {"name": "costcenter2", "type": "string", "meaning": "Cost-center code, slot 2", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter3", "type": "string", "meaning": "Cost-center code, slot 3", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter4", "type": "string", "meaning": "Cost-center code, slot 4", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter5", "type": "string", "meaning": "Cost-center code, slot 5", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter6", "type": "string", "meaning": "Cost-center code, slot 6", "source": "inferred", "note": "No comment. See costcenter1."}
+      ],
+      "business_value": "Line-level detail (items, quantities, prices, discounts, tax, cost centers) needed for invoices, orders, returns and stock movements."
+    },
+    {
+      "name": "VoucherCheqs",
+      "plain_name": "Voucher cheques",
+      "plain_name_ar": "شيكات الحركة",
+      "domain": "vouchers",
+      "description": "One line per cheque attached to a voucher: cheque number, account, bank, branch, due date, currency and amount (p. 14).",
+      "returned_by": ["/Voucher/GetVoucher", "/Voucher/GetVouchers", "/Voucher/GetDelivery"],
+      "accepted_by": ["/Voucher/Post2"],
+      "page": 14,
+      "fields": [
+        {"name": "cheq_num", "type": "string", "meaning": "Cheque number", "source": "manual-ar", "note": "«رقم الشيك» = cheque number."},
+        {"name": "account_num", "type": "string", "meaning": "Account number", "source": "manual-ar", "note": "«رقم الحساب» = account number. Probably the bank account the cheque is drawn on (inferred)."},
+        {"name": "bank_code", "type": "string", "meaning": "Bank number", "source": "manual-ar", "note": "«رقم البنك» = bank number. Links to Bank.code from /Files/GetBanks (inferred)."},
+        {"name": "branch_code", "type": "string", "meaning": "Bank branch number", "source": "manual-ar", "note": "«رقم فرع البنك» = bank branch number. Links to BankBranch.code from /Files/GetBanksBranchs (inferred)."},
+        {"name": "due_date", "type": "string", "meaning": "Cheque due date", "source": "manual-ar", "note": "«تاريخ الاستحقاق» = due date. Format yyyy-MM-dd (p. 4)."},
+        {"name": "rate", "type": "double", "meaning": "Exchange rate of the cheque currency", "source": "inferred", "note": "No comment; read from the name."},
+        {"name": "currency", "type": "string", "meaning": "Cheque currency code", "source": "inferred", "note": "No comment. Probably Currency.code (inferred)."},
+        {"name": "amount", "type": "double", "meaning": "Cheque amount", "source": "manual-ar", "note": "«قيمة الشيك» = cheque value."}
+      ],
+      "business_value": "Lets receipts and payments record (post-dated) cheques with bank, branch and due date, which is central to cash-flow follow-up."
+    },
+    {
+      "name": "VoucherAccounts",
+      "plain_name": "Voucher account lines (journal lines)",
+      "plain_name_ar": "حسابات الحركة (أسطر القيد)",
+      "domain": "vouchers",
+      "description": "One ledger line per account in a voucher: account, amount, debit/credit side, six cost centers and a note (pp. 14–15). Mandatory only in journal vouchers (p. 13). The manual gives no comments for this class.",
+      "returned_by": ["/Voucher/GetVoucher", "/Voucher/GetVouchers"],
+      "accepted_by": ["/Voucher/Post2"],
+      "page": 14,
+      "fields": [
+        {"name": "position", "type": "int", "meaning": "Line order in the voucher", "source": "inferred", "note": "No comment. Named pos in VoucherItems; whether it starts at 0 here is not stated."},
+        {"name": "account_code", "type": "string", "meaning": "General-ledger account code", "source": "inferred", "note": "No comment. No endpoint lists GL accounts, so codes cannot be validated through the API."},
+        {"name": "amount", "type": "double", "meaning": "Line amount", "source": "inferred", "note": "No comment; read from the name."},
+        {"name": "debit_credit", "type": "int", "meaning": "Debit or credit side (values undocumented)", "source": "inferred", "note": "No comment; meaning from the name. Numeric values not documented (ISCO-49)."},
+        {"name": "costcenter1", "type": "string", "meaning": "Cost-center code, slot 1", "source": "inferred", "note": "No comment. Probably CostCenterDTO.code (ISCO-39b)."},
+        {"name": "costcenter2", "type": "string", "meaning": "Cost-center code, slot 2", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter3", "type": "string", "meaning": "Cost-center code, slot 3", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter4", "type": "string", "meaning": "Cost-center code, slot 4", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter5", "type": "string", "meaning": "Cost-center code, slot 5", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "costcenter6", "type": "string", "meaning": "Cost-center code, slot 6", "source": "inferred", "note": "No comment. See costcenter1."},
+        {"name": "note", "type": "string", "meaning": "Line note", "source": "inferred", "note": "No comment; read from the name."}
+      ],
+      "business_value": "Enables general-ledger journal entries with cost-center tagging to be posted into Shamel from outside tools."
+    },
+    {
+      "name": "Result (voucher)",
+      "plain_name": "Voucher insert result",
+      "plain_name_ar": "نتيجة إدخال الحركة",
+      "domain": "vouchers",
+      "description": "The answer to /Voucher/Post2, printed as class Result (p. 15): a success flag, a list of error messages and the number of the voucher that was created. A different class also named Result is returned by /CostCenter/Post.",
+      "returned_by": ["/Voucher/Post2"],
+      "accepted_by": [],
+      "page": 15,
+      "fields": [
+        {"name": "Success", "type": "bool", "meaning": "True if the voucher was inserted", "source": "inferred", "note": "No comment; read from the name and 'If the process succeeded' (p. 15). Errors can also arrive as HTTP 500 (p. 4)."},
+        {"name": "ErrorMessage", "type": "string[]", "meaning": "List of error messages", "source": "inferred", "note": "No comment. An array here, a single string in PostResponse and in Result (cost center)."},
+        {"name": "refrenceId", "type": "string", "meaning": "Number (code) of the inserted voucher", "source": "manual", "note": "[sic: reference] 'If the process succeeded, the refrenceId will contain the inserted code of the voucher'. Arabic «رقم الحركة التي تم ادخالها» = number of the voucher that was inserted. Use it with GetVoucher (ISCO-40d)."}
+      ],
+      "business_value": "Confirms a voucher was created and gives its Shamel number, needed for follow-up, linking and audit."
+    },
+    {
+      "name": "ExtraVoucher",
+      "plain_name": "Voucher summary row",
+      "plain_name_ar": "ملخص الحركة",
+      "domain": "vouchers",
+      "description": "A short, flat voucher row returned by /Voucher/GetExtraVouchers, printed as 'public class Voucher' (p. 18); the name ExtraVoucher is assigned here to tell it apart from the full Voucher. It has amount, direction and the customer's balance but no lines. What 'extra' means is not explained (ISCO-40b).",
+      "returned_by": ["/Voucher/GetExtraVouchers"],
+      "accepted_by": [],
+      "page": 18,
+      "fields": [
+        {"name": "type", "type": "int", "meaning": "Voucher type (see VoucherTypes)", "source": "inferred", "note": "No comment; presumably the same values as VoucherHeader.type."},
+        {"name": "code", "type": "string", "meaning": "Voucher number", "source": "inferred", "note": "No comment; read from the name."},
+        {"name": "date", "type": "string", "meaning": "Voucher date", "source": "inferred", "note": "No comment. Format yyyy-MM-dd (p. 4)."},
+        {"name": "customer_code", "type": "string", "meaning": "Customer number", "source": "inferred", "note": "No comment. Links to Customer.code (inferred)."},
+        {"name": "amount", "type": "double", "meaning": "Voucher amount", "source": "inferred", "note": "No comment; read from the name. Gross or net not stated."},
+        {"name": "currency", "type": "string", "meaning": "Currency code", "source": "inferred", "note": "No comment. Probably Currency.code (inferred)."},
+        {"name": "rate", "type": "double", "meaning": "Exchange rate", "source": "inferred", "note": "No comment; read from the name."},
+        {"name": "cr_dr", "type": "int", "meaning": "Credit or debit direction (values undocumented)", "source": "inferred", "note": "No comment; meaning from the name. Numeric values not documented (ISCO-49)."},
+        {"name": "customer_balance_at_voucher_date", "type": "double", "meaning": "Customer balance at the voucher date, excluding this voucher", "source": "inferred", "note": "Matches the header getCustomerBalance text on p. 18: balance 'at the invoice time (excluding the invoice itself)'; 0 if the header is not set or false."}
+      ],
+      "business_value": "A light list of customer-affecting documents with amounts and running balance, good for customer activity views and change detection."
+    },
+    {
+      "name": "VoucherFilters",
+      "plain_name": "Voucher list filters",
+      "plain_name_ar": "فلاتر قائمة الحركات",
+      "domain": "vouchers",
+      "description": "An unnamed JSON object sent in the request header 'filters' of /Voucher/GetVouchers and /Voucher/GetExtraVouchers (p. 17, repeated pp. 17–18); the name VoucherFilters is assigned here. There is no filter by voucher type and no paging (ISCO-40c, ISCO-21).",
+      "returned_by": [],
+      "accepted_by": ["/Voucher/GetVouchers", "/Voucher/GetExtraVouchers"],
+      "page": 17,
+      "fields": [
+        {"name": "customerCode", "type": "string", "meaning": "Only vouchers of this customer", "source": "inferred", "note": "Marked 'optional' in the manual. Links to Customer.code (inferred)."},
+        {"name": "currencyCode", "type": "string", "meaning": "Only vouchers in this currency", "source": "inferred", "note": "Marked 'optional' in the manual. Links to Currency.code (inferred)."},
+        {"name": "fromDate", "type": "string", "meaning": "Start of the date range (yyyy-MM-dd)", "source": "inferred", "note": "Not marked optional. Format yyyy-MM-dd (p. 4). Inclusive or not: ISCO-24b."},
+        {"name": "toDate", "type": "string", "meaning": "End of the date range (yyyy-MM-dd)", "source": "inferred", "note": "Not marked optional. Format yyyy-MM-dd (p. 4). Inclusive or not: ISCO-24b."}
+      ],
+      "business_value": "Lets tools pull all vouchers for a period, optionally for one customer or currency, e.g. for daily sales or customer history."
+    },
+    {
+      "name": "AccountsheetFilters (customer)",
+      "plain_name": "Customer statement filters",
+      "plain_name_ar": "فلاتر كشف الحساب المحاسبي",
+      "domain": "reports",
+      "description": "The filters of the customer account statement report (كشف حساب محاسبي, p. 3), printed as class AccountsheetFilters on p. 12 and sent as JSON in the form field 'obj' of /Report/GetAccountsheet. A different class with the same name is used by the cost-center statement. No field has a comment.",
+      "returned_by": [],
+      "accepted_by": ["/Report/GetAccountsheet"],
+      "page": 12,
+      "fields": [
+        {"name": "customerCode", "type": "string", "meaning": "Customer (account) whose statement is requested", "source": "inferred", "note": "Read from the name. Links to Customer.code (inferred). Whether other account codes are accepted: ISCO-38a."},
+        {"name": "currencyCode", "type": "string", "meaning": "Statement currency", "source": "inferred", "note": "Read from the name. Links to Currency.code (inferred)."},
+        {"name": "fromDate", "type": "string", "meaning": "Period start date (yyyy-MM-dd)", "source": "inferred", "note": "Format yyyy-MM-dd (p. 4). Inclusive or not: ISCO-24b."},
+        {"name": "toDate", "type": "string", "meaning": "Period end date (yyyy-MM-dd)", "source": "inferred", "note": "Format yyyy-MM-dd (p. 4). Inclusive or not: ISCO-24b."},
+        {"name": "showOtherCurrencies", "type": "bool", "meaning": "Include movements in other currencies", "source": "inferred", "note": "Read from the name."},
+        {"name": "showStocks", "type": "bool", "meaning": "Include item/stock details", "source": "inferred", "note": "Read from the name; exact effect not stated."},
+        {"name": "showCheqs", "type": "bool", "meaning": "Include cheques", "source": "inferred", "note": "Read from the name."},
+        {"name": "showNotPayedCheqs", "type": "bool", "meaning": "Include unpaid cheques", "source": "inferred", "note": "Read from the name. [sic: 'Payed' for 'Paid']."},
+        {"name": "showReturnedCheq", "type": "bool", "meaning": "Include returned (bounced) cheques", "source": "inferred", "note": "Read from the name. Singular 'Cheq', unlike the sibling fields."}
+      ],
+      "business_value": "Drives the customer account statement, the key document for collections, customer reconciliation and sending statements to customers."
+    },
+    {
+      "name": "AccountsheetFilters (cost center)",
+      "plain_name": "Cost-center statement filters",
+      "plain_name_ar": "فلاتر كشف حساب مركز التكلفة",
+      "domain": "reports",
+      "description": "The filters of the cost-center account statement report (تقرير كشف حساب لمركز تكلفة, p. 3), printed as class AccountsheetFilters on p. 19 and sent as JSON in the form field 'filters' (not 'obj') of /CostCenter/GetCostCenterAccountsheet. No field has a comment.",
+      "returned_by": [],
+      "accepted_by": ["/CostCenter/GetCostCenterAccountsheet"],
+      "page": 19,
+      "fields": [
+        {"name": "fromCostcenter", "type": "string", "meaning": "First cost center of the range", "source": "inferred", "note": "Read from the name. Links to CostCenterDTO.code (inferred)."},
+        {"name": "toCostcenter", "type": "string", "meaning": "Last cost center of the range", "source": "inferred", "note": "Read from the name. Links to CostCenterDTO.code (inferred)."},
+        {"name": "account", "type": "string", "meaning": "Account code to report on", "source": "inferred", "note": "Read from the name. What it accepts (GL account, customer): ISCO-39a."},
+        {"name": "type", "type": "int", "meaning": "Undocumented filter type", "source": "undocumented", "note": "No comment and no values given (ISCO-39a, ISCO-49). An int here, a string in CostCenterDTO.type."},
+        {"name": "currencyCode", "type": "string", "meaning": "Statement currency", "source": "inferred", "note": "Read from the name. Links to Currency.code (inferred)."},
+        {"name": "fromDate", "type": "string", "meaning": "Period start date (yyyy-MM-dd)", "source": "inferred", "note": "Format yyyy-MM-dd (p. 4). Inclusive or not: ISCO-24b."},
+        {"name": "toDate", "type": "string", "meaning": "Period end date (yyyy-MM-dd)", "source": "inferred", "note": "Format yyyy-MM-dd (p. 4). Inclusive or not: ISCO-24b."},
+        {"name": "showOtherCurrencies", "type": "bool", "meaning": "Include movements in other currencies", "source": "inferred", "note": "Read from the name."}
+      ],
+      "business_value": "Drives the cost-center statement, which shows income and costs per cost center (e.g. a project or department)."
+    },
+    {
+      "name": "AccountsheetColumns",
+      "plain_name": "Statement line",
+      "plain_name_ar": "سطر كشف الحساب",
+      "domain": "reports",
+      "description": "One row of an account statement, returned as a list by both the customer statement and the cost-center statement (printed identically on pp. 13 and 19). All amounts are strings with an unstated number format (ISCO-38b). No field has a comment.",
+      "returned_by": ["/Report/GetAccountsheet", "/CostCenter/GetCostCenterAccountsheet"],
+      "accepted_by": [],
+      "page": 13,
+      "fields": [
+        {"name": "date", "type": "string", "meaning": "Movement date", "source": "inferred", "note": "Read from the name."},
+        {"name": "code", "type": "string", "meaning": "Voucher number of the movement", "source": "inferred", "note": "Probably VoucherHeader.code (inferred)."},
+        {"name": "type", "type": "string", "meaning": "Voucher type of the movement", "source": "inferred", "note": "A string here, an int in vouchers; whether name, code or number is unknown (ISCO-38d, ISCO-49)."},
+        {"name": "credit", "type": "string", "meaning": "Credit amount", "source": "inferred", "note": "Amount sent as text; number format unknown (ISCO-38b)."},
+        {"name": "debit", "type": "string", "meaning": "Debit amount", "source": "inferred", "note": "Amount sent as text; number format unknown (ISCO-38b)."},
+        {"name": "start_date", "type": "string", "meaning": "Undocumented date", "source": "undocumented", "note": "No comment; possibly a due or value date (guess). ISCO-38c."},
+        {"name": "balance", "type": "string", "meaning": "Running balance after this movement", "source": "inferred", "note": "Amount sent as text. Whether the opening balance is a separate first row is unknown (ISCO-38e)."},
+        {"name": "note", "type": "string", "meaning": "Movement note", "source": "inferred", "note": "Read from the name."}
+      ],
+      "business_value": "The statement rows (date, document, debit, credit, balance) that a tool can show, export, send to a customer or analyse."
+    },
+    {
+      "name": "CostCenterDTO",
+      "plain_name": "Cost center (new)",
+      "plain_name_ar": "مركز تكلفة جديد",
+      "domain": "cost_centers",
+      "description": "A new cost center to insert, sent as JSON in the form field 'obj' of /CostCenter/Post (p. 18). The manual wrongly titles the endpoint 'Insert new customer' (copy-paste error; p. 2 lists 'مركز تكلفة جديد', new cost center). No field has a comment, and no endpoint lists existing cost centers (ISCO-39b).",
+      "returned_by": [],
+      "accepted_by": ["/CostCenter/Post"],
+      "page": 18,
+      "fields": [
+        {"name": "code", "type": "string", "meaning": "Cost-center code", "source": "inferred", "note": "Read from the name. Client-supplied; the only reference to the new cost center since no id is returned (ISCO-39d). Used by costcenter1..6 in voucher lines (inferred)."},
+        {"name": "name", "type": "string", "meaning": "Cost-center name (Arabic)", "source": "inferred", "note": "Read from the name; Arabic assumed because name_en exists."},
+        {"name": "name_en", "type": "string", "meaning": "Cost-center name in English", "source": "inferred", "note": "Read from the name."},
+        {"name": "father", "type": "string", "meaning": "Parent cost-center code", "source": "inferred", "note": "Read from the name (father = parent in a tree). ISCO-39c."},
+        {"name": "type", "type": "string", "meaning": "Undocumented cost-center type", "source": "undocumented", "note": "No values given (ISCO-39c, ISCO-49). A string here, an int in the cost-center statement filter."},
+        {"name": "date", "type": "string", "meaning": "Undocumented date", "source": "undocumented", "note": "Purpose not stated (ISCO-39c). Presumably yyyy-MM-dd per p. 4."}
+      ],
+      "business_value": "Lets an external tool create new cost centers (e.g. projects or departments) in Shamel so that vouchers can be tagged with them."
+    },
+    {
+      "name": "Result (cost center)",
+      "plain_name": "Cost-center insert result",
+      "plain_name_ar": "نتيجة إدخال مركز التكلفة",
+      "domain": "cost_centers",
+      "description": "The answer to /CostCenter/Post, printed as class Result (p. 19): only a success flag and one error message. Unlike Result (voucher) and PostResponse, it returns no identifier.",
+      "returned_by": ["/CostCenter/Post"],
+      "accepted_by": [],
+      "page": 19,
+      "fields": [
+        {"name": "Success", "type": "bool", "meaning": "True if the cost center was inserted", "source": "inferred", "note": "No comment; read from the name. Errors can also arrive as HTTP 500 (p. 4)."},
+        {"name": "ErrorMessage", "type": "string", "meaning": "Error text", "source": "inferred", "note": "No comment. A single string here, an array in Result (voucher)."}
+      ],
+      "business_value": "Tells whether the cost center was created; since no id comes back, the code that was sent is the only reference."
+    }
+  ],
+  "enums": [
+    {
+      "name": "VoucherTypes",
+      "page": 15,
+      "description": "Allowed values of VoucherHeader.type (p. 15), listed in the manual's order, with the prefix letter a client-supplied VoucherHeader.code must start with (pp. 15–16). Member names are as printed; English meanings are translations of the Arabic comments. Numbers 1, 3, 6–8, 11, 13–15, 17–21, 25 and 26 are not documented (ISCO-49).",
+      "values": [
+        {"value": 9, "name": "SalesInvoice", "meaning": "Sales invoice", "meaning_ar": "فاتورة مبيعات", "code_prefix": "I"},
+        {"value": 4, "name": "ReturnSalesInvoice", "meaning": "Sales return (goods returned by a customer)", "meaning_ar": "مردودات مبيعات", "code_prefix": "S"},
+        {"value": 5, "name": "ReturnedPendingSalesDelivery", "meaning": "Return from a consignment (on-sale) delivery", "meaning_ar": "مردود من ارسالية برسم البيع", "code_prefix": "F", "note": "Exact use not explained (ISCO-47g)."},
+        {"value": 24, "name": "Receipt", "meaning": "Receipt voucher (money received)", "meaning_ar": "قبض", "code_prefix": "R"},
+        {"value": 27, "name": "Payment", "meaning": "Payment voucher (money paid out)", "meaning_ar": "صرف", "code_prefix": "P"},
+        {"value": 0, "name": "Order", "meaning": "Sales order", "meaning_ar": "طلبية", "code_prefix": "O", "note": "p. 2 calls it طلبية مبيعات (sales order). Uses date_to_deliver, time_to_deliver and order_store; status via /Voucher/GetStatus (OrderStatus)."},
+        {"value": 22, "name": "Credit", "meaning": "Credit note", "meaning_ar": "اشعار دائن", "code_prefix": "C"},
+        {"value": 23, "name": "Debit", "meaning": "Debit note", "meaning_ar": "اشعار مدين", "code_prefix": "D"},
+        {"value": 28, "name": "Journal", "meaning": "Journal entry", "meaning_ar": "قيد", "code_prefix": "J", "note": "The accounts list is mandatory only for this type (p. 13)."},
+        {"value": 16, "name": "InternalDelivery", "meaning": "Internal delivery (transfer between stores, inferred)", "meaning_ar": "ارسالية داخلية", "code_prefix": "N", "note": "How the destination store is given is not documented (ISCO-47d)."},
+        {"value": 2, "name": "PurchaseDelivery", "meaning": "Purchase delivery (goods received)", "meaning_ar": "ارسالية مشتريات", "code_prefix": null, "note": "No prefix letter listed in the manual (ISCO-45a); safest to let Shamel assign the code."},
+        {"value": 12, "name": "Stockout", "meaning": "Goods issue (stock-out)", "meaning_ar": "اخراج بضاعة", "code_prefix": "B", "note": "p. 3 calls it سند إخراج بضاعة (goods-issue voucher)."},
+        {"value": 10, "name": "SalesDelivery", "meaning": "Sales delivery (goods dispatched for sale)", "meaning_ar": "ارسالية مبيعات", "code_prefix": "V", "note": "Printed in a different font in both tables, suggesting a later addition."}
+      ]
+    },
+    {
+      "name": "OrderStatus",
+      "page": 16,
+      "description": "Order status returned by /Voucher/GetStatus for the order named in the request header 'manual' (p. 16). The manual gives English labels only; whether the response is a bare number or JSON, and what an unknown order returns, are undocumented (ISCO-42).",
+      "values": [
+        {"value": 0, "name": "not ready", "meaning": "Not ready"},
+        {"value": 1, "name": "ready", "meaning": "Ready"},
+        {"value": 2, "name": "closed", "meaning": "Closed"},
+        {"value": 3, "name": "sent partially", "meaning": "Sent partially"},
+        {"value": 4, "name": "sent", "meaning": "Sent"}
+      ]
+    }
+  ]
+}

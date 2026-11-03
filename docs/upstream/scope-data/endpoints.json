@@ -1,0 +1,3066 @@
+{
+  "meta": {
+    "title": "Shamel Pro Web API - endpoint catalogue and capability matrix",
+    "source": "ISCO 'Shamel Pro API Manual' (20 pp.; pp. 2-3 Arabic), cross-checked with docs/upstream/shamel-api.md; Bawaba routes from docs/design/03-api.md section 6/7; open questions from docs/design/08-isco-questions.md",
+    "generated": "2026-11-03",
+    "page_refs": "page = first PDF page of the endpoint; pages = full range",
+    "path_rule": "path is normalized with a leading slash; path_as_printed is exactly as in the manual",
+    "meaning_source_legend": {
+      "manual": "stated in English in the manual",
+      "manual-ar": "stated in an Arabic comment or heading in the manual (English translation given, Arabic kept)",
+      "inferred": "reasonable reading of names/types/structure, not stated",
+      "undocumented": "the manual gives no meaning"
+    }
+  },
+  "conventions": {
+    "style": "RPC-style /{Controller}/{Action} paths; the vendor calls it \"restful web API\" (p. 4)",
+    "base_url": "undocumented: no scheme, host, port, base path or version (ISCO-07)",
+    "https": "not mentioned (ISCO-05)",
+    "auth": "POST /Main/Login with form username + password returns a token; every other request must send request headers username and token (p. 4)",
+    "errors": "\"any error occurred the service will return Http error 500 with the error details\" (p. 4); writes can also report Success=false in the body (pp. 9, 15, 19) (ISCO-18, ISCO-19)",
+    "dates": "\"Date format is always yyyy-MM-dd\" (p. 4); VoucherHeader.time is hhmmss (p. 13)",
+    "read_inputs": "custom request headers, never the query string; GetVouchers/GetExtraVouchers put a JSON object in the filters header",
+    "write_inputs": "one form field (\"post parameter\") holding a JSON string: obj, or filters on the cost-center report; only Login states x-www-form-urlencoded (ISCO-16)",
+    "responses": "C# class declarations only; JSON stated only for write results (\"as Json\"); wire casing and nulls unverified (ISCO-17)",
+    "pagination": "none on any endpoint; lists return everything in one response; only GetCurrencyRates has a fixed limit (10) (ISCO-21)",
+    "incremental_sync": "lastupdatedate header on 3 endpoints only (GetCustomers, GetItems, GetItemsStores); date-only (ISCO-22)",
+    "methods": "the manual names no HTTP method; 'post parameter' implies POST for 7 endpoints, the other 23 are assumed GET (ISCO-12)",
+    "writes": "insert-only: no update, delete, cancel or void endpoint for any entity; no idempotency (ISCO-43, ISCO-55)"
+  },
+  "endpoints": [
+    {
+      "n": 1,
+      "path": "/Main/Login",
+      "path_as_printed": "/Main/Login",
+      "controller": "Main",
+      "kind": "auth",
+      "domain": "auth",
+      "purpose": "Log a Shamel user in and get the session token that every other call must carry.",
+      "purpose_source": "manual",
+      "method": "POST (stated)",
+      "method_basis": "\"You must put the following info in post parameter (x-www-form-urlencoded)\" (p. 4)",
+      "auth_headers_required": false,
+      "inputs": [
+        {
+          "name": "username",
+          "where": "form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "Shamel login name; p. 2 calls it user number (رقم المستخدم)",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "password",
+          "where": "form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "the user's password (كلمة المرور, p. 2)",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "AuthResult (single object)",
+      "response_model": "AuthResult",
+      "response_fields": [
+        "bool success",
+        "string token",
+        "int userId",
+        "string userCode",
+        "string userName",
+        "string salesmanCode",
+        "bool userIsDisabled"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "Token: you could have it by call login method",
+        "en": "security section: user number, password and token are required for any operation",
+        "page": 2,
+        "source": "manual / manual-ar"
+      },
+      "notes": [
+        "\"Keep the token to send it with every request\" (p. 4); later calls send headers username + token, never the password.",
+        "Token lifetime, expiry, refresh, logout and the effect of a second login are undocumented (ISCO-01, ISCO-02).",
+        "How a failed login is reported (HTTP 500 or success=false) is undocumented; whether a user with userIsDisabled=true still gets a token is unknown (ISCO-03).",
+        "salesmanCode binds the user to a salesman; this drives the salesman scoping of /Customer/GetCustomers (getAll) and /Voucher/GetDelivery (inferred from pp. 7, 16; ISCO-25).",
+        "HTTPS is not mentioned anywhere, so the password may cross the network in clear text (ISCO-05)."
+      ],
+      "isco": [
+        "ISCO-01",
+        "ISCO-02",
+        "ISCO-03",
+        "ISCO-04",
+        "ISCO-05"
+      ],
+      "bawaba_route": "not exposed (used only by Bawaba's session manager; /legacy/Main/Login is refused)",
+      "page": 4,
+      "pages": "4"
+    },
+    {
+      "n": 2,
+      "path": "/Files/GetCurrencies",
+      "path_as_printed": "/Files/GetCurrencies",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "List all currencies defined in Shamel.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of Currency",
+      "response_model": "Currency",
+      "response_fields": [
+        "int id",
+        "string code",
+        "string currency_name",
+        "string units",
+        "string division"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب العملات",
+        "en": "pull currencies",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get all currencies\" (p. 4). No filter.",
+        "units and division are undocumented (ISCO-28).",
+        "Other endpoints refer to a currency by a code string such as \"NIS\" or \"$\" (VoucherHeader.currency, p. 13), not by id; codes are not ISO 4217."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-28"
+      ],
+      "bawaba_route": "GET /v1/currencies",
+      "page": 4,
+      "pages": "4-5"
+    },
+    {
+      "n": 3,
+      "path": "/Files/GetCurrencyRates",
+      "path_as_printed": "/Files/GetCurrencyRates",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "Get the latest 10 exchange rates.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of CurrencyRate (latest 10)",
+      "response_model": "CurrencyRate",
+      "response_fields": [
+        "String currency_code",
+        "double rate",
+        "string date",
+        "bool is_base"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب اسعار الصرف",
+        "en": "pull exchange rates",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get latest 10 currency rate\" (p. 5): fixed limit, no currency or date filter, so historical rates or the rate on a given date cannot be read.",
+        "Whether 10 means 10 in total or 10 per currency is not stated (ISCO-28).",
+        "is_base meaning undocumented (inferred: base/local currency flag). Type printed as String (capital S)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-28"
+      ],
+      "bawaba_route": "GET /v1/currency-rates",
+      "page": 5,
+      "pages": "5"
+    },
+    {
+      "n": 4,
+      "path": "/Files/GetBanks",
+      "path_as_printed": "/Files/GetBanks",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "List all banks.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of Bank",
+      "response_model": "Bank",
+      "response_fields": [
+        "string code",
+        "string name"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب البنوك وفروعها",
+        "en": "pull banks and their branches",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get All Banks\" (p. 5). No filter.",
+        "Bank.code is what VoucherCheqs.bank_code refers to (p. 14, comment رقم البنك)."
+      ],
+      "isco": [
+        "ISCO-12"
+      ],
+      "bawaba_route": "GET /v1/banks",
+      "page": 5,
+      "pages": "5"
+    },
+    {
+      "n": 5,
+      "path": "/Files/GetBanksBranchs",
+      "path_as_printed": "/Files/GetBanksBranchs",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "List all bank branches.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of BankBranch",
+      "response_model": "BankBranch",
+      "response_fields": [
+        "string code",
+        "string name",
+        "string bank_code"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب البنوك وفروعها",
+        "en": "pull banks and their branches",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get all branchs\" [sic] (p. 5). The path itself is misspelled (Branchs) and must be called as printed.",
+        "No filter by bank: all branches come back; bank_code links a branch to Bank.code (inferred).",
+        "VoucherCheqs.branch_code refers to it (p. 14, comment رقم فرع البنك)."
+      ],
+      "isco": [
+        "ISCO-12"
+      ],
+      "bawaba_route": "GET /v1/bank-branches",
+      "page": 5,
+      "pages": "5"
+    },
+    {
+      "n": 6,
+      "path": "/Files/GetCities",
+      "path_as_printed": "/Files/GetCities",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "List all cities.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of City",
+      "response_model": "City",
+      "response_fields": [
+        "int id",
+        "string name"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب المدن",
+        "en": "pull cities",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get all cities\" (p. 6).",
+        "Customer.city, Customer(write).City and VoucherHeader.city are int ids referring to City.id (inferred from types).",
+        "Towns/villages (Customer.town, write field Town = كود القرية, village code) have no list endpoint."
+      ],
+      "isco": [
+        "ISCO-12"
+      ],
+      "bawaba_route": "GET /v1/cities",
+      "page": 6,
+      "pages": "6"
+    },
+    {
+      "n": 7,
+      "path": "/Files/GetStores",
+      "path_as_printed": "/Files/GetStores",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "List all stores (warehouses).",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of Store (the manual prints the class name as \"City\")",
+      "response_model": "Store (printed: class City)",
+      "response_fields": [
+        "int id",
+        "string name",
+        "int type",
+        "string car_code",
+        "string orgnization_code"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب المستودعات",
+        "en": "pull stores (warehouses)",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get all stores\" (p. 6), but the structure is printed as \"class City\" (copy-paste error).",
+        "type values are undocumented; car_code suggests some stores are vehicles for van sales (inferred); orgnization_code [sic] undocumented (ISCO-27, ISCO-49).",
+        "Store.id is referenced by ItemStore.store, VoucherItems.store, VoucherHeader.order_store and the store header of /Item/GetItems."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-27",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/stores",
+      "page": 6,
+      "pages": "6"
+    },
+    {
+      "n": 8,
+      "path": "/Files/GetPriceClasses",
+      "path_as_printed": "/Files/GetPriceClasses",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "Get the names of the 6 price classes.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of PriceClass (6 rows)",
+      "response_model": "PriceClass",
+      "response_fields": [
+        "int id",
+        "string name"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب فئات الاسعار",
+        "en": "pull price classes",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get the 6 price classes name\" (p. 6).",
+        "Price class N is presumably Item.sale_pariceN and Customer.price_class = N (inferred; ISCO-29). Customer.price_class is typed double while PriceClass.id is int."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-29"
+      ],
+      "bawaba_route": "GET /v1/price-classes",
+      "page": 6,
+      "pages": "6"
+    },
+    {
+      "n": 9,
+      "path": "/Files/GetSalesmen",
+      "path_as_printed": "/Files/GetSalesmen",
+      "controller": "Files",
+      "kind": "read",
+      "domain": "master_data",
+      "purpose": "Presumably lists salesmen; the manual prints only the heading.",
+      "purpose_source": "undocumented (meaning inferred from the name)",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "inputs_note": "undocumented: the manual prints only the heading (p. 6)",
+      "returns": "undocumented",
+      "response_model": "undocumented",
+      "response_fields": [],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "Heading only (p. 6): no description, no inputs, no response model. Kind \"read\" is inferred from the name.",
+        "Salesman codes appear in AuthResult.salesmanCode (p. 4), Customer.salesman_code (p. 7), Customer(write).Salesman (p. 9) and VoucherHeader.salesman (p. 13).",
+        "Needs an ISCO answer or a live capture before use (ISCO-26)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-26"
+      ],
+      "bawaba_route": "GET /v1/salesmen (provisional)",
+      "page": 6,
+      "pages": "6"
+    },
+    {
+      "n": 10,
+      "path": "/Customer/GetCustomers",
+      "path_as_printed": "/Customer/GetCustomers",
+      "controller": "Customer",
+      "kind": "read",
+      "domain": "customers",
+      "purpose": "List customers (by default only the logged-in salesman's), optionally only those changed since a date, with optional balances, classifications and contacts.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "lastupdatedate",
+          "where": "header",
+          "required": false,
+          "required_source": "manual",
+          "meaning": "only customers updated after this date (yyyy-MM-dd); empty = all customers. \"Get all customers if lastupdatedate is empty , if not get all customers that updated after lastupdatedate\"",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "code",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get one customer with the filled “code”\" (the result is still a list)",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "vatreg",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to filter on vatreg field\" (the field is VATReg, VAT registration number)",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "getBalance",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"true\" returns the customer's current balance, not-paid cheques balance and returned cheques balance (fills balance, notPayedCheqsBalance, returnedCheqsBalance)",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "getStopped",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"true\" returns ONLY stopped customers",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "getClassifications",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"true\" returns customer classifications (fills classifications)",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "getContacts",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"true\" returns customer's contacts (fills contacts)",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "getAll",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "true returns all customers, \"even not the salesman's customers\"; without it the list is limited to the logged-in user's salesman",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "list of Customer (read model: 31 scalar fields + classifications + contacts lists)",
+      "response_model": "Customer (read); CustomerClassificaiton; CustomerContact",
+      "response_fields": [
+        "string code",
+        "string name",
+        "string phone",
+        "string street",
+        "string street2",
+        "string referee1",
+        "string referee2",
+        "string salesman_code",
+        "double price_class",
+        "double credit_limit",
+        "double discount",
+        "int city",
+        "string currency",
+        "int level",
+        "string town",
+        "string city_name",
+        "string citizen_code",
+        "int attr",
+        "string man_name",
+        "int trans_permissions",
+        "string VATReg",
+        "int creditType",
+        "double balance",
+        "double notPayedCheqsBalance",
+        "double returnedCheqsBalance",
+        "bool stopped",
+        "string latitude",
+        "string longitude",
+        "string id_number",
+        "bool taxable",
+        "string paymentTermsCode",
+        "List<CustomerClassificaiton> classifications",
+        "List<CustomerContact> contacts"
+      ],
+      "response_subfields": {
+        "CustomerClassificaiton": [
+          "int pos",
+          "string name"
+        ],
+        "CustomerContact": [
+          "int pos",
+          "string name",
+          "string detail",
+          "int type",
+          "string typeName"
+        ]
+      },
+      "incremental_sync": true,
+      "listed_in_overview": {
+        "ar": "سحب الزبائن",
+        "en": "pull customers",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "Salesman scoping is implicit: \"To get all customers even not the salesman's customers fill Header[\"getAll\"]=true\" (p. 7). Behaviour for a user with no salesman link is unknown (ISCO-25).",
+        "getStopped returns only stopped customers; whether the default (no header) includes stopped customers is not stated (ISCO-30).",
+        "Balance fields are filled only with getBalance=\"true\"; their value otherwise is not stated (inferred 0) (ISCO-31).",
+        "lastupdatedate is date-only (global yyyy-MM-dd rule, p. 4); 'after' may be exclusive, timezone not stated, deletions not reported, and balance changes probably do not count as updates (ISCO-22, ISCO-23).",
+        "No name search, no paging, no count: the full (scoped) list comes back in one response (ISCO-21).",
+        "Matching rules for code and vatreg (exact, prefix, case) are not stated (ISCO-15).",
+        "Undocumented field meanings: citizen_code, attr, man_name, trans_permissions, creditType, level, discount (ISCO-32, ISCO-49). credit_limit and balance are sensitive.",
+        "Boolean headers printed as \"true\" (quoted) except getAll (unquoted true); other spellings untested (ISCO-14)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-14",
+        "ISCO-15",
+        "ISCO-21",
+        "ISCO-22",
+        "ISCO-23",
+        "ISCO-25",
+        "ISCO-30",
+        "ISCO-31",
+        "ISCO-32",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/customers; GET /v1/customers/{code}",
+      "page": 6,
+      "pages": "6-8"
+    },
+    {
+      "n": 11,
+      "path": "/Customer/GetCustomerBalances",
+      "path_as_printed": "/Customer/GetCustomerBalances",
+      "controller": "Customer",
+      "kind": "read",
+      "domain": "customers",
+      "purpose": "Get the balances of one customer (by code or VAT number), or of all customers.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "customerCode",
+          "where": "header",
+          "required": false,
+          "required_source": "manual",
+          "meaning": "customer code; \"if customerCode is empty it will return all customers balances\"",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "vatreg",
+          "where": "header",
+          "required": false,
+          "required_source": "manual",
+          "meaning": "\"Fill Header[vatreg] if you want to get customer by vatreg.\"",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "list of CustomerBalance",
+      "response_model": "CustomerBalance",
+      "response_fields": [
+        "string code",
+        "int pos",
+        "string currency",
+        "string date",
+        "double balance",
+        "double rate"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب ارصدة الزبائن",
+        "en": "pull customer balances",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "Header names printed without quotes (Header[customerCode], Header[vatreg]) (p. 8).",
+        "One row per customer per currency is inferred from the currency field; pos, date and rate are undocumented (ISCO-31).",
+        "Whether this endpoint is salesman-scoped is not stated (ISCO-25).",
+        "No balance history and no as-of-date parameter; balance at a voucher's time is only available via getCustomerBalance on the voucher reads (p. 17)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-15",
+        "ISCO-25",
+        "ISCO-31"
+      ],
+      "bawaba_route": "GET /v1/customer-balances; GET /v1/customers/{code}/balances",
+      "page": 8,
+      "pages": "8"
+    },
+    {
+      "n": 12,
+      "path": "/Customer/Post",
+      "path_as_printed": "/Customer/Post",
+      "controller": "Customer",
+      "kind": "write",
+      "domain": "customers",
+      "purpose": "Insert a new customer; Shamel assigns and returns the new customer code.",
+      "purpose_source": "manual",
+      "method": "POST (stated)",
+      "method_basis": "\"You must put the customer info in post parameter with key name [obj]\" (p. 8)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "obj",
+          "where": "json-in-form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "\"obj string must be in Json format of the following class\": Customer (write model)",
+          "meaning_source": "manual",
+          "fields": [
+            {
+              "name": "Name",
+              "type": "string",
+              "meaning": "customer name (اسم الزبون)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "VatReg",
+              "type": "string",
+              "meaning": "customer's licensed-dealer / VAT registration number (مشتغل مرخص الزبون)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "Address",
+              "type": "string",
+              "meaning": "street (الشارع); printed without // before the comment",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "MobileNumber",
+              "type": "string",
+              "meaning": "commented as fax (فاكس), contradicting the field name",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "PhoneNumber",
+              "type": "string",
+              "meaning": "phone 1 (تلفون 1)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "Salesman",
+              "type": "string",
+              "meaning": "default salesman; leave empty if there are no salesmen (المندوب الافتراضي – في حال عدم وجود مندوبين لا يتم تعبئته)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "Street",
+              "type": "string",
+              "meaning": "street 2 (شارع 2)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "City",
+              "type": "int",
+              "meaning": "city number (رقم المدينة)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "Town",
+              "type": "string",
+              "meaning": "village code (كود القرية)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "Referee",
+              "type": "string",
+              "meaning": "referee 1 (معرف 1)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "RefereeMobile",
+              "type": "string",
+              "meaning": "referee 1 phone (تلفون معرف 1)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "CustomerLevel",
+              "type": "int",
+              "meaning": "customer level (مستوى الزبون)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "PriceClass",
+              "type": "int",
+              "meaning": "price class number (رقم فئة السعر)",
+              "meaning_source": "manual-ar"
+            }
+          ]
+        }
+      ],
+      "returns": "PostResponse (JSON)",
+      "response_model": "PostResponse",
+      "response_fields": [
+        "bool Success",
+        "string ErrorMessage",
+        "string value"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "زبون جديد",
+        "en": "new customer",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Insert new customer\" (p. 8). \"If the process succeeded, the value will contain the inserted code of the customer\" (p. 9): the code is assigned by Shamel; there is no code field in the write model.",
+        "Insert only: no update or delete endpoint exists for customers.",
+        "The write model has no currency, credit limit, discount, GPS, contacts or classifications; defaults are unknown (ISCO-48).",
+        "Write names (PascalCase) differ from read names (snake_case); mapping is inferred only (ISCO-32).",
+        "Requiredness of individual fields is not stated. Duplicate detection (e.g. same VatReg) is unknown, and there is no idempotency: a retried call may create a duplicate (ISCO-43).",
+        "Failures may arrive as HTTP 500 or as Success=false with ErrorMessage (single string) (ISCO-19). Whether salesman scoping applies to writes is unknown (ISCO-25)."
+      ],
+      "isco": [
+        "ISCO-16",
+        "ISCO-19",
+        "ISCO-25",
+        "ISCO-32",
+        "ISCO-43",
+        "ISCO-48",
+        "ISCO-54"
+      ],
+      "bawaba_route": "POST /v1/customers (M2)",
+      "page": 8,
+      "pages": "8-9"
+    },
+    {
+      "n": 13,
+      "path": "/Customer/GetCustomerPricesAsRows",
+      "path_as_printed": "Customer/GetCustomerPricesAsRows",
+      "controller": "Customer",
+      "kind": "read",
+      "domain": "customers",
+      "purpose": "Presumably returns customer- or price-class-specific item prices and discounts as rows; the manual states no purpose.",
+      "purpose_source": "inferred (from the name and fields; the manual only says \"Return the following object\")",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "inputs_note": "none documented, so it cannot be narrowed to a customer or item (ISCO-33)",
+      "returns": "unnamed price-row object, presumably a list (manual: \"Return the following object\")",
+      "response_model": "CustomerPriceRow (unnamed in the manual)",
+      "response_fields": [
+        "string code",
+        "string price_class_name",
+        "string customer_code",
+        "string stock_code",
+        "double discount",
+        "int discount_type",
+        "double price",
+        "string currency_code",
+        "string main_unit",
+        "string orgnization_code",
+        "double tax"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "Path printed without a leading slash (p. 16); assumed to be /Customer/GetCustomerPricesAsRows (ISCO-13).",
+        "No inputs documented: presumably every row for every customer in one call (ISCO-21, ISCO-33).",
+        "stock_code is presumably the item code; code, discount_type values and tax (rate or amount) are undocumented (ISCO-33, ISCO-49).",
+        "Not listed in the p. 2 capability overview. Prices and discounts are commercially sensitive."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-13",
+        "ISCO-21",
+        "ISCO-25",
+        "ISCO-33",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/customer-prices; GET /v1/customers/{code}/prices",
+      "page": 16,
+      "pages": "16-17"
+    },
+    {
+      "n": 14,
+      "path": "/Item/GetItems",
+      "path_as_printed": "/Item/GetItems",
+      "controller": "Item",
+      "kind": "read",
+      "domain": "items",
+      "purpose": "List items (all, or only those changed since a date), optionally filtered by item code, serial, store or model.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "lastupdatedate",
+          "where": "header",
+          "required": false,
+          "required_source": "manual",
+          "meaning": "only items updated after this date (yyyy-MM-dd); empty = all items. \"Get all items if lastupdatedate is empty , if not get all items that updated after lastupdatedate\"",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "serial",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get items with this serial only\"",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "itemCode",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get items with this itemCode only\"",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "store",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get items with this store only\" (Store.id); whether it means items stocked in or linked to the store is not stated",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "model",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get items with this model only\"; the read model has no model field (inferred: the numeric model id of /Item/Post)",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "list of Item (read model, 51 fields)",
+      "response_model": "Item (read)",
+      "response_fields": [
+        "string code",
+        "string name",
+        "string nameEn",
+        "string unit1",
+        "string unit2",
+        "string unit3",
+        "string unit4",
+        "string unit5",
+        "string unit6",
+        "double unit2_relation",
+        "double unit3_relation",
+        "double unit4_relation",
+        "double unit5_relation",
+        "double unit6_relation",
+        "double sale_parice1",
+        "double sale_parice2",
+        "double sale_parice3",
+        "double sale_parice4",
+        "double sale_parice5",
+        "double sale_parice6",
+        "string barcode",
+        "string factory_code",
+        "string orginal_code",
+        "int stopped",
+        "int paused",
+        "int type",
+        "int has_serial",
+        "int has_measure",
+        "int has_color",
+        "int has_expiry",
+        "int eval_unit",
+        "double purchase_price",
+        "string item_group_code",
+        "string item_group_name",
+        "string item_group_father_code",
+        "string item_group_father_name",
+        "double unit_price_1",
+        "double unit_price_2",
+        "double unit_price_3",
+        "double unit_price_4",
+        "double unit_price_5",
+        "double unit_price_6",
+        "string credit_account",
+        "string debit_account",
+        "string curr1",
+        "string curr2",
+        "string curr3",
+        "string curr4",
+        "string curr5",
+        "string curr6",
+        "string orgnization_code"
+      ],
+      "incremental_sync": true,
+      "listed_in_overview": {
+        "ar": "سحب الاصناف",
+        "en": "pull items",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "Field names kept as printed, including sale_parice1..6, orginal_code and orgnization_code (pp. 9-10).",
+        "Sensitive fields come back to every caller: purchase_price, credit_account, debit_account (p. 10).",
+        "No name or barcode search and no paging (ISCO-21). Matching rules for filters are not stated (ISCO-15).",
+        "Semantics of store and model filters are unclear (ISCO-35). Difference between sale_pariceN and unit_price_N, and meaning of currN, are undocumented (ISCO-29).",
+        "lastupdatedate has the same unknowns as on GetCustomers: date-only, exclusivity, timezone, no deletions (ISCO-22). Salesman scoping not stated (ISCO-25)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-15",
+        "ISCO-21",
+        "ISCO-22",
+        "ISCO-25",
+        "ISCO-29",
+        "ISCO-35",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/items; GET /v1/items/{code}",
+      "page": 9,
+      "pages": "9-10"
+    },
+    {
+      "n": 15,
+      "path": "/Item/GetItemsStores",
+      "path_as_printed": "/Item/GetItemsStores",
+      "controller": "Item",
+      "kind": "read",
+      "domain": "stock",
+      "purpose": "Get stock quantities per item per store, for all items or one item.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "lastupdatedate",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "listed (\"Fill Headers[lastupdatedate]\") but not explained; presumably only rows changed after this date, as on GetItems",
+          "meaning_source": "inferred"
+        },
+        {
+          "name": "itemcode",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get item by code\" (all lower-case, unlike itemCode elsewhere)",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "list of ItemStore",
+      "response_model": "ItemStore",
+      "response_fields": [
+        "string item_code",
+        "int store",
+        "double qnty",
+        "string shelf",
+        "string main_unit"
+      ],
+      "incremental_sync": true,
+      "listed_in_overview": {
+        "ar": "سحب كميات الاصناف في المستودعات",
+        "en": "pull item quantities in stores",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get all items quantities\" (p. 10).",
+        "No store filter: all stores come back (ISCO-36).",
+        "What lastupdatedate filters here (e.g. stock movements) is not stated (ISCO-22).",
+        "qnty is presumably in main_unit; zero/negative rows and reserved quantities are not explained (ISCO-36).",
+        "Header casing differs from other item endpoints (itemcode vs itemCode vs ItemCode) (ISCO-13)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-13",
+        "ISCO-21",
+        "ISCO-22",
+        "ISCO-25",
+        "ISCO-36"
+      ],
+      "bawaba_route": "GET /v1/stock; GET /v1/items/{code}/stock",
+      "page": 10,
+      "pages": "10-11"
+    },
+    {
+      "n": 16,
+      "path": "/Item/getItemDetails",
+      "path_as_printed": "/Item/getItemDetails",
+      "controller": "Item",
+      "kind": "read",
+      "domain": "items",
+      "purpose": "Get one item together with its quantities in each store.",
+      "purpose_source": "inferred (from the ItemDetails structure; the manual gives no description)",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "itemCode",
+          "where": "header",
+          "required": true,
+          "required_source": "inferred",
+          "meaning": "item code of the item to fetch (\"Fill Headers[itemCode]\")",
+          "meaning_source": "inferred"
+        }
+      ],
+      "returns": "ItemDetails (manual says \"It return list of this structure\", but the shape is one item + its stock rows)",
+      "response_model": "ItemDetails",
+      "response_fields": [
+        "Item itm",
+        "List<ItemStore> itmStores"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب كمات صنف معين",
+        "en": "pull quantities of a specific item ([sic] كمات for كميات); mapping to this endpoint is inferred",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "The action name is printed with a lower-case g (p. 11); routing is presumably case-insensitive (ISCO-13).",
+        "Decode both a single object and an array, since the manual says \"list\" for a single-object shape.",
+        "itm is the full Item read model, including purchase_price and GL accounts."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-13",
+        "ISCO-25"
+      ],
+      "bawaba_route": "GET /v1/items/{code}?include=stock; GET /v1/items/{code}/overview",
+      "page": 11,
+      "pages": "11"
+    },
+    {
+      "n": 17,
+      "path": "/Item/GetItemsGroups",
+      "path_as_printed": "/Item/GetItemsGroups",
+      "controller": "Item",
+      "kind": "read",
+      "domain": "items",
+      "purpose": "List item groups (a tree via parent codes).",
+      "purpose_source": "inferred (manual only says \"It return list of the following structure\")",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of ItemGroup",
+      "response_model": "ItemGroup",
+      "response_fields": [
+        "string code",
+        "string name",
+        "string parentCode",
+        "int level"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "Comment on code: \"Item has itemGroupCode field that refer to this field\" (p. 11), but the Item field is actually item_group_code; the parent link is parentCode here and item_group_father_code in Item (ISCO-35).",
+        "level is presumably the depth in the tree (inferred). Not listed in the p. 2 overview."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-35"
+      ],
+      "bawaba_route": "GET /v1/item-groups; GET /v1/item-groups/tree",
+      "page": 11,
+      "pages": "11"
+    },
+    {
+      "n": 18,
+      "path": "/Item/GetItemsCatalog",
+      "path_as_printed": "/Item/GetItemsCatalog",
+      "controller": "Item",
+      "kind": "read",
+      "domain": "items",
+      "purpose": "List the image path of every item (the item catalogue).",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "returns": "list of ItemCatalog",
+      "response_model": "ItemCatalog",
+      "response_fields": [
+        "string item_code",
+        "string image_path"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "سحب كتالوج الاصناف",
+        "en": "pull the items catalogue",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Get all items image\" (p. 11). No item filter.",
+        "image_path format is undocumented (URL, local path or UNC path) and may reveal the Shamel server; no endpoint returns image bytes (ISCO-34)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-21",
+        "ISCO-34"
+      ],
+      "bawaba_route": "GET /v1/item-images; GET /v1/items/{code}/images (bytes via GET /v1/media/{media_id})",
+      "page": 11,
+      "pages": "11"
+    },
+    {
+      "n": 19,
+      "path": "/Item/GetItemsSerials",
+      "path_as_printed": "/Item/GetItemsSerials",
+      "controller": "Item",
+      "kind": "read",
+      "domain": "items",
+      "purpose": "List serial-numbered item units, optionally for one customer or one serial number.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "customer",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get serials with this customer code only\"",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "serial",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "\"to get serials with this serial code only\"",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "list of ItemSerial",
+      "response_model": "ItemSerial",
+      "response_fields": [
+        "string name",
+        "string itemCode",
+        "string serial",
+        "int status",
+        "int store",
+        "string start_grantee_date",
+        "string end_grantee_date"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "\"Get all items with serials only\" (p. 11).",
+        "No item-code filter. status values are undocumented (ISCO-49). start_grantee_date / end_grantee_date are misspellings of guarantee (warranty dates).",
+        "Serials cannot be written: VoucherItems.serials is \"not used\" (غير مستخدم, p. 14). Not listed in the p. 2 overview."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-15",
+        "ISCO-21",
+        "ISCO-25",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/item-serials; GET /v1/items/{code}/serials",
+      "page": 11,
+      "pages": "11-12"
+    },
+    {
+      "n": 20,
+      "path": "/Item/Post",
+      "path_as_printed": "/Item/Post",
+      "controller": "Item",
+      "kind": "write",
+      "domain": "items",
+      "purpose": "Insert a new item with a caller-chosen code, one main unit and one price.",
+      "purpose_source": "manual",
+      "method": "POST (stated)",
+      "method_basis": "\"You must put the Item info in post parameter with key name [obj]\" (p. 19)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "obj",
+          "where": "json-in-form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "\"obj string must be in Json format of the following class\": Item (write model)",
+          "meaning_source": "manual",
+          "fields": [
+            {
+              "name": "code",
+              "type": "string",
+              "meaning": "item number (رقم الصنف)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "unit1",
+              "type": "string",
+              "meaning": "item's main unit (وحدة الصنف الرئيسية)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "meaning": "item name (اسم الصنف)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "type",
+              "type": "int",
+              "meaning": "item type (نوع الصنف); values undocumented",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "price1",
+              "type": "double",
+              "meaning": "main-unit price (سعر الوحدة الرئيسية)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "currency",
+              "type": "string",
+              "meaning": "currency (العملة)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "group",
+              "type": "string",
+              "meaning": "belongs to group (تابع لصنف), i.e. the item group code (inferred)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "barcode",
+              "type": "string",
+              "meaning": "barcode (الباركود)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "original_code",
+              "type": "string",
+              "meaning": "original number (الرقم الاصلي)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "factory_code",
+              "type": "string",
+              "meaning": "factory number (رقم المصنع)",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "trademark",
+              "type": "int",
+              "meaning": "trademark / brand (العلامة التجارية); no lookup endpoint",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "producing_company",
+              "type": "int",
+              "meaning": "producing company (الشركة المنتجة); no lookup endpoint",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "style",
+              "type": "int",
+              "meaning": "style (الطراز); no lookup endpoint",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "model",
+              "type": "int",
+              "meaning": "model (الموديل); no lookup endpoint",
+              "meaning_source": "manual-ar"
+            },
+            {
+              "name": "note",
+              "type": "string",
+              "meaning": "item note (printed ملاحظة النصف, a typo for ملاحظة الصنف)",
+              "meaning_source": "manual-ar"
+            }
+          ]
+        }
+      ],
+      "returns": "PostResponse (JSON)",
+      "response_model": "PostResponse",
+      "response_fields": [
+        "bool Success",
+        "string ErrorMessage",
+        "string value"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "صنف جديد",
+        "en": "new item",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Insert new Item\" (p. 19). Insert only: no update or delete endpoint for items.",
+        "Unlike Customer/Post, the manual does not say what value contains (inferred: the item code) (ISCO-48).",
+        "Only unit1 and price1 can be set: units 2-6, prices 2-6, purchase price and GL accounts cannot be written.",
+        "trademark, producing_company, style and model are write-only ints whose valid values cannot be read (ISCO-48, ISCO-49).",
+        "Write names differ from read names: original_code vs orginal_code, price1 vs sale_parice1, group vs item_group_code, currency vs curr1..6.",
+        "Duplicate-code behaviour and idempotency are unknown (ISCO-43)."
+      ],
+      "isco": [
+        "ISCO-16",
+        "ISCO-19",
+        "ISCO-43",
+        "ISCO-48",
+        "ISCO-49",
+        "ISCO-54"
+      ],
+      "bawaba_route": "POST /v1/items (M2)",
+      "page": 19,
+      "pages": "19-20"
+    },
+    {
+      "n": 21,
+      "path": "/Report/GetLastPriceReport",
+      "path_as_printed": "/Report/GetLastPriceReport",
+      "controller": "Report",
+      "kind": "report",
+      "domain": "reports",
+      "purpose": "Last-prices report for an item: recent transaction dates, prices, quantities and customers.",
+      "purpose_source": "manual-ar (title تقرير اخر الأسعار, last prices report, p. 3); row meaning inferred",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "ItemCode",
+          "where": "header",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "item code; \"ItemCode is mandatory\"",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "barcode",
+          "where": "header",
+          "required": false,
+          "required_source": "inferred",
+          "meaning": "item barcode; the manual prints \"ItemCode is optional\" after this line, presumably meaning barcode is optional",
+          "meaning_source": "inferred"
+        }
+      ],
+      "returns": "list of LastPriceRepColumn",
+      "response_model": "LastPriceRepColumn",
+      "response_fields": [
+        "string date",
+        "string code",
+        "double price",
+        "string currency",
+        "double quantity",
+        "double bonus",
+        "string unit",
+        "string customer"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "تقرير اخر الأسعار",
+        "en": "last prices report",
+        "page": 3,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "Self-contradiction on p. 12: \"ItemCode is mandatory\" then \"ItemCode is optional\" after the barcode line (ISCO-37).",
+        "No customer filter: unclear whether it is global or per customer, and whether customer holds a code or a name (ISCO-37).",
+        "code is presumably the voucher code; included voucher types and row count are not stated. ItemCode is capitalised, unlike itemCode elsewhere (ISCO-13)."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-13",
+        "ISCO-25",
+        "ISCO-37"
+      ],
+      "bawaba_route": "GET /v1/reports/last-prices",
+      "page": 12,
+      "pages": "12"
+    },
+    {
+      "n": 22,
+      "path": "/Report/GetAccountsheet",
+      "path_as_printed": "/Report/GetAccountsheet",
+      "controller": "Report",
+      "kind": "report",
+      "domain": "reports",
+      "purpose": "Account statement (debits, credits, running balance) for a customer over a date range.",
+      "purpose_source": "manual-ar (title كشف حساب محاسبي, accounting account statement, p. 3); customer scope from the filter field customerCode",
+      "method": "POST (stated)",
+      "method_basis": "\"You must put the report filters info in post parameter with key name [obj]\" (p. 12)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "obj",
+          "where": "json-in-form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "\"obj string must be in Json format of the following class\": AccountsheetFilters (customer variant)",
+          "meaning_source": "manual",
+          "fields": [
+            {
+              "name": "customerCode",
+              "type": "string",
+              "meaning": "customer (account) code; whether any GL account code is accepted is unknown",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "currencyCode",
+              "type": "string",
+              "meaning": "statement currency",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "fromDate",
+              "type": "string",
+              "meaning": "start date (yyyy-MM-dd)",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "toDate",
+              "type": "string",
+              "meaning": "end date (yyyy-MM-dd)",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "showOtherCurrencies",
+              "type": "bool",
+              "meaning": "include movements in other currencies",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "showStocks",
+              "type": "bool",
+              "meaning": "include item/stock lines",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "showCheqs",
+              "type": "bool",
+              "meaning": "include cheques",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "showNotPayedCheqs",
+              "type": "bool",
+              "meaning": "include not-paid (uncleared) cheques",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "showReturnedCheq",
+              "type": "bool",
+              "meaning": "include returned cheques (singular name)",
+              "meaning_source": "inferred"
+            }
+          ]
+        }
+      ],
+      "returns": "list of AccountsheetColumns",
+      "response_model": "AccountsheetColumns",
+      "response_fields": [
+        "string date",
+        "string code",
+        "string type",
+        "string credit",
+        "string debit",
+        "string start_date",
+        "string balance",
+        "string note"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "كشف حساب محاسبي",
+        "en": "accounting account statement",
+        "page": 3,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "A read carried in a form POST body (p. 12).",
+        "Requiredness of the filter fields is not stated; the manual gives no field meanings (all inferred from names).",
+        "credit, debit and balance are returned as strings with an unknown number format; type is a string; start_date is undocumented; whether an opening-balance row exists is unknown (ISCO-38).",
+        "Date-range inclusivity and maximum range not stated (ISCO-21, ISCO-24). Salesman scoping not stated (ISCO-25)."
+      ],
+      "isco": [
+        "ISCO-16",
+        "ISCO-21",
+        "ISCO-24",
+        "ISCO-25",
+        "ISCO-38",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/reports/account-statement",
+      "page": 12,
+      "pages": "12-13"
+    },
+    {
+      "n": 23,
+      "path": "/Voucher/Post2",
+      "path_as_printed": "/Voucher/Post2",
+      "controller": "Voucher",
+      "kind": "write",
+      "domain": "vouchers",
+      "purpose": "Insert a new voucher of any of the 13 documented types (order, invoice, return, receipt, payment, notes, journal, deliveries, stock-out).",
+      "purpose_source": "manual",
+      "method": "POST (stated)",
+      "method_basis": "\"You must put the voucher info in post parameter with key name [obj]\" (p. 13)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "obj",
+          "where": "json-in-form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "\"obj string must be in Json format of the following class\": Voucher {header, items, cheqs, accounts}",
+          "meaning_source": "manual",
+          "structure": {
+            "header (VoucherHeader, معلومات الحركة)": [
+              "int type",
+              "string code",
+              "string date",
+              "string time",
+              "string currency",
+              "double rate",
+              "string customer_code",
+              "int city",
+              "string manual_code",
+              "bool is_posted",
+              "bool is_printed",
+              "double discount",
+              "double balance",
+              "string update_date",
+              "string note",
+              "string note2",
+              "double vat",
+              "string delivery_id",
+              "string salesman",
+              "double cheq_balance",
+              "string date_to_deliver",
+              "string time_to_deliver",
+              "int payment_type",
+              "int order_store",
+              "double customer_balance",
+              "int system_id"
+            ],
+            "items (List<VoucherItems>, تفاصيل اصناف الحركة)": [
+              "string voucher_code",
+              "int pos",
+              "string code",
+              "string name",
+              "int unit",
+              "int store",
+              "int measure",
+              "int color",
+              "double quantity",
+              "double price",
+              "double bonus",
+              "double discount",
+              "double vat",
+              "double sold_qnty",
+              "double delivery_pos",
+              "string note",
+              "string[] serials",
+              "string costcenter1",
+              "string costcenter2",
+              "string costcenter3",
+              "string costcenter4",
+              "string costcenter5",
+              "string costcenter6"
+            ],
+            "cheqs (List<VoucherCheqs>, الشيكات)": [
+              "string cheq_num",
+              "string account_num",
+              "string bank_code",
+              "string branch_code",
+              "string due_date",
+              "double rate",
+              "string currency",
+              "double amount"
+            ],
+            "accounts (List<VoucherAccounts>, الحسابات)": [
+              "int position",
+              "string account_code",
+              "double amount",
+              "int debit_credit",
+              "string costcenter1",
+              "string costcenter2",
+              "string costcenter3",
+              "string costcenter4",
+              "string costcenter5",
+              "string costcenter6",
+              "string note"
+            ]
+          },
+          "rules": [
+            {
+              "rule": "header.type is one of VoucherTypes: Order=0, PurchaseDelivery=2, ReturnSalesInvoice=4, ReturnedPendingSalesDelivery=5, SalesInvoice=9, SalesDelivery=10, Stockout=12, InternalDelivery=16, Credit=22, Debit=23, Receipt=24, Payment=27, Journal=28",
+              "source": "manual",
+              "page": 15
+            },
+            {
+              "rule": "header.code is optional; if not sent Shamel assigns a number (اذا لم يتم ارسال رقم الحركة يتم اعطائها رقم من الشامل)",
+              "source": "manual-ar",
+              "page": 13
+            },
+            {
+              "rule": "if header.code is sent \"it must start with the following character\": I, S, F, R, P, O, C, D, J, N, B, V by type; PurchaseDelivery has no letter",
+              "source": "manual",
+              "page": 15
+            },
+            {
+              "rule": "header.system_id: \"value must be between 1000 and 2000\" (purpose undocumented)",
+              "source": "manual",
+              "page": 14
+            },
+            {
+              "rule": "header.date (yyyy-MM-dd), header.time (hhmmss)",
+              "source": "manual",
+              "page": 13
+            },
+            {
+              "rule": "header.manual_code records the paper reference number if one exists (يتم استخدامه لتدوين رقم المرجعي الورقي ان وجد)",
+              "source": "manual-ar",
+              "page": 13
+            },
+            {
+              "rule": "header.is_posted / is_printed: whether the voucher is entered as posted / printed (هل يتم ادخال حالة الحركة مرحلة / مطبوعة ام لا)",
+              "source": "manual-ar",
+              "page": 13
+            },
+            {
+              "rule": "header.discount is the total invoice discount amount (قيمة الخصم الكلي للفاتورة); items[].discount is a percentage 0-100 (نسبة الخصم)",
+              "source": "manual-ar",
+              "page": 14
+            },
+            {
+              "rule": "items[].vat is the tax amount for a quantity of 1 (قيمة الضريبة لكمية 1)",
+              "source": "manual-ar",
+              "page": 14
+            },
+            {
+              "rule": "accounts is mandatory only in journal vouchers (اجبارية في سند القيد فقط)",
+              "source": "manual-ar",
+              "page": 13
+            },
+            {
+              "rule": "items[].voucher_code and items[].name must NOT be filled on insert (لا يجب تعبئته في الادخال)",
+              "source": "manual-ar",
+              "page": 14
+            },
+            {
+              "rule": "items[].pos starts from zero (يبدا من صفر)",
+              "source": "manual-ar",
+              "page": 14
+            },
+            {
+              "rule": "items[].measure, items[].color and items[].serials are not used (غير مستخدم)",
+              "source": "manual-ar",
+              "page": 14
+            },
+            {
+              "rule": "header.currency is a currency code, e.g. \"NIS\", \"$\" (كود العملة)",
+              "source": "manual",
+              "page": 13
+            }
+          ]
+        }
+      ],
+      "returns": "Result (voucher variant, JSON)",
+      "response_model": "Result (voucher variant)",
+      "response_fields": [
+        "bool Success",
+        "string[] ErrorMessage",
+        "string refrenceId"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "طلبية مبيعات؛ سند جديد: فاتورة مبيعات، مردود مبيعات، ارسالية مشتريات، سند قبض، سند صرف، فاتورة من ارسالية، إشعار دائن، إشعار مدين، سند قيد، سند إخراج بضاعة، ارسالية داخلية، ارسالية مبيعات",
+        "en": "sales order; new voucher: sales invoice, sales return, purchase delivery, receipt, payment, invoice from delivery, credit note, debit note, journal, goods-issue, internal delivery, sales delivery",
+        "pages": "2-3",
+        "source": "manual-ar"
+      },
+      "notes": [
+        "\"Insert new voucher\" (p. 13). \"If the process succeeded, the refrenceId will contain the inserted code of the voucher\" (p. 15). ErrorMessage is a string array here, unlike PostResponse.",
+        "Insert only: no update, delete, cancel or void endpoint; corrections presumably need a compensating voucher (e.g. credit note, return) or a manual fix in Shamel (inferred).",
+        "Overview (pp. 2-3) and enum (p. 15) disagree: \"invoice from delivery\" (فاتورة من ارسالية) has no enum value (inferred: SalesInvoice=9 with delivery_id / delivery_pos), and ReturnedPendingSalesDelivery=5 is not in the overview (ISCO-47).",
+        "Requiredness per voucher type is not documented, nor whether Shamel recomputes totals and VAT, checks stock, credit limits or stopped customers (ISCO-46, ISCO-47).",
+        "How receipts/payments carry the cash amount, and how an internal delivery names its destination store, are not stated (ISCO-47).",
+        "No idempotency; duplicate code/manual_code behaviour unknown; a retry after a timeout may double-post (ISCO-43). system_id meaning unknown (ISCO-44).",
+        "The name Post2 implies an older /Voucher/Post, which is undocumented (ISCO-50, ISCO-55). Undocumented values: payment_type, unit, debit_credit (ISCO-49)."
+      ],
+      "isco": [
+        "ISCO-16",
+        "ISCO-19",
+        "ISCO-25",
+        "ISCO-43",
+        "ISCO-44",
+        "ISCO-45",
+        "ISCO-46",
+        "ISCO-47",
+        "ISCO-49",
+        "ISCO-50",
+        "ISCO-54"
+      ],
+      "bawaba_route": "POST /v1/vouchers/{voucher_type} (M2)",
+      "page": 13,
+      "pages": "13-16"
+    },
+    {
+      "n": 24,
+      "path": "/Voucher/GetDelivery",
+      "path_as_printed": "/Voucher/GetDelivery",
+      "controller": "Voucher",
+      "kind": "read",
+      "domain": "vouchers",
+      "purpose": "Get the delivery that has been prepared for the logged-in salesman.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [],
+      "inputs_note": "none documented; the salesman is implicit (inferred: the logged-in user's salesmanCode)",
+      "returns": "Voucher (delivery variant: header, items, cheqs; single object)",
+      "response_model": "Voucher (delivery variant)",
+      "response_fields": [
+        "VoucherHeader header",
+        "List<VoucherItems> items",
+        "List<VoucherCheqs> cheqs"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "\"Get the delivery that is prepared to the salesman\"; \"It return object of Voucher class\" (p. 16). No accounts list.",
+        "Behaviour with zero or several prepared deliveries, the voucher type returned, and whether the call changes state are unknown (ISCO-41).",
+        "Not listed in the p. 2 overview."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-25",
+        "ISCO-41"
+      ],
+      "bawaba_route": "GET /v1/deliveries/prepared",
+      "page": 16,
+      "pages": "16"
+    },
+    {
+      "n": 25,
+      "path": "/Voucher/GetStatus",
+      "path_as_printed": "/Voucher/GetStatus",
+      "controller": "Voucher",
+      "kind": "read",
+      "domain": "vouchers",
+      "purpose": "Get the status of an order: not ready, ready, closed, sent partially or sent.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "manual",
+          "where": "header",
+          "required": true,
+          "required_source": "inferred",
+          "meaning": "printed only as \"Fill Header[manual]\"; presumably the order's manual_code (paper reference), not its voucher code",
+          "meaning_source": "inferred"
+        }
+      ],
+      "returns": "order status 0..4 (0 not ready, 1 ready, 2 closed, 3 sent partially, 4 sent); representation undocumented",
+      "response_model": "undocumented scalar",
+      "response_fields": [],
+      "response_values": {
+        "0": "not ready",
+        "1": "ready",
+        "2": "closed",
+        "3": "sent partially",
+        "4": "sent"
+      },
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "\"Return the order status\" (p. 16); English labels only.",
+        "Response shape (bare number or JSON), the result for an unknown value, duplicate manual codes and non-order types are undocumented (ISCO-42).",
+        "No way to get status by voucher code is documented (ISCO-42). Not listed in the p. 2 overview."
+      ],
+      "isco": [
+        "ISCO-12",
+        "ISCO-42"
+      ],
+      "bawaba_route": "GET /v1/order-status",
+      "page": 16,
+      "pages": "16"
+    },
+    {
+      "n": 26,
+      "path": "/Voucher/GetVoucher",
+      "path_as_printed": "Voucher/GetVoucher",
+      "controller": "Voucher",
+      "kind": "read",
+      "domain": "vouchers",
+      "purpose": "Fetch one voucher (header, lines, cheques, accounts) by its code, optionally with the customer's balance at that time.",
+      "purpose_source": "manual",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "voucher_code",
+          "where": "header",
+          "required": true,
+          "required_source": "inferred",
+          "meaning": "the voucher code (manual: \"Set the voucher header in header[“voucher_code”]\"); whether the prefix letter is included is not stated",
+          "meaning_source": "manual"
+        },
+        {
+          "name": "getCustomerBalance",
+          "where": "header",
+          "required": false,
+          "required_source": "manual",
+          "meaning": "true returns \"the customer balance at the invoice time. If the header is not set or set to false, 0 is returned.\"",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "Voucher (full: header, items, cheqs, accounts)",
+      "response_model": "Voucher (full)",
+      "response_fields": [
+        "VoucherHeader header",
+        "List<VoucherItems> items",
+        "List<VoucherCheqs> cheqs",
+        "List<VoucherAccounts> accounts"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "Path printed without a leading slash (p. 17) (ISCO-13).",
+        "The header name contains an underscore, which nginx and some proxies drop by default (ISCO-11).",
+        "Unlike GetVouchers, the balance wording lacks \"(excluding the invoice itself)\"; the balance field is presumably VoucherHeader.customer_balance (inferred) (ISCO-31). A requested 0 and a not-requested 0 look the same.",
+        "Not listed in the p. 2 overview."
+      ],
+      "isco": [
+        "ISCO-11",
+        "ISCO-12",
+        "ISCO-13",
+        "ISCO-25",
+        "ISCO-31",
+        "ISCO-40"
+      ],
+      "bawaba_route": "GET /v1/vouchers/{code}",
+      "page": 17,
+      "pages": "17"
+    },
+    {
+      "n": 27,
+      "path": "/Voucher/GetVouchers",
+      "path_as_printed": "Voucher/GetVouchers",
+      "controller": "Voucher",
+      "kind": "read",
+      "domain": "vouchers",
+      "purpose": "List vouchers in a date range, optionally for one customer and/or currency.",
+      "purpose_source": "inferred (from the filters object; the manual only says \"return array of Voucher\")",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "filters",
+          "where": "header",
+          "required": true,
+          "required_source": "inferred",
+          "meaning": "JSON object in a request header: \"add header[“filters”] that represent the following object\"",
+          "meaning_source": "manual",
+          "format": "json",
+          "fields": [
+            {
+              "name": "customerCode",
+              "type": "string",
+              "meaning": "customer code; printed \"optional\"",
+              "meaning_source": "manual",
+              "required": false,
+              "required_source": "manual"
+            },
+            {
+              "name": "currencyCode",
+              "type": "string",
+              "meaning": "currency code; printed \"optional\"",
+              "meaning_source": "manual",
+              "required": false,
+              "required_source": "manual"
+            },
+            {
+              "name": "fromDate",
+              "type": "string",
+              "meaning": "start of date range (yyyy-MM-dd per the global rule, p. 4); which date (voucher date or entry/update date) is not stated",
+              "meaning_source": "inferred",
+              "required": true,
+              "required_source": "inferred"
+            },
+            {
+              "name": "toDate",
+              "type": "string",
+              "meaning": "end of date range (yyyy-MM-dd); inclusivity not stated",
+              "meaning_source": "inferred",
+              "required": true,
+              "required_source": "inferred"
+            }
+          ]
+        },
+        {
+          "name": "getCustomerBalance",
+          "where": "header",
+          "required": false,
+          "required_source": "manual",
+          "meaning": "true returns \"the customer balance at the invoice time (excluding the invoice itself). If the header is not set or set to false, 0 is returned.\"",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "array of Voucher (which Voucher class is not stated; presumably the full one)",
+      "response_model": "Voucher (presumably full)",
+      "response_fields": [
+        "VoucherHeader header",
+        "List<VoucherItems> items",
+        "List<VoucherCheqs> cheqs",
+        "List<VoucherAccounts> accounts"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "Path printed without a leading slash (p. 17) (ISCO-13).",
+        "JSON inside a request header: header size limits and non-ASCII values are fragile (ISCO-11).",
+        "No voucher-type filter, no lookup by manual_code, no paging, no maximum range; whether dates are voucher dates or entry/update dates is unknown (ISCO-21, ISCO-23, ISCO-40).",
+        "Not listed in the p. 2 overview."
+      ],
+      "isco": [
+        "ISCO-11",
+        "ISCO-12",
+        "ISCO-13",
+        "ISCO-21",
+        "ISCO-23",
+        "ISCO-24",
+        "ISCO-25",
+        "ISCO-40"
+      ],
+      "bawaba_route": "GET /v1/vouchers",
+      "page": 17,
+      "pages": "17"
+    },
+    {
+      "n": 28,
+      "path": "/Voucher/GetExtraVouchers",
+      "path_as_printed": "Voucher/GetExtraVouchers",
+      "controller": "Voucher",
+      "kind": "read",
+      "domain": "vouchers",
+      "purpose": "Presumably a lightweight list of vouchers in a date range with amount, direction and the customer's balance at each voucher date; the manual does not explain it.",
+      "purpose_source": "inferred (from the short Voucher class; \"Extra\" is not explained)",
+      "method": "GET (assumed)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "filters",
+          "where": "header",
+          "required": true,
+          "required_source": "inferred",
+          "meaning": "JSON object in a request header, same object as GetVouchers",
+          "meaning_source": "manual",
+          "format": "json",
+          "fields": [
+            {
+              "name": "customerCode",
+              "type": "string",
+              "meaning": "customer code; printed \"optional\"",
+              "meaning_source": "manual",
+              "required": false,
+              "required_source": "manual"
+            },
+            {
+              "name": "currencyCode",
+              "type": "string",
+              "meaning": "currency code; printed \"optional\"",
+              "meaning_source": "manual",
+              "required": false,
+              "required_source": "manual"
+            },
+            {
+              "name": "fromDate",
+              "type": "string",
+              "meaning": "start of date range (yyyy-MM-dd per the global rule, p. 4); which date (voucher date or entry/update date) is not stated",
+              "meaning_source": "inferred",
+              "required": true,
+              "required_source": "inferred"
+            },
+            {
+              "name": "toDate",
+              "type": "string",
+              "meaning": "end of date range (yyyy-MM-dd); inclusivity not stated",
+              "meaning_source": "inferred",
+              "required": true,
+              "required_source": "inferred"
+            }
+          ]
+        },
+        {
+          "name": "getCustomerBalance",
+          "where": "header",
+          "required": false,
+          "required_source": "manual",
+          "meaning": "true returns \"the customer balance at the invoice time (excluding the invoice itself). If the header is not set or set to false, 0 is returned.\"",
+          "meaning_source": "manual"
+        }
+      ],
+      "returns": "array of short Voucher (printed \"public class Voucher\"; a different class from the full one)",
+      "response_model": "ExtraVoucher (printed: public class Voucher)",
+      "response_fields": [
+        "int type",
+        "string code",
+        "string date",
+        "string customer_code",
+        "double amount",
+        "string currency",
+        "double rate",
+        "int cr_dr",
+        "double customer_balance_at_voucher_date"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": null,
+      "notes": [
+        "Path printed without a leading slash (p. 17) (ISCO-13).",
+        "Which voucher types are included and what \"extra\" means are unknown; cr_dr values undocumented (ISCO-40, ISCO-49).",
+        "Same JSON-in-header and no-paging limits as GetVouchers (ISCO-11, ISCO-21). Not listed in the p. 2 overview."
+      ],
+      "isco": [
+        "ISCO-11",
+        "ISCO-12",
+        "ISCO-13",
+        "ISCO-21",
+        "ISCO-25",
+        "ISCO-40",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/voucher-summaries",
+      "page": 17,
+      "pages": "17-18"
+    },
+    {
+      "n": 29,
+      "path": "/CostCenter/Post",
+      "path_as_printed": "/CostCenter/Post",
+      "controller": "CostCenter",
+      "kind": "write",
+      "domain": "cost_centers",
+      "purpose": "Insert a new cost center with a caller-chosen code.",
+      "purpose_source": "manual-ar (overview مركز تكلفة جديد, new cost center, p. 2) and the CostCenterDTO body; the endpoint text itself says \"Insert new customer\" (copy-paste error)",
+      "method": "POST (stated)",
+      "method_basis": "\"You must put the customer info in post parameter with key name [obj]\" (p. 18)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "obj",
+          "where": "json-in-form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "\"obj string must be in Json format of the following class\": CostCenterDTO",
+          "meaning_source": "manual",
+          "fields": [
+            {
+              "name": "code",
+              "type": "string",
+              "meaning": "cost-center code",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "meaning": "name (Arabic)",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "name_en",
+              "type": "string",
+              "meaning": "English name",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "father",
+              "type": "string",
+              "meaning": "parent cost-center code",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "type",
+              "type": "string",
+              "meaning": "undocumented",
+              "meaning_source": "undocumented"
+            },
+            {
+              "name": "date",
+              "type": "string",
+              "meaning": "undocumented date (presumably yyyy-MM-dd)",
+              "meaning_source": "undocumented"
+            }
+          ]
+        }
+      ],
+      "returns": "Result (cost-center variant, JSON): no identifier returned",
+      "response_model": "Result (cost-center variant)",
+      "response_fields": [
+        "bool Success",
+        "string ErrorMessage"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "مركز تكلفة جديد",
+        "en": "new cost center",
+        "page": 2,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "Text says \"Insert new customer\" and \"put the customer info\" (p. 18): copy-paste errors; the body is CostCenterDTO.",
+        "Returns only Success and ErrorMessage (p. 19); the created code can only be the code sent. Duplicate-code behaviour unknown (ISCO-39, ISCO-43).",
+        "Insert only; there is no endpoint to list, read, update or delete cost centers (ISCO-39).",
+        "Cost-center codes are used in VoucherItems.costcenter1..6 and VoucherAccounts.costcenter1..6 (p. 14-15)."
+      ],
+      "isco": [
+        "ISCO-16",
+        "ISCO-19",
+        "ISCO-39",
+        "ISCO-43",
+        "ISCO-49",
+        "ISCO-54"
+      ],
+      "bawaba_route": "POST /v1/cost-centers (M2)",
+      "page": 18,
+      "pages": "18-19"
+    },
+    {
+      "n": 30,
+      "path": "/CostCenter/GetCostCenterAccountsheet",
+      "path_as_printed": "/CostCenter/GetCostCenterAccountsheet",
+      "controller": "CostCenter",
+      "kind": "report",
+      "domain": "reports",
+      "purpose": "Account statement for a range of cost centers (optionally one account) over a date range.",
+      "purpose_source": "manual-ar (title تقرير كشف حساب لمركز تكلفة, cost-center account statement report, p. 3); field meanings inferred",
+      "method": "POST (stated)",
+      "method_basis": "\"You must put the report filters info in post parameter with key name [filters]\" (p. 19)",
+      "auth_headers_required": true,
+      "inputs": [
+        {
+          "name": "filters",
+          "where": "json-in-form",
+          "required": true,
+          "required_source": "manual",
+          "meaning": "\"filters string must be in Json format of the following class\": AccountsheetFilters (cost-center variant). Form field named filters, not obj",
+          "meaning_source": "manual",
+          "fields": [
+            {
+              "name": "fromCostcenter",
+              "type": "string",
+              "meaning": "first cost center of the range",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "toCostcenter",
+              "type": "string",
+              "meaning": "last cost center of the range",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "account",
+              "type": "string",
+              "meaning": "account code",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "type",
+              "type": "int",
+              "meaning": "undocumented",
+              "meaning_source": "undocumented"
+            },
+            {
+              "name": "currencyCode",
+              "type": "string",
+              "meaning": "currency",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "fromDate",
+              "type": "string",
+              "meaning": "start date (yyyy-MM-dd)",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "toDate",
+              "type": "string",
+              "meaning": "end date (yyyy-MM-dd)",
+              "meaning_source": "inferred"
+            },
+            {
+              "name": "showOtherCurrencies",
+              "type": "bool",
+              "meaning": "include other currencies",
+              "meaning_source": "inferred"
+            }
+          ]
+        }
+      ],
+      "returns": "list of AccountsheetColumns (same columns as /Report/GetAccountsheet)",
+      "response_model": "AccountsheetColumns",
+      "response_fields": [
+        "string date",
+        "string code",
+        "string type",
+        "string credit",
+        "string debit",
+        "string start_date",
+        "string balance",
+        "string note"
+      ],
+      "incremental_sync": false,
+      "listed_in_overview": {
+        "ar": "تقرير كشف حساب لمركز تكلفة",
+        "en": "cost-center account statement report",
+        "page": 3,
+        "source": "manual-ar"
+      },
+      "notes": [
+        "Lives under the CostCenter controller; domain set to reports to match the manual's own report list (p. 3).",
+        "type filter values and what account accepts are undocumented (ISCO-39, ISCO-49). Amounts are strings (same as GetAccountsheet, ISCO-38).",
+        "The name filters is a form field here but a request header on GetVouchers/GetExtraVouchers.",
+        "Date-range inclusivity and maximum range not stated (ISCO-21, ISCO-24)."
+      ],
+      "isco": [
+        "ISCO-16",
+        "ISCO-21",
+        "ISCO-24",
+        "ISCO-38",
+        "ISCO-39",
+        "ISCO-49"
+      ],
+      "bawaba_route": "GET /v1/reports/cost-center-statement",
+      "page": 19,
+      "pages": "19"
+    }
+  ],
+  "matrix": [
+    {
+      "entity": "Currencies",
+      "entity_ar": "العملات",
+      "entity_ar_source": "manual-ar (p. 2, سحب العملات)",
+      "endpoints": [
+        "/Files/GetCurrencies"
+      ],
+      "list": "yes",
+      "get_one": "no (full list only)",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "exchange rates (/Files/GetCurrencyRates)"
+      ],
+      "notes": "Full list only. units/division undocumented. Elsewhere currencies are referenced by code strings such as \"NIS\", \"$\" (p. 13).",
+      "isco": [
+        "ISCO-28"
+      ],
+      "pages": "4-5"
+    },
+    {
+      "entity": "Exchange rates",
+      "entity_ar": "اسعار الصرف",
+      "entity_ar_source": "manual-ar (p. 2, سحب اسعار الصرف)",
+      "endpoints": [
+        "/Files/GetCurrencyRates"
+      ],
+      "list": "partial",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "Only the \"latest 10\" rates (p. 5); no currency/date filter, no history, no rate-on-date. 10 total vs per currency unclear. Vouchers carry their own rate (VoucherHeader.rate).",
+      "isco": [
+        "ISCO-28"
+      ],
+      "pages": "5"
+    },
+    {
+      "entity": "Banks & branches",
+      "entity_ar": "البنوك وفروعها",
+      "entity_ar_source": "manual-ar (p. 2, سحب البنوك وفروعها)",
+      "endpoints": [
+        "/Files/GetBanks",
+        "/Files/GetBanksBranchs"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "used by cheques: VoucherCheqs.bank_code / branch_code (p. 14)"
+      ],
+      "notes": "Two full lists; branches cannot be filtered by bank (join on bank_code, inferred). Path misspelled GetBanksBranchs.",
+      "isco": [],
+      "pages": "5"
+    },
+    {
+      "entity": "Cities",
+      "entity_ar": "المدن",
+      "entity_ar_source": "manual-ar (p. 2, سحب المدن)",
+      "endpoints": [
+        "/Files/GetCities"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "id + name only. Towns/villages (Customer.town, كود القرية) have no list endpoint.",
+      "isco": [
+        "ISCO-52"
+      ],
+      "pages": "6"
+    },
+    {
+      "entity": "Stores",
+      "entity_ar": "المستودعات",
+      "entity_ar_source": "manual-ar (p. 2, سحب المستودعات)",
+      "endpoints": [
+        "/Files/GetStores"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "stock per store (/Item/GetItemsStores)",
+        "items filtered by store (/Item/GetItems store header)"
+      ],
+      "notes": "Class printed as \"City\" (p. 6). type, car_code (van stores? inferred) and orgnization_code undocumented.",
+      "isco": [
+        "ISCO-27",
+        "ISCO-49"
+      ],
+      "pages": "6"
+    },
+    {
+      "entity": "Price classes",
+      "entity_ar": "فئات الاسعار",
+      "entity_ar_source": "manual-ar (p. 2, سحب فئات الاسعار)",
+      "endpoints": [
+        "/Files/GetPriceClasses"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "item prices sale_parice1..6 (/Item/GetItems, link inferred)",
+        "customer price_class (/Customer/GetCustomers)"
+      ],
+      "notes": "Always the 6 class names (p. 6). Link N -> sale_pariceN is inferred.",
+      "isco": [
+        "ISCO-29"
+      ],
+      "pages": "6"
+    },
+    {
+      "entity": "Salesmen",
+      "entity_ar": "المندوبين",
+      "entity_ar_source": "manual-ar wording (المندوب / مندوبين appear in comments, pp. 9, 13); no Arabic title for this endpoint",
+      "endpoints": [
+        "/Files/GetSalesmen"
+      ],
+      "list": "partial",
+      "get_one": "no",
+      "filters": [
+        "undocumented"
+      ],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "the logged-in user's salesman: AuthResult.salesmanCode (/Main/Login)"
+      ],
+      "notes": "Endpoint printed as a heading only (p. 6): inputs and response undocumented. Salesman also scopes GetCustomers (unless getAll=true) and GetDelivery.",
+      "isco": [
+        "ISCO-26",
+        "ISCO-25"
+      ],
+      "pages": "6"
+    },
+    {
+      "entity": "Customers",
+      "entity_ar": "الزبائن",
+      "entity_ar_source": "manual-ar (p. 2, سحب الزبائن)",
+      "endpoints": [
+        "/Customer/GetCustomers",
+        "/Customer/Post"
+      ],
+      "list": "yes",
+      "get_one": "yes (by code header; still returns a list)",
+      "filters": [
+        "code (one customer)",
+        "vatreg",
+        "getStopped=true (stopped customers only)",
+        "salesman (implicit: logged-in user's salesman unless getAll=true)",
+        "lastupdatedate (changed after a date)"
+      ],
+      "incremental_sync": "yes (date-only lastupdatedate; exclusivity/timezone unknown; deletions not reported)",
+      "create": "yes (/Customer/Post)",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "balances (getBalance=true, or /Customer/GetCustomerBalances)",
+        "classifications (getClassifications=true)",
+        "contacts (getContacts=true)",
+        "special prices (Customer/GetCustomerPricesAsRows, purpose inferred)",
+        "account statement (/Report/GetAccountsheet)",
+        "vouchers by customer (Voucher/GetVouchers, Voucher/GetExtraVouchers)",
+        "serials sold to a customer (/Item/GetItemsSerials customer header)"
+      ],
+      "notes": "No name search or paging. Create returns the Shamel-assigned code; the write model cannot set currency, credit limit or discount. Default inclusion of stopped customers unknown.",
+      "isco": [
+        "ISCO-22",
+        "ISCO-25",
+        "ISCO-30",
+        "ISCO-31",
+        "ISCO-32",
+        "ISCO-48"
+      ],
+      "pages": "6-9"
+    },
+    {
+      "entity": "Customer balances",
+      "entity_ar": "ارصدة الزبائن",
+      "entity_ar_source": "manual-ar (p. 2, سحب ارصدة الزبائن)",
+      "endpoints": [
+        "/Customer/GetCustomerBalances"
+      ],
+      "list": "yes",
+      "get_one": "yes (by customerCode; presumably one row per currency)",
+      "filters": [
+        "customerCode (empty = all customers)",
+        "vatreg"
+      ],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "current balance + not-paid cheques + returned cheques on the customer (GetCustomers getBalance=true)",
+        "balance at a voucher's time (getCustomerBalance=true on Voucher/GetVoucher, GetVouchers, GetExtraVouchers)"
+      ],
+      "notes": "Current balances only; no as-of-date or history. pos/date/rate undocumented. Salesman scoping not stated.",
+      "isco": [
+        "ISCO-25",
+        "ISCO-31"
+      ],
+      "pages": "8"
+    },
+    {
+      "entity": "Customer special prices",
+      "entity_ar": "أسعار الزبائن الخاصة",
+      "entity_ar_source": "translation (no Arabic title in the manual)",
+      "endpoints": [
+        "/Customer/GetCustomerPricesAsRows"
+      ],
+      "list": "partial",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "Purpose not stated; response shape documented (customer_code, stock_code, price_class_name, price, discount, discount_type, tax...). No inputs, so presumably all rows in one call; printed without leading slash (p. 16).",
+      "isco": [
+        "ISCO-33"
+      ],
+      "pages": "16-17"
+    },
+    {
+      "entity": "Items",
+      "entity_ar": "الاصناف",
+      "entity_ar_source": "manual-ar (p. 2, سحب الاصناف)",
+      "endpoints": [
+        "/Item/GetItems",
+        "/Item/getItemDetails",
+        "/Item/Post"
+      ],
+      "list": "yes",
+      "get_one": "yes (itemCode header on GetItems returns a list; /Item/getItemDetails returns item + stock)",
+      "filters": [
+        "itemCode",
+        "serial",
+        "store",
+        "model",
+        "lastupdatedate (changed after a date)"
+      ],
+      "incremental_sync": "yes (date-only lastupdatedate; same unknowns as customers)",
+      "create": "yes (/Item/Post)",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "stock per store (/Item/GetItemsStores, /Item/getItemDetails)",
+        "item groups (/Item/GetItemsGroups)",
+        "serials (/Item/GetItemsSerials)",
+        "image paths (/Item/GetItemsCatalog)",
+        "last prices (/Report/GetLastPriceReport)",
+        "customer special prices (Customer/GetCustomerPricesAsRows, inferred)"
+      ],
+      "notes": "No name/barcode search on GetItems. Read model exposes purchase_price and GL accounts. Create sets only unit1 and price1; trademark/producing_company/style/model are write-only ints with no lookup.",
+      "isco": [
+        "ISCO-22",
+        "ISCO-29",
+        "ISCO-35",
+        "ISCO-48"
+      ],
+      "pages": "9-11, 19-20"
+    },
+    {
+      "entity": "Item groups",
+      "entity_ar": "مجموعات الاصناف",
+      "entity_ar_source": "translation (no Arabic title in the manual)",
+      "endpoints": [
+        "/Item/GetItemsGroups"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "group fields on each item: item_group_code/name, item_group_father_code/name (/Item/GetItems)"
+      ],
+      "notes": "Tree via parentCode and level (inferred). /Item/Post field group assigns an item to a group; it does not create groups.",
+      "isco": [
+        "ISCO-35"
+      ],
+      "pages": "11"
+    },
+    {
+      "entity": "Stock per store",
+      "entity_ar": "كميات الاصناف في المستودعات",
+      "entity_ar_source": "manual-ar (p. 2, سحب كميات الاصناف في المستودعات)",
+      "endpoints": [
+        "/Item/GetItemsStores",
+        "/Item/getItemDetails"
+      ],
+      "list": "yes",
+      "get_one": "yes (itemcode header on GetItemsStores, or /Item/getItemDetails)",
+      "filters": [
+        "itemcode",
+        "lastupdatedate (listed, meaning not explained)"
+      ],
+      "incremental_sync": "partial (lastupdatedate header listed on p. 10 without explanation; inferred to work like GetItems)",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "store names (/Files/GetStores)"
+      ],
+      "notes": "No store filter. qnty presumably in main_unit; zero/negative rows and reservations not explained. Stock changes only through vouchers (inferred).",
+      "isco": [
+        "ISCO-22",
+        "ISCO-36"
+      ],
+      "pages": "10-11"
+    },
+    {
+      "entity": "Item serials",
+      "entity_ar": "الأرقام التسلسلية للأصناف",
+      "entity_ar_source": "translation (no Arabic title in the manual)",
+      "endpoints": [
+        "/Item/GetItemsSerials"
+      ],
+      "list": "yes",
+      "get_one": "yes (by serial)",
+      "filters": [
+        "customer",
+        "serial"
+      ],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "warranty dates start_grantee_date / end_grantee_date",
+        "store of each serial"
+      ],
+      "notes": "No item-code filter; status undocumented. Serials cannot be written: VoucherItems.serials is \"not used\" (غير مستخدم, p. 14).",
+      "isco": [
+        "ISCO-49"
+      ],
+      "pages": "11-12"
+    },
+    {
+      "entity": "Item images",
+      "entity_ar": "كتالوج الاصناف",
+      "entity_ar_source": "manual-ar (p. 2, سحب كتالوج الاصناف)",
+      "endpoints": [
+        "/Item/GetItemsCatalog"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "Returns item_code + image_path only; path format undocumented and no endpoint returns image bytes.",
+      "isco": [
+        "ISCO-34"
+      ],
+      "pages": "11"
+    },
+    {
+      "entity": "Vouchers (13 types)",
+      "entity_ar": "السندات",
+      "entity_ar_source": "manual-ar (p. 3, سند جديد)",
+      "endpoints": [
+        "/Voucher/Post2",
+        "/Voucher/GetVoucher",
+        "/Voucher/GetVouchers",
+        "/Voucher/GetExtraVouchers"
+      ],
+      "list": "yes",
+      "get_one": "yes (by voucher_code: Voucher/GetVoucher)",
+      "filters": [
+        "fromDate + toDate (date range, presumably required)",
+        "customerCode (optional)",
+        "currencyCode (optional)"
+      ],
+      "incremental_sync": "no",
+      "create": "yes (/Voucher/Post2, 13 types)",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "customer balance at voucher time (getCustomerBalance=true)",
+        "short summaries with amount and cr_dr (Voucher/GetExtraVouchers)"
+      ],
+      "notes": "No voucher-type filter, no lookup by manual_code, no paging. No edit/void/cancel: corrections need a compensating voucher or a manual fix (inferred). Overview lists 'invoice from delivery' with no enum value; enum type 5 is missing from the overview.",
+      "isco": [
+        "ISCO-40",
+        "ISCO-43",
+        "ISCO-45",
+        "ISCO-46",
+        "ISCO-47"
+      ],
+      "pages": "13-18"
+    },
+    {
+      "entity": "Orders / status",
+      "entity_ar": "طلبية مبيعات",
+      "entity_ar_source": "manual-ar (p. 2, طلبية مبيعات; enum طلبية p. 15)",
+      "endpoints": [
+        "/Voucher/Post2",
+        "/Voucher/GetStatus",
+        "/Voucher/GetVoucher"
+      ],
+      "list": "partial",
+      "get_one": "yes (status only via /Voucher/GetStatus by manual header; full order via Voucher/GetVoucher by code)",
+      "filters": [
+        "manual (presumably the order's manual_code)"
+      ],
+      "incremental_sync": "no",
+      "create": "yes (/Voucher/Post2, type Order=0, prefix O)",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "status 0 not ready, 1 ready, 2 closed, 3 sent partially, 4 sent (p. 16)"
+      ],
+      "notes": "Orders can only be listed mixed with all other voucher types via Voucher/GetVouchers (no type filter). GetStatus response shape undocumented.",
+      "isco": [
+        "ISCO-42"
+      ],
+      "pages": "15-16"
+    },
+    {
+      "entity": "Deliveries",
+      "entity_ar": "الارساليات",
+      "entity_ar_source": "manual-ar singular ارسالية (pp. 3, 15); plural is a translation",
+      "endpoints": [
+        "/Voucher/GetDelivery",
+        "/Voucher/Post2"
+      ],
+      "list": "no",
+      "get_one": "partial (/Voucher/GetDelivery: the one delivery prepared for the logged-in salesman)",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "yes (/Voucher/Post2 types PurchaseDelivery=2, SalesDelivery=10, InternalDelivery=16; return ReturnedPendingSalesDelivery=5)",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "invoice from a delivery: SalesInvoice with delivery_id / delivery_pos (inferred, p. 3, 13-14)"
+      ],
+      "notes": "GetDelivery has no inputs; behaviour with none or several prepared deliveries unknown. PurchaseDelivery has no code prefix letter.",
+      "isco": [
+        "ISCO-41",
+        "ISCO-45",
+        "ISCO-47"
+      ],
+      "pages": "15-16"
+    },
+    {
+      "entity": "Account statement",
+      "entity_ar": "كشف حساب محاسبي",
+      "entity_ar_source": "manual-ar (p. 3)",
+      "endpoints": [
+        "/Report/GetAccountsheet"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [
+        "customerCode",
+        "currencyCode",
+        "fromDate",
+        "toDate",
+        "showOtherCurrencies",
+        "showStocks",
+        "showCheqs",
+        "showNotPayedCheqs",
+        "showReturnedCheq"
+      ],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "Rows: date, code, type, credit, debit, start_date, balance, note; amounts are strings. Whether non-customer GL accounts work is unknown. Sent as form POST (obj).",
+      "isco": [
+        "ISCO-38"
+      ],
+      "pages": "12-13"
+    },
+    {
+      "entity": "Last price report",
+      "entity_ar": "تقرير اخر الأسعار",
+      "entity_ar_source": "manual-ar (p. 3)",
+      "endpoints": [
+        "/Report/GetLastPriceReport"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [
+        "ItemCode (mandatory)",
+        "barcode (optional, inferred)"
+      ],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "No customer filter; whether global or per customer and whether customer is a code or name are unknown. Manual contradicts itself on which input is optional.",
+      "isco": [
+        "ISCO-37"
+      ],
+      "pages": "12"
+    },
+    {
+      "entity": "Cost centers",
+      "entity_ar": "مراكز التكلفة",
+      "entity_ar_source": "manual-ar singular مركز تكلفة (p. 2); plural is a translation",
+      "endpoints": [
+        "/CostCenter/Post"
+      ],
+      "list": "no",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "yes (/CostCenter/Post)",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "cost-center statement (/CostCenter/GetCostCenterAccountsheet)"
+      ],
+      "notes": "Insert only, and no endpoint lists existing cost centers. Create returns no id (code is caller-chosen). Codes are used on voucher lines and journal accounts (costcenter1..6).",
+      "isco": [
+        "ISCO-39"
+      ],
+      "pages": "18-19"
+    },
+    {
+      "entity": "Cost-center statement",
+      "entity_ar": "تقرير كشف حساب لمركز تكلفة",
+      "entity_ar_source": "manual-ar (p. 3)",
+      "endpoints": [
+        "/CostCenter/GetCostCenterAccountsheet"
+      ],
+      "list": "yes",
+      "get_one": "no",
+      "filters": [
+        "fromCostcenter",
+        "toCostcenter",
+        "account",
+        "type (values undocumented)",
+        "currencyCode",
+        "fromDate",
+        "toDate",
+        "showOtherCurrencies"
+      ],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "Same columns as the account statement (amounts as strings). Form field named filters (not obj).",
+      "isco": [
+        "ISCO-39",
+        "ISCO-38"
+      ],
+      "pages": "19"
+    },
+    {
+      "entity": "GL accounts (chart of accounts)",
+      "entity_ar": "الحسابات",
+      "entity_ar_source": "manual-ar wording (VoucherAccounts comment الحسابات, p. 13)",
+      "endpoints": [],
+      "list": "no",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [
+        "statement via /Report/GetAccountsheet (field is customerCode; other accounts unknown)",
+        "account filter on /CostCenter/GetCostCenterAccountsheet"
+      ],
+      "notes": "Account codes appear (Item.credit_account/debit_account, VoucherAccounts.account_code) and journal vouchers post to them, but no endpoint lists accounts.",
+      "isco": [
+        "ISCO-38",
+        "ISCO-52"
+      ],
+      "pages": "10, 14"
+    },
+    {
+      "entity": "Other lookup codes",
+      "entity_ar": "قوائم الترميز الأخرى",
+      "entity_ar_source": "translation",
+      "endpoints": [],
+      "list": "no",
+      "get_one": "no",
+      "filters": [],
+      "incremental_sync": "no",
+      "create": "no",
+      "update": "no",
+      "delete": "no",
+      "related_reads": [],
+      "notes": "Referenced but not listable: towns/villages, payment terms (paymentTermsCode), customer classifications and contact types, item types, trademarks, producing companies, styles, models, organizations (orgnization_code), payment types (payment_type).",
+      "isco": [
+        "ISCO-49",
+        "ISCO-52"
+      ],
+      "pages": "7, 9, 13, 20"
+    }
+  ],
+  "voucher_types": [
+    {
+      "value": 0,
+      "member": "Order",
+      "ar": "طلبية",
+      "en": "Sales order",
+      "prefix": "O",
+      "in_overview": "طلبية مبيعات (p. 2)"
+    },
+    {
+      "value": 2,
+      "member": "PurchaseDelivery",
+      "ar": "ارسالية مشتريات",
+      "en": "Purchase delivery",
+      "prefix": null,
+      "in_overview": "ارسالية مشتريات (p. 3)"
+    },
+    {
+      "value": 4,
+      "member": "ReturnSalesInvoice",
+      "ar": "مردودات مبيعات",
+      "en": "Sales return",
+      "prefix": "S",
+      "in_overview": "مردود مبيعات (p. 3)"
+    },
+    {
+      "value": 5,
+      "member": "ReturnedPendingSalesDelivery",
+      "ar": "مردود من ارسالية برسم البيع",
+      "en": "Return from a consignment (for-sale) delivery",
+      "prefix": "F",
+      "in_overview": null
+    },
+    {
+      "value": 9,
+      "member": "SalesInvoice",
+      "ar": "فاتورة مبيعات",
+      "en": "Sales invoice",
+      "prefix": "I",
+      "in_overview": "فاتورة مبيعات (p. 3)"
+    },
+    {
+      "value": 10,
+      "member": "SalesDelivery",
+      "ar": "ارسالية مبيعات",
+      "en": "Sales delivery",
+      "prefix": "V",
+      "in_overview": "ارسالية مبيعات (p. 3)"
+    },
+    {
+      "value": 12,
+      "member": "Stockout",
+      "ar": "اخراج بضاعة",
+      "en": "Goods issue (stock-out)",
+      "prefix": "B",
+      "in_overview": "سند إخراج بضاعة (p. 3)"
+    },
+    {
+      "value": 16,
+      "member": "InternalDelivery",
+      "ar": "ارسالية داخلية",
+      "en": "Internal delivery (inferred: transfer between stores)",
+      "prefix": "N",
+      "in_overview": "ارسالية داخلية (p. 3)"
+    },
+    {
+      "value": 22,
+      "member": "Credit",
+      "ar": "اشعار دائن",
+      "en": "Credit note",
+      "prefix": "C",
+      "in_overview": "إشعار دائن (p. 3)"
+    },
+    {
+      "value": 23,
+      "member": "Debit",
+      "ar": "اشعار مدين",
+      "en": "Debit note",
+      "prefix": "D",
+      "in_overview": "إشعار مدين (p. 3)"
+    },
+    {
+      "value": 24,
+      "member": "Receipt",
+      "ar": "قبض",
+      "en": "Receipt (money in)",
+      "prefix": "R",
+      "in_overview": "سند قبض (p. 3)"
+    },
+    {
+      "value": 27,
+      "member": "Payment",
+      "ar": "صرف",
+      "en": "Payment (money out)",
+      "prefix": "P",
+      "in_overview": "سند صرف (p. 3)"
+    },
+    {
+      "value": 28,
+      "member": "Journal",
+      "ar": "قيد",
+      "en": "Journal voucher",
+      "prefix": "J",
+      "in_overview": "سند قيد (p. 3)"
+    },
+    {
+      "value": null,
+      "member": null,
+      "ar": "فاتورة من ارسالية",
+      "en": "Invoice from a delivery",
+      "prefix": null,
+      "in_overview": "فاتورة من ارسالية (p. 3)",
+      "note": "listed in the overview but has no enum value; inferred to be SalesInvoice=9 with delivery_id / delivery_pos (ISCO-47)"
+    }
+  ],
+  "totals": {
+    "endpoints": 30,
+    "reads": 22,
+    "writes": 4,
+    "auth": 1,
+    "reports": 3
+  },
+  "totals_detail": {
+    "by_method": {
+      "POST (stated)": 7,
+      "GET (assumed)": 23
+    },
+    "by_domain": {
+      "auth": 1,
+      "master_data": 8,
+      "customers": 4,
+      "items": 6,
+      "stock": 1,
+      "reports": 3,
+      "vouchers": 6,
+      "cost_centers": 1
+    },
+    "by_controller": {
+      "Main": 1,
+      "Files": 8,
+      "Customer": 4,
+      "Item": 7,
+      "Report": 2,
+      "Voucher": 6,
+      "CostCenter": 2
+    },
+    "incremental_sync_endpoints": [
+      "/Customer/GetCustomers",
+      "/Item/GetItems",
+      "/Item/GetItemsStores"
+    ],
+    "printed_without_leading_slash": [
+      "Customer/GetCustomerPricesAsRows",
+      "Voucher/GetVoucher",
+      "Voucher/GetVouchers",
+      "Voucher/GetExtraVouchers"
+    ],
+    "not_in_capability_overview_pp2_3": [
+      "/Files/GetSalesmen",
+      "/Customer/GetCustomerPricesAsRows",
+      "/Item/GetItemsGroups",
+      "/Item/GetItemsSerials",
+      "/Voucher/GetDelivery",
+      "/Voucher/GetStatus",
+      "/Voucher/GetVoucher",
+      "/Voucher/GetVouchers",
+      "/Voucher/GetExtraVouchers"
+    ],
+    "undocumented_response": [
+      "/Files/GetSalesmen"
+    ],
+    "reads_including_reports": 25,
+    "reports_sent_as_form_post": [
+      "/Report/GetAccountsheet",
+      "/CostCenter/GetCostCenterAccountsheet"
+    ],
+    "update_or_delete_endpoints": 0,
+    "voucher_types_writable": 13,
+    "note": "kind 'report' = the three reports the manual lists on p. 3; 'reads' excludes them. The transcription's '25 reads' = 22 reads + 3 reports."
+  }
+}

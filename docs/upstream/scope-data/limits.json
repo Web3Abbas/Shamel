@@ -1,0 +1,302 @@
+{"limits":[
+{
+ "id":"L01",
+ "category":"security",
+ "title":"One all-powerful login; no permissions beyond salesman scoping",
+ "detail":"Every operation needs a Shamel user number, password and a token from the login call ('الامان حيث تتطلب اي عملية ثلاث عناصر رئيسية: رقم المستخدم، كلمة المرور، Token' = 'security: any operation requires three main elements: user number, password, token', p. 2); after login each request carries only the username and token headers (p. 4). The manual describes no API keys, read-only users, per-endpoint rights or per-voucher-type rights; the only restriction it mentions is salesman scoping on GetCustomers (p. 7) and GetDelivery (p. 16).",
+ "impact":"Any tool holding a Shamel login can read everything that login sees and insert any voucher type (orders, invoices, receipts, journals). Shamel itself cannot give a tool narrower access, and sharing one login means a single leak exposes the whole company.",
+ "bawaba":"This is Bawaba's main purpose: tools never see Shamel credentials. The owner issues unlimited Bawaba tokens, each with per-endpoint scopes (e.g. customers:read), per-voucher-type write scopes, data scopes (stores, salesmen, customers, currencies, price classes), field hiding (e.g. purchase_price, balances, credit limits), IP allowlists, optional expiry and instant revoke; writes can be held for owner approval (00 §5-6, 03 §2). Residual: the Shamel service account Bawaba uses is still all-powerful inside Shamel; a least-privilege Shamel account depends on ISCO.",
+ "severity":"high",
+ "isco":["ISCO-04","ISCO-25"]
+},
+{
+ "id":"L02",
+ "category":"security",
+ "title":"Salesman scoping can be switched off by the caller",
+ "detail":"GetCustomers returns only the logged-in salesman's customers, but the manual says 'To get all customers even not the salesman's customers fill Header[getAll]=true' (p. 7). It does not say whether getAll needs a permission, or which other endpoints (balances, prices, items, vouchers, reports) are salesman-scoped at all.",
+ "impact":"A salesman's own Shamel login is not a safe sandbox for a tool: any caller holding its token can add getAll=true. Tools that must see only one salesman's data need that restriction enforced outside Shamel.",
+ "bawaba":"getAll is not a client parameter on /v1; Bawaba sends it only when the token's policy allows it and the identity is not a pinned salesman user (01 §7.2, 03 §2.6). Bawaba's own data scopes (salesmen, customers, stores) apply on top of Shamel's scoping.",
+ "severity":"medium",
+ "isco":["ISCO-25"]
+},
+{
+ "id":"L03",
+ "category":"security",
+ "title":"Unknown token lifetime and session behaviour; no logout",
+ "detail":"The manual only says 'Keep the token to send it with every request' (p. 4). It documents no expiry, refresh, logout or revocation, does not say whether a second login (API or desktop) ends the first session, and does not say what a wrong password or disabled user returns (AuthResult has success and userIsDisabled, p. 4).",
+ "impact":"Tools that each log in as the same user may knock each other's sessions out; any call can fail with an expired token at any moment; a leaked token cannot be reliably killed; a wrong password retried in a loop could lock the account if Shamel has a lockout policy.",
+ "bawaba":"Bawaba holds one shared session per Shamel identity, logs in one at a time cluster-wide, uses a single session holder by default, re-logs in after an auth failure and retries reads once (never writes), and backs off 30 s to 5 min after failed logins with an owner alert (01 §7.1); a calibration command tests whether two sessions can coexist. Revoking an already-issued Shamel token cannot be done by a gateway: needs ISCO (logout or revocation).",
+ "severity":"medium",
+ "isco":["ISCO-01","ISCO-02","ISCO-03","ISCO-54"]
+},
+{
+ "id":"L04",
+ "category":"security",
+ "title":"No HTTPS documented; password and token may travel in plain text",
+ "detail":"The manual gives no base URL, scheme, port or TLS information and never mentions HTTPS (pp. 1-4). The password is sent as a form field to /Main/Login and the token as a plain header on every request (p. 4).",
+ "impact":"Unless ISCO confirms HTTPS, anyone who can watch the network between a caller and Shamel can capture the password or token. Shamel must never be exposed directly to the internet, and tools should not call it from outside the office.",
+ "bawaba":"The Bawaba Connector runs next to Shamel (ideally on the same server) and opens an outbound encrypted tunnel (WebSocket with inner mutual TLS 1.3), so Shamel needs no public IP or open port and tools only reach Bawaba over TLS behind Cloudflare (00 §4, 01 §8). Direct mode refuses plain HTTP over the internet unless it runs over WireGuard or pinned HTTPS (02 DU-3). The short hop from Connector to Shamel stays plain HTTP unless ISCO supports HTTPS.",
+ "severity":"high",
+ "isco":["ISCO-05","ISCO-06","ISCO-07","ISCO-08"]
+},
+{
+ "id":"L05",
+ "category":"errors",
+ "title":"Every error is HTTP 500 with raw details",
+ "detail":"'any error occurred the service will return Http error 500 with the error details' (p. 4). No error format, error codes or examples are given, so an expired token, a bad parameter, a missing record and a server crash all look the same at HTTP level.",
+ "impact":"Tools cannot tell whether to log in again, fix the request, retry later or give up, and the raw details may expose internal information (exception text, SQL, server paths) to whoever sees the response.",
+ "bawaba":"An outcome classifier sorts every upstream reply (auth failure via a calibrated signature, business rejection, server error, timeout); clients get proper status codes (400/401/403/404/422/502/503/504) and a stable bilingual error catalogue with a request id. Shamel's raw text goes only to the encrypted audit log, never to clients (01 §7.5, 03 §22).",
+ "severity":"high",
+ "isco":["ISCO-18"]
+},
+{
+ "id":"L06",
+ "category":"errors",
+ "title":"Write results come in three shapes with free-text errors",
+ "detail":"/Customer/Post and /Item/Post return PostResponse {Success, ErrorMessage (string), value} (pp. 9, 20); /Voucher/Post2 returns Result {Success, ErrorMessage (string[]), refrenceId} (p. 15); /CostCenter/Post returns Result {Success, ErrorMessage (string)} with no id at all (p. 19). Failures can also arrive as HTTP 500 (p. 4). No list of validation messages or error codes is given.",
+ "impact":"Each write needs its own handling; tools cannot reliably show which field was wrong or why Shamel refused a voucher (unknown customer, no stock, closed period...). The created cost center's code can only be assumed to be the one that was sent.",
+ "bawaba":"Bawaba normalises all three shapes, maps known Shamel messages to stable codes (duplicate_code, reference_not_found, validation_failed) and returns everything else as 422 upstream_rejected. Before sending it validates the body and pre-checks customer, currency, store, city and bank codes against live data, so most mistakes come back as field-level errors (03 §15.7, §22.3; writes are milestone 2).",
+ "severity":"medium",
+ "isco":["ISCO-19","ISCO-39"]
+},
+{
+ "id":"L07",
+ "category":"data access",
+ "title":"Parameters go in HTTP headers (proxy, size and Arabic-text problems)",
+ "detail":"Apart from login and the obj/filters form posts, every input is a custom HTTP header: username and token (p. 4); code, vatreg, getBalance, getAll (p. 7); serial, itemCode, store, model (p. 9); voucher_code, a name with an underscore (p. 17); and a whole JSON object in the filters header (p. 17). The same item-code header is spelled itemCode, itemcode and ItemCode (pp. 9, 10, 12).",
+ "impact":"Many reverse proxies (nginx by default) drop headers with underscores, so GetVoucher can silently fail behind one; JSON in a header hits size limits and lands in access logs; Arabic or other non-ASCII codes cannot safely be sent in headers; browsers, no-code tools and caches handle header-driven APIs poorly.",
+ "bawaba":"Tools use a clean /v1 REST API with query parameters, path ids and JSON bodies. Bawaba builds Shamel headers from a fixed table with the exact printed spellings, ASCII-escapes JSON, and calls Shamel directly from the Connector so no proxy strips voucher_code. Codes with Arabic or other non-ASCII characters are looked up by fetching the list and matching exactly, which costs more and is flagged with a warning (01 §7.2, 03 §4.2).",
+ "severity":"medium",
+ "isco":["ISCO-11","ISCO-13","ISCO-14"]
+},
+{
+ "id":"L08",
+ "category":"writes",
+ "title":"Writes are JSON packed inside a form field",
+ "detail":"Writes and the account-statement report take a 'post parameter with key name [obj]' whose value 'must be in Json format' (pp. 8-9, 12, 13, 18, 19); the cost-center report uses [filters] instead (p. 19). Only /Main/Login states x-www-form-urlencoded (p. 4); the manual shows C# classes only, never a JSON sample, and property names mix styles (Name, VatReg next to customer_code).",
+ "impact":"Every write must be encoded twice (JSON, then form encoding). Whether misspelled or unknown property names are rejected or silently ignored is unknown, so a small mistake could create a wrong record that the API cannot later correct.",
+ "bawaba":"Tools send ordinary JSON bodies to /v1, checked against a strict schema (unknown fields rejected, decimals exact). Bawaba maps them to typed Shamel classes with the exact printed property names and does the form encoding itself (01 §7.3, 03 §15).",
+ "severity":"medium",
+ "isco":["ISCO-12","ISCO-16","ISCO-17"]
+},
+{
+ "id":"L09",
+ "category":"performance",
+ "title":"No pagination: lists return everything at once",
+ "detail":"List endpoints return all records in one response: 'Get all customers' (p. 7), 'Get all items' (p. 9), 'Get all items quantities' (p. 10), 'Get all items image' and 'Get all items with serials only' (p. 11). There are no page, limit, sort or total parameters; the only fixed limit is GetCurrencyRates' 'latest 10' (p. 5). GetVouchers returns full vouchers for the whole date range asked (p. 17).",
+ "impact":"A dashboard showing one page of items or customers still makes Shamel build the full list; large tables can be many megabytes, slow and prone to timeouts; tools would have to hold and page the data themselves.",
+ "bawaba":"Snapshot pagination: page 1 makes one live call, later pages reuse that result for about 60 s through sealed cursors, with totals, sorting and Arabic-aware search; identical concurrent requests share one upstream call; voucher ranges are split into 7-day slices and capped at 31 days by default; response-size caps and warnings protect Shamel (00 §8, 03 §5, §12.2). Shamel still does the full work for every page 1.",
+ "severity":"high",
+ "isco":["ISCO-21","ISCO-20"]
+},
+{
+ "id":"L10",
+ "category":"data access",
+ "title":"No voucher-type filter and no voucher lookup by manual_code",
+ "detail":"GetVouchers and GetExtraVouchers filter only by customerCode, currencyCode, fromDate and toDate (p. 17). GetVoucher needs the voucher code in the voucher_code header (p. 17). The only call that takes the paper reference (manual_code) is GetStatus ('Fill Header[manual]'), and it returns only an order status 0-4 (p. 16).",
+ "impact":"'All receipts this month' means downloading every voucher in the range and filtering locally. A tool that stored its own reference in manual_code cannot fetch that voucher directly, and orders without a manual_code cannot have their status checked.",
+ "bawaba":"/v1/vouchers adds type, manual_code, salesman, store and posted filters plus search, evaluated on the snapshot (same upstream cost as the unfiltered range). /v1/order-status also accepts an order_code (GetVoucher, then GetStatus with its manual_code). A real server-side filter or lookup needs ISCO (03 §12.2, §12.5).",
+ "severity":"medium",
+ "isco":["ISCO-40","ISCO-42","ISCO-43","ISCO-52"]
+},
+{
+ "id":"L11",
+ "category":"data access",
+ "title":"Few server-side filters; no search or sort",
+ "detail":"GetItemsStores filters only by lastupdatedate and itemcode, not by store (p. 10); Customer/GetCustomerPricesAsRows documents no inputs at all (p. 16); GetItemsGroups and GetItemsCatalog take none (p. 11); no endpoint searches by name or sorts. Existing filters match on codes, and whether matching is exact, prefix or partial is not stated (pp. 7-11).",
+ "impact":"Common questions ('stock in store 3', 'customers named النور', 'special prices for this customer') need a full download and local filtering, costing Shamel a full list every time.",
+ "bawaba":"Bawaba adds filters, sorting and Arabic-normalised search (alef/hamza forms, taa marbuta, diacritics) over the snapshot, plus combined endpoints such as customer 360 and stock across stores; the docs mark which filters really reduce Shamel's work ('pushdowns') so AI-built tools prefer them (03 §5.4-5.6, §14). The upstream cost of unfilterable lists remains.",
+ "severity":"medium",
+ "isco":["ISCO-15","ISCO-33","ISCO-36","ISCO-52"]
+},
+{
+ "id":"L12",
+ "category":"sync",
+ "title":"lastupdatedate is date-only and exists on only three endpoints",
+ "detail":"'Date format is always yyyy-MM-dd' (p. 4). GetCustomers and GetItems return records 'updated after lastupdatedate' (pp. 7, 9), and GetItemsStores lists the header without explaining it (p. 10); no other endpoint has it. Time of day, timezone, whether 'after' includes the same day, and what counts as an update are not stated, and records carry no last-modified field (pp. 7, 9-10).",
+ "impact":"Incremental sync is coarse: a tool can miss changes made earlier the same day, or must re-download one to two days of changes each time; vouchers, balances, prices, serials and master data have no incremental option at all.",
+ "bawaba":"/v1 offers updated_since on customers, items and stock, sending Shamel a safely earlier date (one day plus a 6-hour overlap) and documenting a 'superset' guarantee (extra records possible, none missed); the webhook detector hashes records so repeats create no events, and runs a daily full reconciliation (03 §5.7, 05 §2.4.1). Exact timestamps need ISCO.",
+ "severity":"medium",
+ "isco":["ISCO-22","ISCO-24"]
+},
+{
+ "id":"L13",
+ "category":"sync",
+ "title":"No change feed for vouchers, balances or deletions",
+ "detail":"The manual has no webhooks, events or change log. Vouchers can only be read by date range (p. 17), customer balances only as point-in-time values (pp. 7-8), and no endpoint reports deleted records. VoucherHeader.update_date exists but has no description and cannot be filtered on (p. 13).",
+ "impact":"Tools must poll. Edits to back-dated vouchers, balance movements and records deleted in the desktop program go unnoticed unless a tool keeps re-scanning; real-time alerts are impossible from Shamel alone.",
+ "bawaba":"Webhooks (milestone 3) detect changes by polling every 5 minutes: tiered voucher scans (last 3 days every cycle, 35-day hourly sweep via GetExtraVouchers, nightly 35-day deep scan), balance and stock snapshot diffs, and *.removed after a record is missing from two full fetches (03 §17, 05 §2.4). Limits: up to about 5 minutes delay, changes to vouchers older than about 42 days are not detected, and a deletion looks the same as a record leaving the token's scope.",
+ "severity":"high",
+ "isco":["ISCO-22","ISCO-23","ISCO-52"]
+},
+{
+ "id":"L14",
+ "category":"writes",
+ "title":"No update, cancel or delete operations",
+ "detail":"The capability list offers only data pulls, inserts and three reports (pp. 2-3), and every write endpoint is an insert: 'Insert new customer' (p. 8), 'Insert new voucher' (p. 13), 'Insert new Item' (p. 19) and /CostCenter/Post (p. 18). No endpoint edits, cancels, voids or deletes anything.",
+ "impact":"Tools cannot change a customer's phone or credit limit, update item prices, cancel an order or void an invoice. Every change to existing data must be done by a person in the Shamel desktop program.",
+ "bawaba":"Cannot be fixed by a gateway — needs ISCO. Bawaba exposes no PATCH/DELETE for Shamel records and reduces the need for corrections through validation, the approval queue and sandbox testing (03 §4.3, §15).",
+ "severity":"high",
+ "isco":["ISCO-52","ISCO-23","ISCO-55"]
+},
+{
+ "id":"L15",
+ "category":"writes",
+ "title":"Mistakes can only be fixed with offsetting documents",
+ "detail":"Because writes are insert-only (pp. 8, 13, 18, 19), a wrong invoice can only be offset by another document such as a sales return (ReturnSalesInvoice=4) or credit note (Credit=22) (p. 15), or corrected by hand in Shamel. VoucherHeader.is_posted chooses whether the voucher is entered as posted ('هل يتم ادخال الحركة حالة مرحلة ام لا' = 'is the voucher entered as posted or not', p. 13), but what an unposted voucher does in Shamel is not documented.",
+ "impact":"Every write tool needs a review step before sending; a buggy tool can fill the books with wrong entries plus their reversals, which accountants must then clean up.",
+ "bawaba":"Approval queue: writes from selected tokens (the default for agent-requested tokens) wait for the owner's approval on the server; every write is audited with its full payload and Shamel reference id; strict validation and a journal balance check; a sandbox with a mock Shamel; writes can be sent with is_posted=false for accountant review once ISCO confirms its meaning (00 §6, 03 §15.3, §15.7).",
+ "severity":"high",
+ "isco":["ISCO-46","ISCO-47","ISCO-51"]
+},
+{
+ "id":"L16",
+ "category":"writes",
+ "title":"No idempotency: a retry can create a duplicate",
+ "detail":"The manual documents no idempotency key and no duplicate check. VoucherHeader.code is optional and Shamel assigns a number if it is not sent ('اذا لم يتم ارسال رقم الحركة يتم اعطائها رقم من الشامل' = 'if the voucher number is not sent, Shamel gives it a number', p. 13); whether a repeated code or manual_code is rejected, and whether an HTTP 500 or timeout means nothing was saved, is not stated (pp. 4, 13-15).",
+ "impact":"If the connection drops after a voucher is sent, retrying may create a second invoice or receipt: a real accounting error that cannot be deleted through the API. Tools must never blindly retry writes.",
+ "bawaba":"Every /v1 write requires an Idempotency-Key; a repeat with the same key replays the stored result instead of calling Shamel again. Writes are never retried once they may have reached Shamel; an uncertain outcome becomes 504 write_outcome_unknown for owner reconciliation, helped by a unique reference in manual_code (03 §15.1-15.2). Guarantees on the Shamel side still need ISCO.",
+ "severity":"high",
+ "isco":["ISCO-43","ISCO-45","ISCO-54"]
+},
+{
+ "id":"L17",
+ "category":"documentation",
+ "title":"Undocumented or half-documented endpoints",
+ "detail":"/Files/GetSalesmen has only a heading: no inputs, no response (p. 6). Customer/GetCustomerPricesAsRows has no inputs or description, only a field list (pp. 16-17). GetExtraVouchers' purpose ('extra') is not explained (pp. 17-18); GetDelivery's behaviour with zero or several deliveries and GetStatus's response format are not given (p. 16). An HTTP method is implied ('post parameter') for only 7 of the 30 endpoints.",
+ "impact":"Tools cannot rely on the salesmen list, customer special prices or voucher summaries until their real shape is captured; building on guesses risks breakage when the true behaviour is seen.",
+ "bawaba":"These are exposed as provisional: a tolerant decoder accepts several plausible shapes (e.g. GetSalesmen, GetStatus, GetDelivery), unknown fields are counted as schema drift, and the method per endpoint is configurable. Final shapes come from a live capture or from ISCO (03 §8.8, §12.3-12.5).",
+ "severity":"medium",
+ "isco":["ISCO-12","ISCO-26","ISCO-33","ISCO-40","ISCO-41","ISCO-42"]
+},
+{
+ "id":"L18",
+ "category":"documentation",
+ "title":"Coded fields and enums without values",
+ "detail":"Many numeric codes have no list of meanings: Store type (p. 6); Customer creditType, attr, trans_permissions, level (p. 7); CustomerContact type (p. 8); Item type, eval_unit and the stopped/paused/has_* flags (p. 10); ItemSerial status (p. 12); payment_type and VoucherItems unit (p. 14); VoucherAccounts debit_credit (p. 15); discount_type (p. 16); cr_dr (p. 18); statement type (pp. 13, 19) and cost-center type (pp. 18-19). VoucherTypes skips many numbers (p. 15), PurchaseDelivery has no code prefix letter (pp. 15-16), and system_id is only 'value must be between 1000 and 2000' (p. 14).",
+ "impact":"Tools can show raw numbers but not labels; journal entries cannot be written safely until debit_credit is known; purchase deliveries cannot be given their own codes.",
+ "bawaba":"Bawaba publishes these as raw integer ids marked provisional and adds named values once known; journal writes stay unavailable until the debit_credit mapping is configured; purchase_delivery codes are left to Shamel; system_id is a fixed configured value (1500) (03 §3.4, §15.7).",
+ "severity":"medium",
+ "isco":["ISCO-44","ISCO-45","ISCO-47","ISCO-49"]
+},
+{
+ "id":"L19",
+ "category":"documentation",
+ "title":"Inconsistent naming and typos",
+ "detail":"Misspellings are part of the interface: sale_parice1-6 and orginal_code (p. 10), orgnization_code (pp. 6, 10, 17), GetBanksBranchs (p. 5), CustomerClassificaiton and notPayedCheqsBalance (p. 7), start_grantee_date (p. 12), refrenceId (p. 15). Styles are mixed (VATReg, creditType, salesman_code, nameEn); GetStores is printed as class City (p. 6); /CostCenter/Post says 'Insert new customer' (p. 18); four paths lack the leading slash (pp. 16-17); /Item/getItemDetails has a lower-case g (p. 11). Read and write models differ: orginal_code vs original_code, sale_parice1 vs price1 (pp. 10, 20), Customer read snake_case vs write PascalCase (pp. 7, 9).",
+ "impact":"AI agents and developers easily use the 'corrected' spelling and get empty or ignored fields; mapping read results back into writes is error-prone.",
+ "bawaba":"/v1 uses one consistent snake_case naming that fixes the typos and documents every mapping; an optional legacy passthrough keeps Shamel's original names for existing integrations (00 §9, 03 §20).",
+ "severity":"low",
+ "isco":["ISCO-13","ISCO-32","ISCO-35","ISCO-39"]
+},
+{
+ "id":"L20",
+ "category":"writes",
+ "title":"Inserts can set only a few fields",
+ "detail":"/Customer/Post accepts 13 fields (Name, VatReg, Address, MobileNumber, PhoneNumber, Salesman, Street, City, Town, Referee, RefereeMobile, CustomerLevel, PriceClass; p. 9): no code, credit_limit, currency, discount, paymentTermsCode, contacts, classifications or coordinates, which the read model has (p. 7). /Item/Post accepts 15 fields with one unit (unit1) and one price (price1) (p. 20): no units 2-6, other price classes or purchase price (pp. 9-10).",
+ "impact":"A 'new customer' tool cannot set a credit limit or currency, and a 'new item' tool cannot set a full price list; someone must finish the record in the desktop program, and Shamel's defaults for the missing fields are unknown.",
+ "bawaba":"Cannot be fixed by a gateway — needs ISCO. Bawaba omits unset fields so Shamel applies its own defaults, and shows the approver exactly what will be sent (03 §15.4-15.5).",
+ "severity":"medium",
+ "isco":["ISCO-48"]
+},
+{
+ "id":"L21",
+ "category":"documentation",
+ "title":"Two different Voucher classes (and other name clashes)",
+ "detail":"GetVoucher returns the full Voucher {header, items, cheqs, accounts} (p. 17), GetDelivery a Voucher without accounts (p. 16), and after GetExtraVouchers a different 'public class Voucher' with type, code, date, customer_code, amount, currency, rate, cr_dr, customer_balance_at_voucher_date (p. 18). GetVouchers says only 'return array of Voucher' (p. 17). There are also two different Result, AccountsheetFilters, Customer and Item classes (pp. 7, 9, 10, 12, 15, 19, 20).",
+ "impact":"Tools cannot know whether GetVouchers returns full vouchers with lines or light summary rows until it is tested, which changes both its cost and which reports can be built from it.",
+ "bawaba":"Bawaba separates them as /v1/vouchers (full vouchers) and /v1/voucher-summaries (light rows) with distinct names; its decoder accepts the full variant and tolerates missing collections (03 §12.2-12.3).",
+ "severity":"medium",
+ "isco":["ISCO-40","ISCO-41"]
+},
+{
+ "id":"L22",
+ "category":"documentation",
+ "title":"GetLastPriceReport: ItemCode both mandatory and optional",
+ "detail":"The manual lists 'Fill Headers[ItemCode]', 'ItemCode is mandatory', 'Fill Headers[barcode]', 'ItemCode is optional' (p. 12). There is no customer filter, and each row's customer field is not explained (code or name).",
+ "impact":"It is unclear whether a barcode alone works, and a 'last price to this customer' tool cannot ask Shamel for one customer; if customer is a name, rows cannot be matched to customer codes reliably.",
+ "bawaba":"Bawaba requires item_code and treats barcode as optional, adds customer, currency and date filters on the snapshot, and for customer-restricted tokens compares customer with allowed codes so a name never matches (fail closed) (03 §13.2).",
+ "severity":"low",
+ "isco":["ISCO-37"]
+},
+{
+ "id":"L23",
+ "category":"performance",
+ "title":"Unknown rate limits and impact on desktop users",
+ "detail":"Nowhere in the manual (pp. 1-20) are rate or concurrency limits, request timeouts, or the effect of heavy calls (full item, customer or stock lists; wide voucher ranges) on people using the Shamel desktop program mentioned.",
+ "impact":"A buggy or over-eager dashboard polling full lists every few seconds could slow the accounting office or bring the service down, with no warning from Shamel.",
+ "bawaba":"A global cap on concurrent Shamel calls (default 8) with a fair queue per token, priority for interactive reads, at most 50% of slots for large calls and 25% for background jobs; per-token rate limits that also count upstream cost; coalescing of identical requests; timeouts and a circuit breaker; Bawaba-Warning headers (polling_too_frequent, use_webhooks) and owner e-mail alerts about abusive tools (01 §7.6, 03 §23). The right cap needs ISCO figures or a benchmark.",
+ "severity":"high",
+ "isco":["ISCO-20"]
+},
+{
+ "id":"L24",
+ "category":"data access",
+ "title":"No lookup lists for many codes",
+ "detail":"The API uses codes it cannot list: GL accounts (credit_account, debit_account, p. 10; VoucherAccounts account_code, p. 14), cost centers (insert only, p. 18; costcenter1-6 on lines and accounts, pp. 14-15), towns (town p. 7, Town p. 9), payment terms (paymentTermsCode, p. 7), customer classifications and contact types (pp. 7-8), item types, trademarks, producing companies, styles and models (p. 20), organizations (orgnization_code) and payment types (payment_type, p. 14). Salesmen have an endpoint but no documented response (p. 6).",
+ "impact":"Tools cannot offer drop-downs or validate these codes; journal-entry, cost-center and item-creation tools need codes typed by hand, and cost-center reports require the user to already know the codes.",
+ "bawaba":"Cannot be fixed by a gateway — needs ISCO. Bawaba pre-checks the codes it can list (customer, currency, store, city, bank, branch) and leaves the rest for Shamel to accept or reject (03 §15.7).",
+ "severity":"high",
+ "isco":["ISCO-26","ISCO-39","ISCO-48","ISCO-52"]
+},
+{
+ "id":"L25",
+ "category":"data access",
+ "title":"Item images are file paths, not image data",
+ "detail":"GetItemsCatalog ('Get all items image') returns only item_code and image_path strings (p. 11). No endpoint returns the image bytes, and the format of image_path (web URL, local path or network share) is not stated.",
+ "impact":"Catalog, sales-app or e-commerce tools cannot show product pictures from the API alone, and passing image_path on could reveal Shamel's server name or folder layout.",
+ "bawaba":"image_path is never exposed. The Connector fetches the image on the Shamel side, Bawaba re-encodes it (metadata stripped) and serves it through short-lived presigned /v1/media URLs; images stay disabled until the path format is confirmed (03 §10.5-10.6).",
+ "severity":"medium",
+ "isco":["ISCO-34"]
+},
+{
+ "id":"L26",
+ "category":"documentation",
+ "title":"No version information or change notices",
+ "detail":"The manual carries no version number or date (pp. 1-20), paths have no version, and no endpoint reports the Shamel or API version. The name /Voucher/Post2 (p. 13) implies an older, undocumented /Voucher/Post.",
+ "impact":"A Shamel update could rename fields or change behaviour without warning and silently break tools; nobody can tell whether the manual matches the installed version.",
+ "bawaba":"Tools get a stable /v1 contract with its own version, changelog and 6-month deprecation notice; a tolerant decoder and schema-drift metrics and alerts spot upstream changes; /Voucher/Post is never called (03 §3, §7). Knowing Shamel's version and change plans needs ISCO.",
+ "severity":"medium",
+ "isco":["ISCO-50"]
+},
+{
+ "id":"L27",
+ "category":"data access",
+ "title":"Only three reports; little history",
+ "detail":"The API offers exactly three reports: account statement ('كشف حساب محاسبي' = 'accounting account statement'), last-price report and cost-center statement (p. 3; pp. 12-13, 19). There is no trial balance, profit and loss, aging, sales analysis or stock valuation. GetCurrencyRates returns only the 'latest 10' rates with no date filter (p. 5); customer balances come without history except the balance at a voucher's date (pp. 7-8, 17-18).",
+ "impact":"Financial dashboards (profit, aging, sales by item or salesman) must be computed from raw vouchers, which is heavy without pagination, may miss voucher types, and cannot produce GL-based statements because accounts cannot be listed; historical exchange rates are not available.",
+ "bawaba":"Partly: snapshot paging, voucher range slicing, voucher summaries and combined endpoints (customer 360, stock across stores) make computing from raw data practical. Real financial reports need ISCO (03 §12-14).",
+ "severity":"high",
+ "isco":["ISCO-28","ISCO-38","ISCO-52"]
+},
+{
+ "id":"L28",
+ "category":"data access",
+ "title":"Ambiguous numbers: '0 = not requested' and amounts as text",
+ "detail":"Customer balances are filled only with getBalance=true (p. 7), and for vouchers 'If the header is not set or set to false, 0 is returned' (pp. 17-18), so 0 can mean 'not asked'. Account-statement credit, debit and balance are strings with no stated number format (pp. 13, 19); other amounts are double (floating point); Customer.price_class is a double although price classes have int ids (pp. 6-7).",
+ "impact":"A tool may show a zero balance that is really unknown, or mis-parse amounts and get wrong totals.",
+ "bawaba":"Bawaba requests balances whenever it exposes them and never reports a 0 it did not ask for; all money, quantities and rates are exact decimal strings; statement strings are parsed with a strict grammar and the whole response fails safely on an unknown format (03 §4.6, §12.2).",
+ "severity":"medium",
+ "isco":["ISCO-14","ISCO-17","ISCO-31","ISCO-38"]
+},
+{
+ "id":"L29",
+ "category":"security",
+ "title":"Possible undocumented endpoints on the Shamel server",
+ "detail":"The manual documents 30 endpoints; /Voucher/Post2 (p. 13) implies an older /Voucher/Post, and nothing says whether other endpoints (older versions, update or delete, admin or help pages) exist or whether all of them require the token (p. 4).",
+ "impact":"Anyone who can reach the Shamel API directly on the network might find and use endpoints nobody has reviewed, possibly ones that change data.",
+ "bawaba":"Bawaba and its Connector forward only a compiled allowlist of reviewed endpoints (never /Voucher/Post), so tools cannot reach anything else through Bawaba; with the Connector on the Shamel server, Shamel can be firewalled to accept only local calls if ISCO confirms that is safe (01 §8.1, 03 §7). Blocking or disabling such endpoints on Shamel itself needs ISCO.",
+ "severity":"medium",
+ "isco":["ISCO-07","ISCO-50","ISCO-55"]
+},
+{
+ "id":"L30",
+ "category":"writes",
+ "title":"No test environment for writes",
+ "detail":"The manual describes no test company, demo database or sandbox mode (pp. 1-20); every insert goes to the live company data (pp. 8-9, 13-20).",
+ "impact":"Write tools can only be tried for real on live accounting data, where mistakes cannot be deleted through the API.",
+ "bawaba":"Test tokens are routed to a built-in mock Shamel with realistic fake data, so tools can be built and tested safely; the owner switches a tool to a live token once trusted (00 §6, 03 §21). The mock is built from the manual, so each write type must still be verified once against real Shamel, ideally on a test copy from ISCO.",
+ "severity":"medium",
+ "isco":["ISCO-51"]
+}
+]}

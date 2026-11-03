@@ -1,0 +1,312 @@
+{"entities":[
+{
+  "name": "AuthResult",
+  "plain_name": "Login result",
+  "plain_name_ar": "نتيجة تسجيل الدخول",
+  "domain": "master_data",
+  "description": "What Shamel sends back when a user logs in with username and password (form POST, p. 4). It carries the session token that every other request must send, plus who the user is and which salesman they are linked to.",
+  "returned_by": ["/Main/Login"],
+  "accepted_by": [],
+  "page": 4,
+  "fields": [
+    {"name": "success", "type": "bool", "meaning": "Whether the login succeeded", "source": "inferred", "note": "From the name. How a failed login is reported (success=false with HTTP 200, or HTTP 500) is not stated (ISCO-03)."},
+    {"name": "token", "type": "string", "meaning": "Session token to send with every later request", "source": "manual", "note": "\"Keep the token to send it with every request\" (p. 4); sent as header `token` together with header `username` (p. 4). \"Token: you could have it by call login method\" (p. 2). Lifetime/expiry undocumented (ISCO-01)."},
+    {"name": "userId", "type": "int", "meaning": "Shamel user number", "source": "inferred", "note": "From the name."},
+    {"name": "userCode", "type": "string", "meaning": "Shamel user code", "source": "inferred", "note": "From the name. Whether the `username` header must carry the login name, userCode or userId is unconfirmed (ISCO-03)."},
+    {"name": "userName", "type": "string", "meaning": "The user's name", "source": "inferred", "note": "From the name; display name vs login name not stated."},
+    {"name": "salesmanCode", "type": "string", "meaning": "Salesman linked to this user", "source": "inferred", "note": "salesmanCode → Salesman. Explains why GetCustomers returns only \"the salesman's customers\" unless getAll=true (p. 7). Scoping on other endpoints unknown (ISCO-25)."},
+    {"name": "userIsDisabled", "type": "bool", "meaning": "The user account is disabled", "source": "inferred", "note": "From the name. Whether a disabled user can still get a usable token is unknown (ISCO-03)."}
+  ],
+  "business_value": "Lets a tool sign in once and act as a specific Shamel user; the user's salesman link decides which customers it sees by default."
+},
+{
+  "name": "Currency",
+  "plain_name": "Currency",
+  "plain_name_ar": "عملة",
+  "domain": "master_data",
+  "description": "A currency defined in Shamel (\"Get all currencies\", pp. 4–5). It is the lookup list that amounts, prices and balances point to through the currency code.",
+  "returned_by": ["/Files/GetCurrencies"],
+  "accepted_by": [],
+  "page": 4,
+  "fields": [
+    {"name": "id", "type": "int", "meaning": "Numeric currency id", "source": "inferred", "note": "From the name. Other records refer to currencies by the text code, not by this id (ISCO-28)."},
+    {"name": "code", "type": "string", "meaning": "Currency code", "source": "inferred", "note": "Join key for CurrencyRate.currency_code, Customer.currency, CustomerBalance.currency and price rows. Vouchers use codes like \"NIS\", \"$\" (p. 13), so not necessarily ISO codes (ISCO-28 b)."},
+    {"name": "currency_name", "type": "string", "meaning": "Currency name", "source": "inferred", "note": "Printed \"stringcurrency_name\" (missing space, p. 5)."},
+    {"name": "units", "type": "string", "meaning": "Not explained; possibly the main unit name (e.g. shekel)", "source": "undocumented", "note": "ISCO-28 (a)."},
+    {"name": "division", "type": "string", "meaning": "Not explained; possibly the sub-unit name (e.g. agora)", "source": "undocumented", "note": "ISCO-28 (a)."}
+  ],
+  "business_value": "Lets tools show every amount with the right currency and match vouchers, prices and balances to it."
+},
+{
+  "name": "CurrencyRate",
+  "plain_name": "Exchange rate",
+  "plain_name_ar": "سعر صرف",
+  "domain": "master_data",
+  "description": "An exchange-rate entry. The endpoint returns only the \"latest 10 currency rate\" (p. 5) with no date or currency filter, so it gives current rates, not history. Whether that is 10 in total or 10 per currency is not stated (ISCO-28 c).",
+  "returned_by": ["/Files/GetCurrencyRates"],
+  "accepted_by": [],
+  "page": 5,
+  "fields": [
+    {"name": "currency_code", "type": "String", "meaning": "Currency this rate is for", "source": "inferred", "note": "currency_code → Currency.code. Type printed \"String\" (capital S)."},
+    {"name": "rate", "type": "double", "meaning": "Exchange rate", "source": "inferred", "note": "From the name. Direction (base units per 1 unit of this currency?) not stated."},
+    {"name": "date", "type": "string", "meaning": "Date of the rate", "source": "inferred", "note": "yyyy-MM-dd per the global date rule (p. 4)."},
+    {"name": "is_base", "type": "bool", "meaning": "Marks the base (local) currency", "source": "inferred", "note": "From the name. Exact meaning asked in ISCO-28 (d)."}
+  ],
+  "business_value": "Lets tools convert foreign-currency balances and prices at the latest rate; historical or as-of-date rates are not available."
+},
+{
+  "name": "Bank",
+  "plain_name": "Bank",
+  "plain_name_ar": "بنك",
+  "domain": "master_data",
+  "description": "A bank defined in Shamel (\"Get All Banks\", p. 5; Arabic capability \"سحب البنوك وفروعها\", pull banks and their branches, p. 2). It identifies the bank of cheques.",
+  "returned_by": ["/Files/GetBanks"],
+  "accepted_by": [],
+  "page": 5,
+  "fields": [
+    {"name": "code", "type": "string", "meaning": "Bank code", "source": "inferred", "note": "Likely what VoucherCheqs.bank_code (\"رقم البنك\", bank number, p. 14) refers to."},
+    {"name": "name", "type": "string", "meaning": "Bank name", "source": "inferred", "note": "From the name."}
+  ],
+  "business_value": "Lets tools pick a valid bank when recording cheques on receipts and payments."
+},
+{
+  "name": "BankBranch",
+  "plain_name": "Bank branch",
+  "plain_name_ar": "فرع بنك",
+  "domain": "master_data",
+  "description": "A branch of a bank (\"Get all branchs\" [sic], p. 5). The path is misspelled /Files/GetBanksBranchs; it returns all branches of all banks and cannot be filtered by bank.",
+  "returned_by": ["/Files/GetBanksBranchs"],
+  "accepted_by": [],
+  "page": 5,
+  "fields": [
+    {"name": "code", "type": "string", "meaning": "Branch code", "source": "inferred", "note": "Likely what VoucherCheqs.branch_code (\"رقم فرع البنك\", bank branch number, p. 14) refers to."},
+    {"name": "name", "type": "string", "meaning": "Branch name", "source": "inferred", "note": "From the name."},
+    {"name": "bank_code", "type": "string", "meaning": "Bank this branch belongs to", "source": "inferred", "note": "bank_code → Bank.code. Printed \"stringbank_code\" (missing space, p. 5)."}
+  ],
+  "business_value": "Completes cheque details (bank plus branch) for receipts and payments."
+},
+{
+  "name": "City",
+  "plain_name": "City",
+  "plain_name_ar": "مدينة",
+  "domain": "master_data",
+  "description": "A city in Shamel's city list (\"Get all cities\", p. 6). Customers and vouchers point to it by number.",
+  "returned_by": ["/Files/GetCities"],
+  "accepted_by": [],
+  "page": 6,
+  "fields": [
+    {"name": "id", "type": "int", "meaning": "City number", "source": "inferred", "note": "Customer.city, Customer(write).City (\"رقم المدينة\", city number, p. 9) and VoucherHeader.city (p. 13) refer to it."},
+    {"name": "name", "type": "string", "meaning": "City name", "source": "inferred", "note": "Also copied into Customer.city_name."}
+  ],
+  "business_value": "Lets tools group and filter customers by city and fill the city on new customers."
+},
+{
+  "name": "Store",
+  "plain_name": "Store (warehouse)",
+  "plain_name_ar": "مستودع",
+  "domain": "master_data",
+  "description": "A store (warehouse) where stock is held (\"Get all stores\", p. 6; Arabic capability \"سحب المستودعات\", pull warehouses, p. 2). The manual prints this class as `class City`, a copy-paste error; \"Store\" is our name for it.",
+  "returned_by": ["/Files/GetStores"],
+  "accepted_by": [],
+  "page": 6,
+  "fields": [
+    {"name": "id", "type": "int", "meaning": "Store number", "source": "inferred", "note": "Referenced by ItemStore.store, VoucherItems.store, VoucherHeader.order_store and the `store` filter header of GetItems."},
+    {"name": "name", "type": "string", "meaning": "Store name", "source": "inferred", "note": "From the name."},
+    {"name": "type", "type": "int", "meaning": "Store type", "source": "inferred", "note": "Values undocumented (ISCO-27 a, ISCO-49)."},
+    {"name": "car_code", "type": "string", "meaning": "Vehicle code, probably for van (mobile sales) stores", "source": "inferred", "note": "From the name only (ISCO-27 b)."},
+    {"name": "orgnization_code", "type": "string", "meaning": "Not explained; probably an organisation or branch code", "source": "undocumented", "note": "[sic] \"orgnization\". ISCO-27 (c)."}
+  ],
+  "business_value": "Lets tools show stock per warehouse or van and choose the right store on orders and invoices."
+},
+{
+  "name": "PriceClass",
+  "plain_name": "Price class",
+  "plain_name_ar": "فئة سعر",
+  "domain": "master_data",
+  "description": "One of Shamel's six named price levels (\"Get the 6 price classes name\", p. 6; Arabic capability \"سحب فئات الاسعار\", p. 2). Each customer is assigned one.",
+  "returned_by": ["/Files/GetPriceClasses"],
+  "accepted_by": [],
+  "page": 6,
+  "fields": [
+    {"name": "id", "type": "int", "meaning": "Price class number (1–6)", "source": "inferred", "note": "Presumably matches Item.sale_parice1..6 and Customer.price_class (ISCO-29 a)."},
+    {"name": "name", "type": "string", "meaning": "Price class name", "source": "manual", "note": "\"Get the 6 price classes name\" (p. 6)."}
+  ],
+  "business_value": "Lets tools show which price list applies to a customer and label item prices by class."
+},
+{
+  "name": "Salesman",
+  "plain_name": "Salesman",
+  "plain_name_ar": "مندوب",
+  "domain": "master_data",
+  "description": "A sales representative (مندوب). UNDOCUMENTED: the manual prints only the heading /Files/GetSalesmen (p. 6) with no description, no inputs and no fields, and the endpoint is missing from the Arabic capability list (p. 2). Its response must come from ISCO or a live capture (ISCO-26, priority).",
+  "returned_by": ["/Files/GetSalesmen"],
+  "accepted_by": [],
+  "page": 6,
+  "fields": [],
+  "business_value": "Would let tools list salesmen and report per salesman. Salesman codes already appear in AuthResult.salesmanCode, Customer.salesman_code, Customer(write).Salesman and VoucherHeader.salesman (\"رقم المندوب\", salesman number, p. 13), but the list itself cannot be relied on until ISCO answers."
+},
+{
+  "name": "Customer",
+  "plain_name": "Customer (read)",
+  "plain_name_ar": "زبون",
+  "domain": "customers",
+  "description": "A customer account as returned by /Customer/GetCustomers (pp. 6–7): identity, phone and address, salesman, price class and credit terms, tax status, GPS, and optionally balances, classifications and contacts. By default only the logged-in user's salesman's customers come back; getAll=true returns all (p. 7). Filters: lastupdatedate (changed since), code, vatreg, getStopped.",
+  "returned_by": ["/Customer/GetCustomers"],
+  "accepted_by": [],
+  "page": 7,
+  "fields": [
+    {"name": "code", "type": "string", "meaning": "Customer code (unique key)", "source": "inferred", "note": "Used as the `code` filter: \"to get one customer with the filled 'code'\" (p. 7). Assigned by Shamel on insert (PostResponse.value, p. 9). Same key as customerCode / customer_code elsewhere."},
+    {"name": "name", "type": "string", "meaning": "Customer name", "source": "inferred", "note": "Write field Name = \"اسم الزبون\" (p. 9)."},
+    {"name": "phone", "type": "string", "meaning": "Phone number", "source": "inferred", "note": "Probably from write field PhoneNumber (\"تلفون 1\") (ISCO-32 b)."},
+    {"name": "street", "type": "string", "meaning": "Street address", "source": "inferred", "note": "Probably from write field Address (\"الشارع\") (ISCO-32 b)."},
+    {"name": "street2", "type": "string", "meaning": "Second street / address line", "source": "inferred", "note": "Probably from write field Street (\"شارع 2\") (ISCO-32 b)."},
+    {"name": "referee1", "type": "string", "meaning": "Referee 1 (person who introduces or vouches for customer)", "source": "inferred", "note": "Write field Referee = \"معرف 1\" (p. 9) (ISCO-32 a)."},
+    {"name": "referee2", "type": "string", "meaning": "Second referee, or referee 1's phone (unclear)", "source": "inferred", "note": "May hold write field RefereeMobile (\"تلفون معرف 1\") (ISCO-32 b)."},
+    {"name": "salesman_code", "type": "string", "meaning": "Salesman responsible for this customer", "source": "inferred", "note": "salesman_code → Salesman. Drives default scoping: without getAll=true only \"the salesman's customers\" return (p. 7)."},
+    {"name": "price_class", "type": "double", "meaning": "Price class assigned to the customer", "source": "inferred", "note": "price_class → PriceClass.id. Typed double here but int in the write model (ISCO-29 c)."},
+    {"name": "credit_limit", "type": "double", "meaning": "Credit limit", "source": "inferred", "note": "Sensitive. Cannot be set through /Customer/Post (ISCO-48 a)."},
+    {"name": "discount", "type": "double", "meaning": "Default customer discount", "source": "inferred", "note": "Percentage or amount not stated (ISCO-32 a)."},
+    {"name": "city", "type": "int", "meaning": "City number", "source": "inferred", "note": "city → City.id."},
+    {"name": "currency", "type": "string", "meaning": "Account currency code", "source": "inferred", "note": "currency → Currency.code."},
+    {"name": "level", "type": "int", "meaning": "Customer level", "source": "inferred", "note": "Write field CustomerLevel = \"مستوى الزبون\" (p. 9). Values undocumented (ISCO-49)."},
+    {"name": "town", "type": "string", "meaning": "Town / village code", "source": "inferred", "note": "Write field Town = \"كود القرية\" (village code, p. 9). No endpoint lists towns."},
+    {"name": "city_name", "type": "string", "meaning": "City name (copy of City.name)", "source": "inferred", "note": "From the name."},
+    {"name": "citizen_code", "type": "string", "meaning": "Not explained", "source": "undocumented", "note": "ISCO-32 (a)."},
+    {"name": "attr", "type": "int", "meaning": "Not explained", "source": "undocumented", "note": "Enum values unknown (ISCO-32 a, ISCO-49)."},
+    {"name": "man_name", "type": "string", "meaning": "Not explained; possibly contact or responsible person's name", "source": "undocumented", "note": "ISCO-32 (a)."},
+    {"name": "trans_permissions", "type": "int", "meaning": "Not explained; possibly allowed-transaction flags", "source": "undocumented", "note": "ISCO-32 (a), ISCO-49."},
+    {"name": "VATReg", "type": "string", "meaning": "VAT registration (licensed-dealer) number", "source": "inferred", "note": "Filtered by the `vatreg` header: \"to filter on vatreg field\" (p. 7). Write field VatReg = \"مشتغل مرخص الزبون\" (p. 9)."},
+    {"name": "creditType", "type": "int", "meaning": "Not explained; possibly credit or payment type", "source": "undocumented", "note": "ISCO-32 (a), ISCO-49."},
+    {"name": "balance", "type": "double", "meaning": "Customer's current balance", "source": "manual", "note": "Filled only with getBalance=\"true\" (p. 7); otherwise presumably 0, indistinguishable from a real zero (ISCO-31 a). Sensitive."},
+    {"name": "notPayedCheqsBalance", "type": "double", "meaning": "Total of the customer's cheques not yet paid", "source": "manual", "note": "[sic] \"customer's not payed cheqs balance\" (p. 7). Only with getBalance=\"true\"."},
+    {"name": "returnedCheqsBalance", "type": "double", "meaning": "Total of the customer's returned (bounced) cheques", "source": "manual", "note": "\"customer's returned cheqs balance\" (p. 7). Only with getBalance=\"true\"."},
+    {"name": "stopped", "type": "bool", "meaning": "Customer is stopped (blocked / inactive)", "source": "inferred", "note": "getStopped=\"true\" returns \"only stopped customers\" (p. 7). Whether the default call includes stopped customers is unknown (ISCO-30)."},
+    {"name": "latitude", "type": "string", "meaning": "GPS latitude (as text)", "source": "inferred", "note": "From the name."},
+    {"name": "longitude", "type": "string", "meaning": "GPS longitude (as text)", "source": "inferred", "note": "From the name."},
+    {"name": "id_number", "type": "string", "meaning": "Identity number", "source": "inferred", "note": "Personal ID vs company registration unclear (ISCO-32 a)."},
+    {"name": "taxable", "type": "bool", "meaning": "Customer is subject to tax", "source": "inferred", "note": "From the name."},
+    {"name": "paymentTermsCode", "type": "string", "meaning": "Payment terms code", "source": "inferred", "note": "From the name. No endpoint lists payment terms."},
+    {"name": "classifications", "type": "List<CustomerClassificaiton>", "meaning": "Customer's classifications", "source": "manual", "note": "Filled only with getClassifications=\"true\": \"to return customer classifications\" (p. 7). → CustomerClassificaiton [sic]."},
+    {"name": "contacts", "type": "List<CustomerContact>", "meaning": "Customer's contacts", "source": "manual", "note": "Filled only with getContacts=\"true\": \"to return customer's contacts\" (p. 7). → CustomerContact."}
+  ],
+  "business_value": "Gives a full customer list for CRM, route planning (GPS), credit control (limit vs balance) and incremental sync of changed customers via lastupdatedate."
+},
+{
+  "name": "CustomerClassificaiton",
+  "plain_name": "Customer classification",
+  "plain_name_ar": "تصنيف الزبون",
+  "domain": "customers",
+  "description": "A classification tag attached to a customer (e.g. a segment or group). Returned inside Customer.classifications only when getClassifications=\"true\" (p. 7). The class name is misspelled in the manual (\"Classificaiton\").",
+  "returned_by": ["/Customer/GetCustomers"],
+  "accepted_by": [],
+  "page": 7,
+  "fields": [
+    {"name": "pos", "type": "int", "meaning": "Position / slot number of the classification", "source": "inferred", "note": "From the name."},
+    {"name": "name", "type": "string", "meaning": "Classification name", "source": "inferred", "note": "Printed on p. 8."}
+  ],
+  "business_value": "Lets tools segment customers for reporting and targeting; no endpoint lists all possible classifications."
+},
+{
+  "name": "CustomerContact",
+  "plain_name": "Customer contact",
+  "plain_name_ar": "جهة اتصال الزبون",
+  "domain": "customers",
+  "description": "A contact entry for a customer (a person, phone, email or similar). Returned inside Customer.contacts only when getContacts=\"true\" (p. 7).",
+  "returned_by": ["/Customer/GetCustomers"],
+  "accepted_by": [],
+  "page": 8,
+  "fields": [
+    {"name": "pos", "type": "int", "meaning": "Position / order of the contact", "source": "inferred", "note": "From the name."},
+    {"name": "name", "type": "string", "meaning": "Contact name or label", "source": "inferred", "note": "From the name."},
+    {"name": "detail", "type": "string", "meaning": "Contact value (e.g. number, email, address)", "source": "inferred", "note": "From the name."},
+    {"name": "type", "type": "int", "meaning": "Contact type number", "source": "inferred", "note": "Values undocumented (ISCO-49)."},
+    {"name": "typeName", "type": "string", "meaning": "Contact type name (label for type)", "source": "inferred", "note": "From the name."}
+  ],
+  "business_value": "Gives extra phone numbers, emails and contact persons for calling or messaging customers."
+},
+{
+  "name": "CustomerBalance",
+  "plain_name": "Customer balance",
+  "plain_name_ar": "رصيد الزبون",
+  "domain": "customers",
+  "description": "A customer balance row (\"Get list of customer balances\", p. 8; Arabic capability \"سحب ارصدة الزبائن\", p. 2). Apparently one row per customer per currency. Empty customerCode returns all customers' balances; vatreg finds a customer by VAT number.",
+  "returned_by": ["/Customer/GetCustomerBalances"],
+  "accepted_by": [],
+  "page": 8,
+  "fields": [
+    {"name": "code", "type": "string", "meaning": "Customer code", "source": "inferred", "note": "code → Customer.code."},
+    {"name": "pos", "type": "int", "meaning": "Not explained; possibly row or currency order", "source": "undocumented", "note": "ISCO-31 (b)."},
+    {"name": "currency", "type": "string", "meaning": "Currency of this balance", "source": "inferred", "note": "currency → Currency.code."},
+    {"name": "date", "type": "string", "meaning": "Not explained; possibly balance or last-movement date", "source": "undocumented", "note": "ISCO-31 (b)."},
+    {"name": "balance", "type": "double", "meaning": "Customer balance amount", "source": "manual", "note": "Endpoint returns \"customer balances\" (p. 8). Sign (owed vs credit) and whether cheques/unposted vouchers are included not stated (ISCO-31 c)."},
+    {"name": "rate", "type": "double", "meaning": "Exchange rate, presumably of the row's currency", "source": "inferred", "note": "ISCO-31 (b)."}
+  ],
+  "business_value": "Lets tools show who owes what, per currency, for collections and credit control. Whether it is limited to the salesman's customers is unknown (ISCO-25)."
+},
+{
+  "name": "Customer",
+  "plain_name": "Customer (new-customer form)",
+  "plain_name_ar": "زبون جديد",
+  "domain": "customers",
+  "description": "The data sent to create a customer via /Customer/Post (\"Insert new customer\", p. 8), as a JSON string in form field `obj`. Same class name as the read model but different (PascalCase) fields; there is no customer code because Shamel assigns it and returns it in PostResponse.value (p. 9). All meanings come from Arabic comments.",
+  "returned_by": [],
+  "accepted_by": ["/Customer/Post"],
+  "page": 9,
+  "fields": [
+    {"name": "Name", "type": "string", "meaning": "Customer name", "source": "manual-ar", "note": "Arabic: «اسم الزبون» (p. 9). Read field: name."},
+    {"name": "VatReg", "type": "string", "meaning": "Customer's licensed-dealer (VAT registration) number", "source": "manual-ar", "note": "Arabic: «مشتغل مرخص الزبون». Printed \"stringVatReg\" (missing space). Read field: VATReg."},
+    {"name": "Address", "type": "string", "meaning": "Street", "source": "manual-ar", "note": "Arabic: «الشارع», printed without \"//\". Probably read field street (ISCO-32 b)."},
+    {"name": "MobileNumber", "type": "string", "meaning": "Fax (Arabic comment contradicts the field name)", "source": "manual-ar", "note": "Arabic: «فاكس». Mobile vs fax unclear; no read counterpart (ISCO-32 c)."},
+    {"name": "PhoneNumber", "type": "string", "meaning": "Phone 1", "source": "manual-ar", "note": "Arabic: «تلفون 1». Probably read field phone."},
+    {"name": "Salesman", "type": "string", "meaning": "Default salesman; leave empty if no salesmen exist", "source": "manual-ar", "note": "Arabic: «المندوب الافتراضي – في حال عدم وجود مندوبين لا يتم تعبئته». Salesman → Salesman; read field salesman_code."},
+    {"name": "Street", "type": "string", "meaning": "Street 2", "source": "manual-ar", "note": "Arabic: «شارع 2». Probably read field street2 (careful: Street is not street)."},
+    {"name": "City", "type": "int", "meaning": "City number", "source": "manual-ar", "note": "Arabic: «رقم المدينة». City → City.id."},
+    {"name": "Town", "type": "string", "meaning": "Village code", "source": "manual-ar", "note": "Arabic: «كود القرية». Read field town; no endpoint lists towns."},
+    {"name": "Referee", "type": "string", "meaning": "Referee 1", "source": "manual-ar", "note": "Arabic: «معرف 1». Read field referee1."},
+    {"name": "RefereeMobile", "type": "string", "meaning": "Referee 1's phone", "source": "manual-ar", "note": "Arabic: «تلفون معرف 1». Possibly read field referee2 (ISCO-32 b)."},
+    {"name": "CustomerLevel", "type": "int", "meaning": "Customer level", "source": "manual-ar", "note": "Arabic: «مستوى الزبون». Read field level; values undocumented (ISCO-49)."},
+    {"name": "PriceClass", "type": "int", "meaning": "Price class number", "source": "manual-ar", "note": "Arabic: «رقم فئة السعر». PriceClass → PriceClass.id; int here, double in the read model."}
+  ],
+  "business_value": "Lets tools (a sales app or web form) create new customers directly in Shamel. Insert-only: no update or delete; currency, credit limit and discount cannot be set (ISCO-48 a); a retried insert may create a duplicate (ISCO-43)."
+},
+{
+  "name": "PostResponse",
+  "plain_name": "Insert result",
+  "plain_name_ar": "نتيجة الإدخال",
+  "domain": "customers",
+  "description": "The JSON result of a customer or item insert (\"It return the following class as Json\", pp. 9 and 20): success flag, error text and the new record's code.",
+  "returned_by": ["/Customer/Post", "/Item/Post"],
+  "accepted_by": [],
+  "page": 9,
+  "fields": [
+    {"name": "Success", "type": "bool", "meaning": "Whether the insert succeeded", "source": "inferred", "note": "From the name. Failures may also arrive as HTTP 500 with error details (p. 4) (ISCO-19)."},
+    {"name": "ErrorMessage", "type": "string", "meaning": "Error text when the insert failed", "source": "inferred", "note": "A single string here; the voucher Result uses string[] (p. 15)."},
+    {"name": "value", "type": "string", "meaning": "Code of the newly inserted customer", "source": "manual", "note": "\"If the process succeeded, the value will contain the inserted code of the customer\" (p. 9). For /Item/Post not stated (ISCO-48 b)."}
+  ],
+  "business_value": "Confirms a new customer was created and gives its Shamel code for later orders, invoices and statements."
+},
+{
+  "name": "CustomerPriceRow",
+  "plain_name": "Customer price row",
+  "plain_name_ar": "سعر وخصم خاص بالزبون",
+  "domain": "customers",
+  "description": "A special price/discount row from Customer/GetCustomerPricesAsRows (pp. 16–17, path printed without leading slash). The manual gives no class name (\"CustomerPriceRow\" is our name), no purpose and no inputs, only \"Return the following object\". The fields suggest item prices and discounts per customer or price class. Not in the Arabic capability list (p. 2).",
+  "returned_by": ["Customer/GetCustomerPricesAsRows"],
+  "accepted_by": [],
+  "page": 16,
+  "fields": [
+    {"name": "code", "type": "string", "meaning": "Not explained; possibly row or price-list code", "source": "undocumented", "note": "ISCO-33 (c)."},
+    {"name": "price_class_name", "type": "string", "meaning": "Price class name", "source": "inferred", "note": "price_class_name → PriceClass.name. Rows with empty customer_code may be class prices (ISCO-33 e)."},
+    {"name": "customer_code", "type": "string", "meaning": "Customer the price applies to", "source": "inferred", "note": "customer_code → Customer.code."},
+    {"name": "stock_code", "type": "string", "meaning": "Item code", "source": "inferred", "note": "stock_code → Item.code; unconfirmed (ISCO-33 d)."},
+    {"name": "discount", "type": "double", "meaning": "Discount", "source": "inferred", "note": "Percent or amount presumably set by discount_type."},
+    {"name": "discount_type", "type": "int", "meaning": "Discount type (e.g. percent or amount)", "source": "inferred", "note": "Values undocumented (ISCO-33 c, ISCO-49)."},
+    {"name": "price", "type": "double", "meaning": "Special price", "source": "inferred", "note": "From the name."},
+    {"name": "currency_code", "type": "string", "meaning": "Currency of the price", "source": "inferred", "note": "currency_code → Currency.code."},
+    {"name": "main_unit", "type": "string", "meaning": "Item's main unit name", "source": "inferred", "note": "From the name; printed on p. 17."},
+    {"name": "orgnization_code", "type": "string", "meaning": "Not explained; probably an organisation or branch code", "source": "undocumented", "note": "[sic] \"orgnization\"."},
+    {"name": "tax", "type": "double", "meaning": "Tax (rate or amount not stated)", "source": "inferred", "note": "ISCO-33 (c)."}
+  ],
+  "business_value": "Would let tools quote each customer their agreed price and discount; with no documented filters each call may download the whole price table, and list-vs-single result is unclear (ISCO-33)."
+}
+]}
