@@ -1,6 +1,6 @@
 # 05 — Bawaba Operations
 
-> Status: draft v1 · 2026-11-03 · Binding input: [`00-decisions.md`](00-decisions.md). Builds on
+> Status: draft v2 (revised after review) · 2026-11-03 · Binding input: [`00-decisions.md`](00-decisions.md). Builds on
 > [`01-architecture.md`](01-architecture.md) (pipeline stages S1–S17, workers, Valkey/PostgreSQL usage, key
 > hierarchy). Upstream reference: [`../upstream/shamel-api.md`](../upstream/shamel-api.md).
 >
@@ -127,15 +127,16 @@ CREATE TABLE audit_upstream_calls (
   attempt smallint, outcome smallint,   -- ok | rejected | auth_failed | upstream_error | unavailable | timeout | bad_response
   http_status smallint, dur_queue_us integer, dur_us integer, bytes_out integer, bytes_in integer,
   req_body bytea, resp_body bytea,      -- raw upstream request (method, path, header params, form) / response
-  snapshot_id uuid,                     -- snapshot written from this call (01 §9.4)
+  snapshot_id uuid,                     -- shared, unfiltered snapshot written from this call (01 §9.4)
   PRIMARY KEY (ts, request_id, call_seq)
 ) PARTITION BY RANGE (ts);
 ```
 
 Coalesced followers do **not** get upstream rows: they set `flags.coalesce_follower` and `upstream_ref` = the leader's
 request id, so one upstream call is stored once however many clients shared it. Cursor pages point (via
-`upstream_ref`) to the page-1 request whose upstream call produced their snapshot, giving a complete chain from any
-page a client saw back to the raw Shamel bytes.
+`upstream_ref`) to the request whose upstream call produced the shared snapshot their view reads (01 §9.4–§9.5; that
+may be another token's page 1 when page 1 was a coalesced follower), giving a complete chain from any page a client
+saw back to the raw Shamel bytes.
 
 #### 1.3.3 Blind index for searchable business values
 
