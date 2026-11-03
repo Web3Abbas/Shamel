@@ -21,8 +21,8 @@ things even if they try to find vulnerabilities."*
 | P2 | **Rebuild, never relay.** | Every upstream request is built from typed structs, and so is every client response. No header, body, status line or error text is copied in either direction. This includes `/legacy`. |
 | P3 | **Deny by default.** | Closed allowlists for routes, methods, query parameters, JSON fields, response headers, upstream endpoints, connector operations, CORS origins and webhook targets. |
 | P4 | **Authenticate before revealing.** | Under `/v1` and `/legacy`, authentication runs before routing. An anonymous caller gets the same `401` for every path, whether or not it exists. |
-| P5 | **Fail closed.** | A missing key, an unverifiable peer, an unclassifiable upstream response, an unavailable audit store (for writes) or stale policy leads to rejection, never to passthrough. |
-| P6 | **Owner authority exists only on the server.** | Approvals, firewall changes, live-token creation and key operations exist only in the control plane (loopback or unix socket). The data plane has no code path, network path or database privilege to perform them. |
+| P5 | **Fail closed.** | A missing key, an unverifiable peer, an unclassifiable upstream response, an unavailable audit store (for writes) or policy that is too old (§16) leads to rejection, never to passthrough. |
+| P6 | **Owner authority exists only on the server.** | Approvals, firewall changes, live-token creation and key operations exist only in the control plane (loopback or unix socket). The data plane has no code path, network path, database privilege or key material to perform them: it never holds the master key, the CA key or the TOTP seed, and cannot decrypt stored audit bodies (§9.2). |
 | P7 | **Bounded blast radius.** | The consequences of compromising any one component are documented and limited (§7.8). Independent layers (Cloudflare, gateway, connector, Shamel-side firewall) each enforce their own allowlist. |
 | P8 | **Encrypted everywhere.** | Every network hop uses TLS 1.3 or mTLS. Every sensitive value at rest (PostgreSQL, Valkey, blob store) uses AES-256-GCM envelope encryption. Keys are stored apart from the data. |
 
@@ -37,7 +37,7 @@ things even if they try to find vulnerabilities."*
 | A3 | Business data: customers, balances, credit limits, prices, purchase prices, vouchers, GL accounts | Shamel. Transient in gateway memory. Encrypted snapshots and idempotency records (Valkey). Encrypted audit bodies (blob store). | Confidentiality | Exposure of commercial and personal data |
 | A4 | Integrity of Shamel's ledger | Shamel. Writes are insert-only (Q43). | Integrity | Fraudulent invoices, receipts or journals, correctable only with compensating vouchers |
 | A5 | Bawaba API tokens (tool, agent, publishable; live and test) | Clients. The gateway stores only `HMAC-SHA256(pepper, token)`. | Confidentiality | Impersonation of a tool within its grants |
-| A6 | Key material: master key, KEKs, DEKs, MAC keys, tunnel CA keys, webhook secrets, TOTP seed | Master key file. Wrapped keys in PostgreSQL. Process memory. | Confidentiality | Decryption of everything at rest |
+| A6 | Key material: master key, data-plane key, KEKs, DEKs, MAC keys, audit sealing keys, tunnel CA keys, webhook secrets, TOTP seed | Master key file (control plane only). Data-plane key file. Wrapped keys in PostgreSQL. Process memory. | Confidentiality | Master key: decryption of everything at rest. Data-plane key: the data-plane purposes only (§9.2). |
 | A7 | Owner credentials and sessions | argon2id hash, encrypted TOTP seed and session hashes in PostgreSQL | Confidentiality, integrity | Full administrative control |
 | A8 | Audit log (full bodies, admin events) | Encrypted blob store and PostgreSQL index | Confidentiality (contains A3), integrity (forensics) | Data exposure. Loss of the forensic trail. |
 | A9 | Policy: grants, scopes, data scopes, firewall rules, approval queue, connector registry | PostgreSQL | Integrity | Privilege escalation |
@@ -85,6 +85,7 @@ flowchart LR
     subgraph Z2["Z2 Gateway host(s)"]
         CFD["cloudflared<br/>(tunnel mode)"]
         DP["bawaba-gateway<br/>data plane"]
+        DK["data.key<br/>root-only file"]
         MOCK["bawaba-mock<br/>(sandbox upstream)"]
         subgraph Z2S["Z2s State (unix sockets / private network)"]
             PG[("PostgreSQL")]
@@ -110,6 +111,8 @@ flowchart LR
     CFD --> DP
     CF -.->|"B2 AOP mTLS (alt. mode)"| DP
     CONN -- "B5 outbound WSS, inner mTLS" --> CF
+    DK -.->|"systemd credential"| DP
+    MK -.->|"systemd credential"| CP
     DP -- "B3" --> PG
     DP -- "B3" --> VK
     DP -- "B3" --> BLOB
@@ -142,7 +145,7 @@ There is deliberately **no edge from DP to CP** (boundary B9). In direct-URL mod
 | ID | STRIDE | Threat | Adv. | Mitigations | Residual |
 |---|---|---|---|---|---|
 | S-1 | Spoofing | Guessing or stuffing API tokens | 1 | 256-bit CSPRNG tokens, checksum rejection before lookup, auto-ban on failures and token spraying (§9.7, §10.3) | None practical |
-| S-2 | Spoofing | Use of a stolen token | 2, 7 | Per-token IP allowlists, instant revoke (≤1 s), anomaly alerts, least privilege, approval queue for writes | Abuse until detected, bounded by grants |
+| S-2 | Spoofing | Use of a stolen token | 2, 7 | Per-token IP allowlists, instant revoke (p99 < 1 s, bounded by `config.poll_interval`, §9.7), anomaly alerts, least privilege, approval queue for writes | Abuse until detected, bounded by grants |
 | S-3 | Spoofing | Forged client IP via `X-Forwarded-For` or `CF-Connecting-IP` to dodge bans or IP lists | 1 | Edge headers trusted only from verified Cloudflare peers. XFF is never read (§6.2). | None |
 | S-4 | Spoofing | Bypassing Cloudflare by connecting straight to the origin | 1 | Tunnel mode (no inbound port), or per-hostname AOP + Cloudflare IP allowlist (§6.1) | None |
 | S-5 | Spoofing | Rogue connector receives traffic or feeds forged data | 1, 6 | One-time enrollment, owner SAS confirmation, mTLS with serial pinning, alert on IP/ASN change (§7) | Compromised connector host (ADV-6) |
@@ -153,13 +156,13 @@ There is deliberately **no edge from DP to CP** (boundary B9). In direct-URL mod
 | T-2 | Tampering | Swapping ciphertexts between rows to obtain another credential | 5, 8 | AES-GCM with AAD bound to purpose, tenant, table, primary key and column (§9.3) | None |
 | T-3 | Tampering | Editing the audit trail to hide abuse | 8 | HMAC hash chain, daily anchor digests emailed to the owner, optional WORM bucket (§12.5) | Root attacker can stop logging going forward |
 | T-4 | Tampering | Compromised data plane edits policy in PostgreSQL | 8 | Separate DB roles. `bawaba_data` has no UPDATE on grants, firewall or approvals (§12.4). | None at data-plane-user level |
-| T-5 | Tampering | Forged cursors or snapshot ids to read another token's data | 2, 3 | AEAD-sealed cursors bound to token id and policy version (§9.10) | None |
+| T-5 | Tampering | Forged or replayed cursors or view ids to read another token's view, or a shared snapshot directly | 2, 3 | AEAD-sealed cursors bound to token id, route and query hash, carrying `policy_version`; views AAD-bound to token id and `policy_version`; snapshot ids never leave the gateway and no API accepts one (§9.10) | None |
 | T-6 | Tampering | Modification in transit on any hop | 4 | TLS 1.3 / mTLS everywhere; WireGuard or pinned TLS in direct mode | Cloudflare sees edge plaintext (§6.7) |
 | R-1 | Repudiation | Owner or agent denies an approval or grant change | 3 | Hash-chained admin event log with actor, peer uid, loginuid and request diff (§12.5) | None |
 | R-2 | Repudiation | Tool denies having posted a voucher | 2, 7 | Full encrypted audit with token id, Idempotency-Key and Shamel `reference_id` | None |
 | I-1 | Info. disclosure | Leak of Shamel origin or internals | 1–3 | Origin-hiding invariants and leak register (§5), connector-side scrubbing (§7.4) | Accidental strings in business free text (heuristic scan) |
 | I-2 | Info. disclosure | Tokens leaking through URLs or logs | 2, 7 | Header-only tokens, rejection of token-shaped strings in URLs, log redaction, scanner-friendly format (§14) | Leaks on client side |
-| I-3 | Info. disclosure | Data beyond grants through legacy, webhooks, snapshots or coalescing | 2, 3 | One policy engine on every egress path. Coalescing key includes the Shamel credential. Snapshots are per token. (§5.2, §20) | None |
+| I-3 | Info. disclosure | Data beyond grants through legacy, webhooks, snapshots or coalescing | 2, 3 | One policy engine on every egress path. Coalescing key includes the Shamel credential. A snapshot is the **unfiltered** result of one upstream call for one (upstream, credential, environment, call signature) and is shared by coalesced requesters; it is readable only through token-bound views and cursors, and S14/S15 re-apply the requesting token's current policy on every page (§9.10, 01 §9.7). | Hidden fields exist in the shared encrypted snapshot (readable by a compromised data plane, which sees them in transit anyway) |
 | I-4 | Info. disclosure | Theft of a backup or the DB | 5 | Envelope encryption, master key outside the DB and outside backups (§9) | Whole-disk theft of a running host; mitigated by TPM sealing (§9.4) |
 | I-5 | Info. disclosure | Cloudflare sees decrypted API traffic | – | Accepted (owner chose Cloudflare). Shamel credentials and sessions never cross Cloudflare in plaintext (§7.5). | Bearer tokens and business data visible to Cloudflare |
 | I-6 | Info. disclosure | Existence or timing oracles (403 vs 404, auth timing) | 1, 2 | Auth before routing, uniform `invalid_token`, out-of-scope records answered as `not_found` (§5.3 LV-11) | Coarse availability signal to authenticated callers |
@@ -203,8 +206,9 @@ There is deliberately **no edge from DP to CP** (boundary B9). In direct-URL mod
 
 1. Receive the upstream result (a connector frame, or a direct HTTP response). Only status, `Content-Type` and length
    are read. All other upstream headers are discarded unread.
-2. **Size guard:** the body is read through a limiter (`upstream.max_response_bytes`). Exceeding it yields
-   `upstream_response_too_large`.
+2. **Size guard:** the body is read through a limiter set to the operation's response cap (`Operation.MaxResponseBytes`
+   from the registry, never above `upstream.max_response_bytes`; §10.6), counted after decompression. Exceeding it
+   yields `upstream_response_too_large`.
 3. **Type guard:** `Content-Type` must be `application/json` and the body must parse as JSON. XML, HTML (for example
    an ASP.NET error page, Q12) and empty bodies become `bad_response`.
 4. **Decode** into the endpoint's typed upstream struct. Unknown upstream fields are dropped, so a field Shamel adds
@@ -250,14 +254,14 @@ Every row is covered by the origin-leak suite (§18.3).
 | LV-14 | Logs and usage visible to tools | "Own usage" showing upstream paths, connector ids, upstream latency, raw errors | Tool-visible fields are limited to request id, timestamp, method, `/v1` route template, status, Bawaba error code, total latency and bytes. |
 | LV-15 | Webhook payloads and deliveries | Payload copied from upstream JSON. Delivery source reveals the egress IP. | Rendered by the `/v1` serializer under the subscribing token's policy. Optional egress proxy and SSRF guards (§5.5). |
 | LV-16 | CORS | Upstream `Access-Control-Allow-Origin: *`, or a reflected arbitrary `Origin` | Upstream headers are dropped (OH-1). CORS is emitted only for publishable tokens with an exact-match origin list. Never `*`, never `Access-Control-Allow-Credentials` (§10.7). |
-| LV-17 | Health, metrics, debug | `/health` reporting upstream status, versions or hostnames. `/debug/pprof` or `/metrics` on the public listener. | Public `GET /healthz` returns a constant `{"status":"ok"}`, independent of upstream state. Readiness and metrics are on the loopback ops listener only (`ops.listen`). pprof is never registered on the data-plane router in release builds. |
+| LV-17 | Health, metrics, debug | `/health` reporting upstream status, versions or hostnames. `/debug/pprof` or `/metrics` on the public listener. | Public `GET /healthz` returns a constant `{"status":"ok"}`, independent of upstream state. Readiness and metrics are on the loopback ops listener only (`listeners.ops.addr`). pprof is never registered on the data-plane router in release builds. |
 | LV-18 | Bawaba version disclosure | `Server: bawaba/1.4.2`, build info in errors | No `Server` header. The build version is visible only on the loopback ops listener and in the CLI. OpenAPI `info.version` is the API contract version. |
 | LV-19 | Reflected input | Error messages that echo client values (also a log-injection vector) | Messages are static catalog strings plus JSON-pointer field paths, never values. |
 | LV-20 | Upstream internals in data | `AuthResult.userId`, Shamel session token, `system_id`, `update_date` | Never exposed. Shamel login and session handling are internal. Business identifiers (customer and voucher codes, `reference_id`) are allowed. |
-| LV-21 | Cursors and opaque ids | A cursor containing the upstream endpoint, credential id or timestamps | AEAD-sealed opaque blobs bound to the token (§9.10). |
+| LV-21 | Cursors and opaque ids | A cursor containing the upstream endpoint, credential id or timestamps | AEAD-sealed opaque blobs bound to the token (§9.10). Snapshot ids appear only inside sealed views and cursors, never in clear in a response. |
 | LV-22 | Load and queue signals | Headers revealing the global upstream cap, queue depth or Shamel load | `RateLimit-*` describe per-token limits only. A full queue returns `upstream_busy` with `Retry-After` and no depth. |
 | LV-23 | Sandbox cross-talk | A test token routed to live Shamel. Real data inside the mock. | The token prefix and the DB `env` must agree, otherwise `invalid_token` and an alert. Mock and live are distinct upstream types with separate pools. Mock data is synthetic only. |
-| LV-24 | Request ids and tracing | `traceparent` from upstream; request ids that encode hostnames | `Bawaba-Request-Id` = `req_` + 128-bit random (base62). Incoming `traceparent` is not propagated upstream, and upstream tracing headers are dropped. |
+| LV-24 | Request ids and tracing | `traceparent` from upstream; request ids that encode hostnames | `Bawaba-Request-Id` = `req_` + 26-character Crockford base32 UUIDv7 (01 S2): 48-bit millisecond timestamp plus 74 CSPRNG bits, no node id, MAC or hostname. The only thing it reveals is the request time, which the caller already knows; the time order is what audit lookups rely on (05 §1.3.1). Client-supplied `Bawaba-Client-Request-Id` is recorded only, never used as the request id. Incoming `traceparent` is not propagated upstream, and upstream tracing headers are dropped. |
 | LV-25 | Image metadata | EXIF fields: software, device, author, GPS | Images are decoded and re-encoded without metadata (§5.4). |
 | LV-26 | Email alerts | `Received:` headers reveal the gateway IP | Sent only to the owner. SMTP submission goes through a relay (`alerts.smtp.*`). |
 | LV-27 | Legacy passthrough | Shamel-shaped responses would carry LV-01..07 | Rebuilt from typed upstream structs (OH-2). Legacy errors use the Bawaba envelope. |
@@ -331,7 +335,7 @@ The upstream client (and the connector) returns exactly one outcome class. The m
 | `transport_unavailable` | No tunnel, connector killed or suspended, dial/TLS failure, connection reset | 503 `upstream_unavailable` | `Retry-After` |
 | `busy` | Global upstream concurrency queue full | 503 `upstream_busy` | `Retry-After` |
 | `timeout` | Upstream deadline exceeded | 504 `upstream_timeout` | – |
-| `too_large` | Body over `upstream.max_response_bytes` | 502 `upstream_response_too_large` | – |
+| `too_large` | Body over the operation's response cap (§10.6) | 502 `upstream_response_too_large` | – |
 
 Pattern-table rules: patterns live in code (`internal/upstream/classify`) with fixture tests from real captures. They
 are matched only inside the gateway. A match returns a code, never text. Every new pattern needs a fixture proving
@@ -412,7 +416,7 @@ like the Bawaba error envelope.
 | Rule | Expression | Action |
 |---|---|---|
 | R1 plain HTTP | `http.host eq "api.example.com" and not ssl` | Block |
-| R2 path allowlist | `http.host eq "api.example.com" and not (starts_with(http.request.uri.path, "/v1/") or starts_with(http.request.uri.path, "/legacy/") or starts_with(http.request.uri.path, "/docs") or http.request.uri.path eq "/healthz")` (add any other public paths the API document defines) | Block |
+| R2 path allowlist | `http.host eq "api.example.com" and not (starts_with(http.request.uri.path, "/v1/") or starts_with(http.request.uri.path, "/legacy/") or starts_with(http.request.uri.path, "/docs") or http.request.uri.path in {"/llms.txt" "/healthz"})` (the public path list of 03 §6.5) | Block |
 | R3 methods | `http.host eq "api.example.com" and not http.request.method in {"GET" "POST" "PATCH" "DELETE" "OPTIONS"}` (match the API document's methods) | Block |
 | R4 missing credentials | `http.host eq "api.example.com" and (starts_with(http.request.uri.path, "/v1/") or starts_with(http.request.uri.path, "/legacy/")) and not starts_with(http.request.uri.path, "/v1/media/") and http.request.method ne "OPTIONS" and len(http.request.headers["authorization"]) eq 0` | Block |
 | R5 secrets in URL | `http.host eq "api.example.com" and (http.request.uri.query contains "bwb_" or lower(http.request.uri.query) contains "token=" or lower(http.request.uri.query) contains "api_key=")` | Block |
@@ -501,7 +505,7 @@ sequenceDiagram
     DP-->>C: certificate chain
     C-->>O: local console shows SAS code 482 913
     O->>CP: bawaba connector confirm conn_x --sas 482913
-    CP->>CP: status active, epoch bump
+    CP->>CP: status active, new config version
     C->>DP: reconnect with mTLS, traffic now allowed
 ```
 
@@ -521,7 +525,7 @@ sequenceDiagram
 ### 7.4 Tunnel and request forwarding
 
 - **Outer layer:** WebSocket `GET /connector/tunnel` on the `connect.` hostname, through Cloudflare. With
-  `edge.mode=none` it goes directly to `tunnel.listen`.
+  `edge.mode=none` it goes directly to `listeners.tunnel.addr`.
 - **Inner layer:** TLS 1.3 only, ALPN `bawaba-tunnel/1`, curves `X25519MLKEM768` (hybrid post-quantum, the Go
   default) and `X25519`. The connector is the TLS client and dials. The gateway is the TLS server and opens streams.
 - **Multiplexing:** yamux over the inner TLS. At most 256 streams per tunnel. Keepalive every 15 s. Frames are
@@ -529,8 +533,12 @@ sequenceDiagram
   Because framing is explicit there is no HTTP parsing between gateway and connector, so no desync is possible.
 - **Request frame** (illustrative):
   `ShamelCall{request_id, endpoint_id (uint16), headers [{param_id, value}], form {field_id, value}?, credential
-  {cred_id, version, sealed}, deadline_ms}`.
-  Other operations: `MediaFetch{cref}`, `Ping`, `RenewCert{csr}`, `ResealCredentials{blobs}`, `Kill{reason}`.
+  {cred_id, version, sealed}, role_epoch, deadline_ms, max_response_bytes}`.
+  Other operations: `MediaFetch{cref}`, `Ping`, `RenewCert{csr}`, `ResealCredentials{blobs}`,
+  `SessionRole{cred_id, epoch, holder}` (§7.5), `Kill{reason}`. The connector's `hello` advertises its compiled
+  endpoint-table version and the endpoint ids it supports; the gateway never routes an endpoint to a connector that
+  does not advertise it (the request gets `503 upstream_unavailable` and the owner an "upgrade connector" alert), so a
+  rolling upgrade (05 §9.6) never turns into a stream of rejected frames.
 
 **Checks the connector performs on every frame**, regardless of what the gateway already checked:
 
@@ -542,24 +550,46 @@ sequenceDiagram
 | 4 | Header parameters belong to the endpoint's documented set (upstream §2.4). Values pass validator V (§11.1). | Reject |
 | 5 | The form field is the endpoint's `obj` or `filters`. The value parses as JSON, is at most `policy.max_form_bytes` (1 MiB), and is re-encoded with `url.Values`. | Reject |
 | 6 | The sealed credential opens with AAD `conn_id ‖ cred_id ‖ version` (§7.5) | Reject |
-| 7 | In-flight requests stay within `policy.max_concurrency` (8) and the rate within `policy.max_rps` (20) | `busy` |
-| 8 | The deadline is at most `policy.max_deadline` (120 s) | Clamp |
+| 7 | In `single_holder` mode, this connector is the credential's holder at `role_epoch` (§7.5) | `not_holder` (not a reject) |
+| 8 | In-flight requests stay within the effective cap: the `cap_share` from the `welcome` message (01 §7.6, §8.3), lowered by the local `policy.max_concurrency` when the owner set one; optional `policy.max_rps` (default `0` = off) | Queue (FIFO), then `busy` |
+| 9 | The deadline is at most `policy.max_deadline` (90 s, equal to `server.request_timeout`) | Clamp |
+
+The effective cap follows the gateway's global upstream cap automatically, so connector throughput scales with the
+owner's `max_concurrency` setting and Shamel's real capacity rather than a fixed number. The local
+`policy.max_concurrency` and `policy.max_rps` are ceilings that the owner MAY set on the Shamel host so that even a
+compromised gateway (which controls `cap_share`) cannot push Shamel above them.
 
 The connector then builds `base_url + endpoint.canonical_path` itself. It sends fixed `Accept: application/json` and
-`User-Agent: connector.user_agent` (a neutral default), sets no other headers, and never follows redirects. More than
-10 rejected frames per minute make the connector close the tunnel, back off for 5 minutes and write a warning to its
-local log. This throttles a compromised gateway that probes the connector.
+`User-Agent: connector.user_agent` (a neutral default), sets no other headers, and never follows redirects.
 
-**Response frame:** status, content type, body (capped at `policy.max_response_bytes`, 64 MiB), outcome enum and
-timings. Raw Go error strings are never included. Before sending, the connector scrubs its own origin markers from
-the body: base URL host, resolved IPs, local hostname and NetBIOS name, and media roots. This is best effort and is
-what keeps Shamel's address out of the gateway's audit too.
+**Rejects and tunnel closure.** A frame that fails checks 1–6 is rejected **individually** (its stream is reset with a
+reason enum, the tunnel stays up) and logged locally. The connector closes the tunnel and backs off for 5 minutes only
+on (a) an authentication or framing violation (TLS or certificate failure, malformed length prefix or protobuf, an
+operation type outside the protocol version), or (b) a sustained reject ratio: more than 50 % of frames over a sliding
+60 s window **and** at least 20 rejects in that window. `not_holder` and `busy` outcomes never count. This still
+throttles a compromised gateway that probes the connector, while a validator mismatch on one endpoint during an
+upgrade only fails the affected requests.
+
+**Response frame:** status, content type, body, outcome enum and timings. The body is capped at
+`min(frame.max_response_bytes, compiled per-endpoint cap, local policy.max_response_bytes)`, counted after
+decompression; the compiled per-endpoint caps use the same classes as the gateway registry (§10.6), and local
+configuration can only lower them. Raw Go error strings are never included. Before sending, the connector scrubs its
+own origin markers from the body: base URL host, resolved IPs, local hostname and NetBIOS name, and media roots. This
+is best effort and is what keeps Shamel's address out of the gateway's audit too.
+
+**Streaming scrub.** The scrub never buffers a whole body. JSON bodies are tokenized as they stream (`jsontext`);
+each string token is unescaped and scanned with an Aho–Corasick automaton over the marker set, and each matched
+marker occurrence is replaced with `[redacted]` before the token is re-emitted (re-escaped). Bytes are emitted only
+once they can no longer be the start of a marker: the scanner holds back the last (longest marker length − 1) bytes
+of every chunk together with the automaton state, so a marker split across a chunk boundary, including inside a long
+string token, is still found and replaced. Non-JSON bodies (which the gateway will classify as
+`bad_response`) are scanned the same way as raw bytes. Memory per stream is one chunk plus the carry.
 
 ### 7.5 Credential custody
 
 | Mode | Who stores the Shamel username and password | Who logs in and holds the Shamel session | What the gateway learns |
 |---|---|---|---|
-| Connector | Gateway stores only an **HPKE ciphertext sealed to the connector's sealing key** | Connector (in memory, single-flight re-login) | Only `cred_id` and the owner-chosen label |
+| Connector | Gateway stores only an **HPKE ciphertext sealed to the connector's sealing key** | Connector (in memory, single-flight re-login; one holder per credential by default, see below) | Only `cred_id` and the owner-chosen label |
 | Direct | Gateway, envelope-encrypted (purpose `shamel_credential`) | Gateway (in memory; if shared across nodes, encrypted in Valkey under purpose `upstream_session` with AAD `upstream_id‖cred_id`) | Everything (unavoidable) |
 | Sandbox | None. bawaba-mock does not need real credentials. | – | – |
 
@@ -575,8 +605,42 @@ what keeps Shamel's address out of the gateway's audit too.
   it. The old key is then destroyed locally.
 - **Operational cost (accepted):** enrolling a replacement connector requires re-entering Shamel passwords, because
   the gateway cannot decrypt them by design.
-- **Side benefit:** one Shamel session per connector avoids multiple gateway nodes competing for sessions if a second
-  login invalidates the first (Q14).
+
+**Session holder protocol (several connectors per upstream).** 01 §8.5 runs at least two active connector
+instances per upstream, each able to log in with the same credential. If a second Shamel login invalidates the
+first (unknown, Q14), independent logins would kick each other out continuously. The per-upstream setting
+`upstreams[].credential_session_mode` selects the behaviour:
+
+| Mode | Behaviour | When |
+|---|---|---|
+| `single_holder` (**default**) | For each `(upstream, cred_id)` exactly one connector instance is the **holder** at a given epoch. Only the holder logs in and holds the Shamel session; all calls for that credential go to the holder's tunnel sessions. | Until ISCO or calibration shows that concurrent sessions for one user are allowed |
+| `per_connector` | Every connector logs in independently (single-flight per connector). Load spreads across all connectors. | Shamel allows several live sessions per user |
+
+`single_holder` mechanics:
+
+1. **Assignment.** The holder record `bwb:<t>:credrole:<upstream>:<cred_id> = {conn_id, epoch}` lives in Valkey and
+   changes only through a compare-and-set script that increments `epoch`. The node that observes the holder's loss
+   (tunnel registry expiry, 01 §8.6), or an owner action (`bawaba connector suspend|kill`), picks the connected
+   instance with the most recent successful `shamel_probe` and publishes `credrole_changed` on `bwb:events`. The
+   current holder stays holder while it is connected (no rebalancing churn).
+2. **Handover.** The node holding the old holder's tunnel sends `SessionRole{cred_id, epoch, holder=false}`; the
+   connector drops its Shamel session for that credential (and logs out if Shamel offers a logout) and replies
+   `SessionRoleAck`. Only then (or once the old holder's tunnel is gone, or after a 2 s ack timeout, since a connector
+   without a tunnel receives no calls and therefore never contacts Shamel) does the node holding the new holder's
+   tunnel send `SessionRole{cred_id, epoch, holder=true}`, wait for the ack, and start routing.
+3. **Connector rules.** A connector logs in for a credential only while it is the holder at the highest epoch it has
+   seen, and re-logs in after `auth_failed` only under the same condition. A `ShamelCall` whose `role_epoch` differs
+   from its current holder epoch, or for a credential it does not hold, is answered with outcome `not_holder`
+   without contacting Shamel. The `welcome` message carries the connector's current roles.
+4. **Gateway rules.** S10 routes calls for a credential only to the holder's sessions. `not_holder` triggers one
+   re-selection with a fresh holder lookup; it is not a failure for the circuit breaker, the retry budget or the
+   connector's reject counter. No holder connected → `503 upstream_unavailable`.
+5. **Valkey unavailable.** Nodes keep the last known holder. A holder change is not possible until Valkey returns,
+   unless exactly one connector instance is connected for the upstream, which then becomes holder locally.
+
+In direct mode the gateway's own cluster-wide session cache with serialized login (01 §7.1) solves the same problem.
+`bawaba upstream calibrate` tests the behaviour (login twice, then check whether the first session still works) and
+recommends the mode; the question is also on the ISCO list (§20.2).
 
 ### 7.6 Lifecycle and kill switch
 
@@ -598,7 +662,8 @@ stateDiagram-v2
 ```
 
 - **Kill** (`bawaba connector kill conn_x | --all`): sets the status to `killed`, revokes all serials and bumps the
-  policy epoch. Within 1 s every node sends `Kill{reason}` and closes that connector's tunnels. The connector stores
+  config version (01 §5.4). Within the config propagation bound (p99 < 1 s, at most `config.poll_interval`) every
+  node sends `Kill{reason}` and closes that connector's tunnels. The connector stores
   `disabled=true` locally and stops dialing. To recover, run `bawaba-connector enroll <new bundle>` on the Shamel host.
   The old identity cannot be revived remotely, so a compromised gateway can stop the connector but cannot restart it.
 - **Suspend** (`bawaba connector suspend|resume`): the gateway closes the tunnels and stops routing. The connector
@@ -633,8 +698,8 @@ stateDiagram-v2
 | Reach other hosts on the Shamel LAN | **No** | Through whatever the Shamel firewall exposes | Yes |
 | Push code or config to the connector | **No** | n/a | n/a |
 | Read API tokens | No: HMACs only (256-bit, not invertible) | Same | No (tokens never reach the connector) |
-| Decrypt audit and business data at rest | Yes (master key on host) | Yes | No |
-| Owner actions or policy changes | Not as `bawaba-data` user; as root, yes | Same | No |
+| Decrypt data at rest | As `bawaba-data`: only data-plane purposes (live snapshots, views, queues, idempotency records, webhook secrets), **not** stored audit bodies or metadata of past epochs, the CA key or the TOTP seed (§9.2). As root: yes (`master.key` on host). | Same, plus Shamel credentials and upstream config (data-plane purposes in direct mode) | No |
+| Owner actions or policy changes | No as `bawaba-data`: no control route, no `bawaba_control` DB role, no `master.key`, no CA or TOTP key. As root, yes. | Same | No |
 
 Recovery: follow the runbook in §17.
 
@@ -690,6 +755,7 @@ being set up correctly.
 | Owner password | argon2id | `golang.org/x/crypto/argon2` |
 | Randomness | OS CSPRNG | `crypto/rand` only. A lint rule bans `math/rand` in security packages. |
 | Credential sealing | HPKE X25519 / HKDF-SHA256 / AES-256-GCM | §7.5 |
+| Audit write-only sealing | Per-epoch AES-256-GCM DEK, itself HPKE-sealed (same suite) to the control plane's `audit_seal` public key | §9.2 |
 | Tunnel PKI | ECDSA P-256, TLS 1.3, X25519MLKEM768 | `crypto/tls`, `crypto/x509` |
 | Webhook signatures | HMAC-SHA256 | §9.9 |
 | Release signing | Sigstore cosign | §15 |
