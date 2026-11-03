@@ -1435,7 +1435,9 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
   impossible. IIS-specific tricks are excluded by the character class: backslash as a separator, `;` path parameters,
   `(S(...))` cookieless-session segments, `~1` short names, `::$DATA` streams and trailing dots.
 - **Never allowlisted:** `/Main/Login`, because it would accept raw Shamel credentials from clients and bypass Bawaba
-  auth, and `/Voucher/Post`, which is undocumented (Q22).
+  auth, and `/Voucher/Post`, which is undocumented (Q22). `/legacy/Main/Login` answers
+  `400 shamel_credentials_not_accepted` so that migrating integrators learn why (03 §20.5, 01 §6.5); `/Voucher/Post`
+  and every other non-allowlisted path answer `404 not_found`.
 - The client's path string is never used to build the upstream URL. Only `ep.CanonicalPath` is.
 - **Path hygiene for every prefix** (`/v1` too): `//`, `/./`, `/../`, encoded `/ \ . NUL`, `;` and backslashes are
   rejected with 400 by the top-level handler, **before** any `http.ServeMux`. Go's mux would otherwise answer unclean
