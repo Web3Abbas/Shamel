@@ -16,8 +16,9 @@
   `stringstart_date`, `Itemitm` → `Item itm`, `List<VoucherCheqs>cheqs` → `List<VoucherCheqs> cheqs`.
 - In the manual's code blocks, Arabic comments are printed with their words in reverse order (RTL text inside LTR
   code blocks). Here they are given in correct reading order, followed by an English translation.
-- *(inferred)* marks anything the manual does not state, such as HTTP methods and likely meanings of undocumented
-  fields. Everything without that marker is stated in the manual. Quoted text ("…") is verbatim.
+- *(inferred)* marks anything the manual does not state, such as the HTTP methods of the 23 endpoints without a "post
+  parameter" and likely meanings of undocumented fields. Everything without that marker is stated in the manual.
+  Quoted text ("…") is verbatim.
 - "p. N" refers to the PDF page number.
 - The manual shows C# declarations, not JSON. Wire JSON property names are **assumed** to equal the declared field
   names, with the same casing. This must be confirmed against a live capture (see Q46).
@@ -55,7 +56,7 @@ exactly as in the manual. Four of them lack a leading slash, and one starts with
 | 19 | Item | `/Item/GetItemsSerials` | R | GET *(inferred)* | hdr `customer`, `serial` | `List<ItemSerial>` | 11–12 |
 | 20 | Item | `/Item/Post` | W | POST (stated) | form `obj` = JSON `Item` (write) | `PostResponse` | 19–20 |
 | 21 | Report | `/Report/GetLastPriceReport` | R | GET *(inferred)* | hdr `ItemCode`, `barcode` | `List<LastPriceRepColumn>` | 12 |
-| 22 | Report | `/Report/GetAccountsheet` | R | POST *(inferred from "post parameter")* | form `obj` = JSON `AccountsheetFilters` (customer) | `List<AccountsheetColumns>` | 12–13 |
+| 22 | Report | `/Report/GetAccountsheet` | R | POST (stated: "post parameter") | form `obj` = JSON `AccountsheetFilters` (customer) | `List<AccountsheetColumns>` | 12–13 |
 | 23 | Voucher | `/Voucher/Post2` | W | POST (stated) | form `obj` = JSON `Voucher` (full) | `Result` (voucher variant) | 13–16 |
 | 24 | Voucher | `/Voucher/GetDelivery` | R | GET *(inferred)* | – (implicit: logged-in salesman) | `Voucher` (delivery variant) | 16 |
 | 25 | Voucher | `/Voucher/GetStatus` | R | GET *(inferred)* | hdr `manual` | order status `0..4` | 16 |
@@ -63,7 +64,7 @@ exactly as in the manual. Four of them lack a leading slash, and one starts with
 | 27 | Voucher | `Voucher/GetVouchers` | R | GET *(inferred)* | hdr `filters` (JSON), `getCustomerBalance` | array of `Voucher` | 17 |
 | 28 | Voucher | `Voucher/GetExtraVouchers` | R | GET *(inferred)* | hdr `filters` (JSON), `getCustomerBalance` | array of short `Voucher` (`ExtraVoucher`) | 17–18 |
 | 29 | CostCenter | `/CostCenter/Post` | W | POST (stated) | form `obj` = JSON `CostCenterDTO` | `Result` (cost-center variant) | 18–19 |
-| 30 | CostCenter | `/CostCenter/GetCostCenterAccountsheet` | R | POST *(inferred from "post parameter")* | form `filters` = JSON `AccountsheetFilters` (cost center) | `List<AccountsheetColumns>` | 19 |
+| 30 | CostCenter | `/CostCenter/GetCostCenterAccountsheet` | R | POST (stated: "post parameter") | form `filters` = JSON `AccountsheetFilters` (cost center) | `List<AccountsheetColumns>` | 19 |
 
 Totals: 30 endpoints. There is 1 auth endpoint, 25 reads (2 of them via form POST) and 4 writes: customer, item,
 voucher and cost center. All 4 writes are **insert-only**. No update, delete or void endpoint exists.
@@ -272,9 +273,10 @@ Every endpoint below uses the same template. The auth headers `username` and `to
 except Login and are not repeated. Each response block lists every field and type as printed. Field meanings and
 Arabic translations are in §5.
 
-**Method inference rule.** The manual names no HTTP methods. Login and the `*/Post*` endpoints say "post parameter",
-so they are POST. The two accountsheet reports also take a "post parameter", so they are POST *(inferred)*. All other
-reads have no body, so they are GET *(inferred)*. This must be verified live (Q4).
+**Method rule.** The manual never names an HTTP method outright, but it implies POST for 7 endpoints by saying "post
+parameter": Login, the four `*/Post*` writes and the two accountsheet reports (pp. 4, 8, 12, 13, 18, 19). These are
+marked POST (stated). It names no method for the other 23 endpoints; they are reads with no body, so they are GET
+*(inferred)*, which must be verified live (Q4).
 
 ### 4.1 Main
 
@@ -673,7 +675,7 @@ class LastPriceRepColumn { string date; string code; double price; string curren
 
 | Aspect | Detail |
 |---|---|
-| Method | POST *(inferred from "post parameter")* |
+| Method | POST (stated: "post parameter with key name [obj]") |
 | Purpose | Customer account statement (كشف حساب محاسبي). |
 | Inputs | Form field `obj`: "obj string must be in Json format of the following class", the customer variant of `AccountsheetFilters`. |
 | Response | `List<AccountsheetColumns>` |
@@ -832,7 +834,7 @@ class Result /* cost center */ { bool Success; string ErrorMessage; }
 
 | Aspect | Detail |
 |---|---|
-| Method | POST *(inferred from "post parameter")* |
+| Method | POST (stated: "post parameter with key name [filters]") |
 | Purpose | Cost-center account statement (تقرير كشف حساب لمركز تكلفة). |
 | Inputs | Form field **`filters`**, not `obj`: "filters string must be in Json format of the following class", the cost-center variant of `AccountsheetFilters`. |
 | Response | `List<AccountsheetColumns>`, the same class as in Report/GetAccountsheet. |
@@ -1205,7 +1207,7 @@ There is no `accounts` field.
 | `update_date` | string | No comment. Format undocumented. |
 | `note` | string | Note (ملاحظة). |
 | `note2` | string | Note 2 (ملاحظة 2). |
-| `vat` | double | Tax amount (قيمة الضريبة). The voucher total. |
+| `vat` | double | Tax amount (قيمة الضريبة). Presumably the voucher's total tax *(inferred; the manual says only "قيمة الضريبة")*. |
 | `delivery_id` | string | Number of the consignment ("for sale") delivery (رقم الارسالية برسم البيع). |
 | `salesman` | string | Salesman number (رقم المندوب). |
 | `cheq_balance` | double | Total value of cheques (مجموع قيمة الشيكات). |
@@ -1356,8 +1358,8 @@ The table is sorted by value. The manual's order is 9, 4, 5, 24, 27, 0, 22, 23, 
 | `Payment` | 27 | صرف | Payment (money out) | `P` | `payment` |
 | `Journal` | 28 | قيد | Journal entry | `J` | `journal` |
 
-The values are not contiguous. 1, 3, 6–8, 11, 13–15 and 17–21 are unused or undocumented, and some may be other
-Shamel voucher types that the API does not expose.
+The values are not contiguous. 1, 3, 6–8, 11, 13–15, 17–21, 25 and 26 are unused or undocumented, and some may be
+other Shamel voucher types that the API does not expose.
 
 ### 6.2 Voucher code prefix letters (pp. 15–16)
 
@@ -1421,8 +1423,9 @@ Each item says what the manual shows and why it matters to a gateway implementer
 
   Two different classes are both named `Result`. *Impact:* each write endpoint needs its own decoder. The CostCenter
   id can only be the client-supplied `code`.
-- **Q4. HTTP methods are not documented.** Only "post parameter" hints at POST. Reads that take headers are assumed to
-  be GET. *Impact:* the method per endpoint must be configurable and verified against a live server or bawaba-mock
+- **Q4. HTTP methods are mostly not documented.** The manual implies POST by saying "post parameter" for 7 endpoints:
+  Login, the four writes and the two accountsheet reports. It names no method for the other 23, and reads that take
+  headers are assumed to be GET. *Impact:* the method per endpoint must be configurable and verified against a live server or bawaba-mock
   capture.
 - **Q5. Parameters go in custom request headers, with inconsistent casing.**
   - The item code header is `itemCode` (GetItems, getItemDetails), `itemcode` (GetItemsStores) and `ItemCode`
@@ -1588,7 +1591,8 @@ Each item says what the manual shows and why it matters to a gateway implementer
   - `VoucherHeader.time` is `hhmmss`: 12- or 24-hour is unclear, and 24-hour is assumed.
   - `update_date` has no stated format.
   - `VoucherItems.discount` is a **percentage** while `VoucherHeader.discount` is an **amount**.
-  - `VoucherItems.vat` is **per unit of quantity** while `VoucherHeader.vat` is the **total**.
+  - `VoucherItems.vat` is **per unit of quantity** ("لكمية 1"), while `VoucherHeader.vat` is presumably the **total**
+    *(inferred; the manual says only "قيمة الضريبة")*.
   - `VoucherItems.delivery_pos` is a position typed `double`.
   - `VoucherItems` mixes input fields with output-only fields (`voucher_code` and `name` must not be filled on insert)
     and unused fields (`measure`, `color`, `serials`).
