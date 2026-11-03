@@ -10,10 +10,10 @@
 
 Shamel Pro (by ISCO, Nablus) already has a Web API, but it is built for a single trusted caller. Anyone with a Shamel
 username and password can do everything that user can do. There are no per-tool permissions, errors come back as raw
-server text, there is no paging, and every caller needs a network path to Shamel itself. **Bawaba** ("gateway") is a secure Go
-service that sits in front of that API. Every tool or dashboard gets **its own API token**, limited to exactly the
-data and actions it needs. Shamel itself stays hidden: no client ever learns its address, its software or its
-passwords.
+server text, there is no paging, and every caller needs a network path to Shamel itself. **Bawaba** ("gateway") is
+a secure Go service that sits in front of that API. Every tool or dashboard gets **its own API token**, limited to
+exactly the data and actions it needs. Shamel itself stays hidden: no client ever learns its address, its software
+or its passwords.
 
 Most of the owner's tools will be built by **AI agents**, so Bawaba is designed for that. Agents never touch Shamel or
 its credentials. They work against a **sandbox** with realistic fake data until the owner switches a tool to live
@@ -46,14 +46,12 @@ flowchart TB
   shamel["Shamel Pro Web API, no public IP"]
   mock["bawaba-mock sandbox, fake data"]
 
-  subgraph state["Shared state"]
-    pg[("PostgreSQL, system of record")]
-    vk[("Valkey, snapshots and limits")]
-    blob[("Blob store, audit bodies")]
-  end
+  pg[("PostgreSQL, system of record")]
+  vk[("Valkey, snapshots and limits")]
+  blob[("Blob store, audit bodies")]
 
   owner["Owner on the server"]
-  cp["Control plane, 127.0.0.1 only"]
+  cp["Control plane: admin API and dashboard, 127.0.0.1 only"]
 
   tools -->|"tool token"| cf
   agents -->|"agent token"| cf
@@ -62,9 +60,11 @@ flowchart TB
   conn -->|"LAN"| shamel
   p4 -.->|"direct-URL mode"| shamel
   p4 -->|"test tokens"| mock
-  dp --- state
+  p3 ---|"snapshots"| vk
+  p5 -->|"audit"| blob
   owner -->|"SSH tunnel or CLI"| cp
-  cp --- state
+  cp -->|"tokens, policies, approvals"| pg
+  pg -.->|"compiled config"| p2
 ```
 
 How to read it:
