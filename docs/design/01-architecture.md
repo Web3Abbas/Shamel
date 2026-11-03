@@ -336,7 +336,7 @@ pid and `loginuid` in the admin event log (02 §12.3). A non-root operator uses 
 - **Separate Valkey users** (`data`, `control`) with the key patterns of 02 §12.4; `bwb:deny` is read-only for
   `data`.
 - **Keys per plane.** The data plane loads only `data.key` and never `master.key`, `pki_ca`, `totp_seed`,
-  `admin_chain`, `cf_api_token`, `smtp_password` or an `audit_seal` private key; a data-plane process that can read
+  `admin_chain`, `cf_api_token`, the SMTP password file or an `audit_seal` private key; a data-plane process that can read
   `security.master_key_file` refuses to start (§15.3).
 - **No network path.** The control listener is loopback-only; on a shared host nftables rejects loopback TCP to
   7443 from `meta skuid "bawaba-data"`; the socket is `0600 root:root`. The control plane answers any request
@@ -426,7 +426,7 @@ plane holds the `audit_seal` keys, blob-store read credentials and `DELETE` on `
 | Config compiler | control | on change | §5.4. |
 | PKI signer | control | polls `cert_requests` (2 s and `LISTEN`) | Signs connector, gateway-tunnel and relay certificates with `pki_ca` (§8.2). |
 | Alert manager and digest job | control | singleton | Deduplicates, throttles, escalates and routes raw alerts from `alert_outbox` and `bwb:q:alerts`; maintains `alert_instances`; builds digests (05 §3.1–§3.2). |
-| Alert mailer (SMTP sender) | control | reads ready rows of `alert_outbox` | SMTP via the relay with retries (1 min → 30 min, for 24 h); the only process that holds `smtp_password` (05 §3.1, §3.5). |
+| Alert mailer (SMTP sender) | control | reads ready rows of `alert_outbox` | SMTP via the relay with retries (1 min → 30 min, for 24 h); the only process that reads the SMTP password file `alerts.smtp.password_file` (05 §3.1, §3.5; 02 §9.2). |
 | Audit maintenance | control | singletons | Daily blob GC and pack consolidation/compaction (`audit.blob_gc.schedule`, 05 §1.6.2); cold-segment writing and the drop of hot partitions whose segment is verified (05 §1.8); weekly compression-dictionary training (05 §1.4.4); in `segment_first` mode also hourly segment compaction and object-index merge (05 §1.12). |
 | Cloudflare ban sync | control | optional | Mirrors bans ≥ 24 h from `ip_bans` to Cloudflare (`cf_api_token`, 02 §10.3). |
 | Key maintenance | control | scheduled | Monthly `audit_seal` rotation, KEK/DEK rotations, retirement of epoch keys no longer referenced (02 §9.6). |
@@ -2021,7 +2021,7 @@ Summary of 02 §9.2–§9.6, which is authoritative.
 - **Purposes used in this document.** Data plane: `shamel_credential`, `upstream_config` and `upstream_session`
   (direct mode), `media_ref`, `snapshot`, `view`, `cursor`, `idempotency`, `queue`, `approval_payload`,
   `compiled_config`, `audit_spool`; MAC keys `token_pepper`, `coalesce`, `audit_addr`, `media_id`, `media_sign`.
-  Control plane only: `pki_ca`, `totp_seed`, `admin_chain`, `cf_api_token`, `smtp_password`, `audit_seal`. Audit
+  Control plane only: `pki_ca`, `totp_seed`, `admin_chain`, `cf_api_token`, `audit_seal` (the SMTP password is a bootstrap secret file, `alerts.smtp.password_file`, not a key purpose; 02 §9.2). Audit
   bodies and metadata are encrypted under per-node epoch DEKs (`security.audit_epoch`, 1 h) sealed to the
   `audit_seal` public key, so a data node cannot read audit content stored in earlier epochs.
 - **Startup checks** (any failure exits non-zero): own file present, no world bits, owner root (or credentials

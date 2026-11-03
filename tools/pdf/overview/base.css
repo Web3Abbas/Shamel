@@ -301,3 +301,14 @@ table.isco td:first-child{font-family:"JetBrains Mono",monospace;font-size:7.6pt
 #perf .stat .l{font-size:7.8pt}
 #perf table.t{font-size:7.5pt!important}
 #perf .lead{margin-bottom:4mm}
+.contents3{display:grid;grid-template-columns:repeat(3,1fr);gap:1.2mm 5mm}
+.ci2{display:flex;align-items:baseline;gap:2mm;font-size:8.2pt;border-bottom:1px dotted var(--line);padding:.8mm 0}
+.ci2 .cn{color:var(--accent-2);font-weight:800;font-size:7.6pt;min-width:5mm}
+.ci2 .ct{flex:1;color:var(--ink-2)}
+.ci2 .cp{color:var(--muted);font-size:7.6pt}
+#glance .card{padding:3mm 3.8mm}
+#glance .card .ic{width:7.5mm;height:7.5mm;margin-bottom:1.6mm}
+#glance .card p{margin:0}
+#glance .quote{font-size:11.5pt}
+#glance .lead{margin-bottom:4mm}
+#glance .stat{padding:3mm}

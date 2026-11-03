@@ -1498,8 +1498,10 @@ dashboard offers the same as **Promote to live** with the diff preview. A test a
 
 ### 14.1 Model
 
-GCRA per token in one pipelined Valkey call (01 S6), keys `bwb:<t>:rl:<token_id>:r` (reads), `:w` (writes), `:u`
-(upstream units), `:ip:<ip>` and `:u:ip:<ip>` (publishable per client IP, reads and upstream units). Defaults are
+GCRA per token with node-local quota leasing (01 S6): each node leases batches of units from the cluster-wide state
+`bwb:<t>:rl:<token_id>:<bucket>[:<ip>]`, buckets `r` (reads), `w` (writes) and `u` (upstream units), with `:<ip>`
+appended to `r` and `u` for the per-client-IP buckets of publishable tokens; one `take` script call refills all of a
+request's buckets, so most requests make no Valkey call. Defaults are
 generous and adjustable (00 §8); they are runtime settings `limits.defaults.<kind>.{reads,writes,upstream}`
 (03 §23.3):
 
@@ -1618,18 +1620,18 @@ alerts proposed for 05 §3.3: `approval_queue_full`. Compile-time (control plane
 
 | To | Requirement |
 |---|---|
-| 01 Architecture | `Operation.Dimensions` gains `voucher_type`; the registry carries the §4.4 enforcement code per (operation, dimension) and occurrence bits per field. S8 short-circuit rule of §4.3/§9.3 (allow-set-only decisions may skip the upstream call; derived decisions must not). Executor claim/finalise as §11.6. |
-| 01 Architecture (lineage) | Idempotency namespace, approval visibility and webhook ownership keyed by `lineage_id` (§2.4.5) instead of token id: 01 §6.4 / S11 still shows `bwb:<t>:idem:<token>:<key>` and should use `bwb:<t>:idem:<lineage_id>:<sha256(key)>` (03 §15.2, 02 §9.10). **Resolved in 03** (§2.2, §15.2, §16, §17.3). |
-| 01 Architecture (limits) | Upstream-units bucket (§14.1): a third GCRA key `:u` (and `:u:ip:<ip>` for publishable tokens) charged in the same pipelined S6 script, with the cost computed from the route, policy and request shape (03 §23.3). |
+| 01 Architecture | `Operation.Dimensions` gains `voucher_type`; the registry carries the §4.4 enforcement code per (operation, dimension) and occurrence bits per field. S8 short-circuit rule of §4.3/§9.3 (allow-set-only decisions may skip the upstream call; derived decisions must not). Executor claim/finalise as §11.6. **Resolved in 01 v2:** `Operation.Dimensions` lists `voucher_type` with the §4.4 enforcement code and `Fields` carries occurrence bits (01 §6.1, S14); the short-circuit rule is in S8; the approved-write executor uses the §11.6 claim/finalize functions (01 §5.6). |
+| 01 Architecture (lineage) | Idempotency namespace, approval visibility and webhook ownership keyed by `lineage_id` (§2.4.5) instead of token id: `bwb:<t>:idem:<lineage_id>:<sha256(key)>` (03 §15.2, 02 §9.10). **Resolved in 03** (§2.2, §15.2, §16, §17.3) **and in 01 v2** (§6.4 step 3 and S11: lineage-keyed Valkey record, PostgreSQL backstop keyed `(tenant_id, lineage_id, key_hash)`, `LineageID` in the compiled policy). |
+| 01 Architecture (limits) | Upstream-units bucket (§14.1): a third GCRA key `:u` (and its per-client-IP variant for publishable tokens) charged together with the reads bucket, with the cost computed from the route, policy and request shape (03 §23.3). **Resolved in 01 v2** (S6): the `upstream` bucket is charged with the others under node-local leasing, one `take` call refills all of a request's buckets, and the cost comes from the operation's `Cost` rule before execution. |
 | 02 Security | **Already adopted in the revised 02:** §10.3 here is the authoritative subset rule (02 §13.2); data-role privileges via the `SECURITY DEFINER` functions of §10.4 and §11.6 (02 §12.4); per-token IP rules in the policy spec (02 §10.2); token containment for auto-suspension (02 §10.3, mirrored in §2.4.6). **Also adopted (second pass):** lineage-keyed idempotency record and AAD `idem/<lineage_id>/<sha256(key)>` (02 §9.3, §9.10); `approval/<approval_id>/<column>` AAD (02 §9.3); hash names `payload_sha256` / `upstream_request_sha256` / `approved_upstream_sha256` (02 §9.10); `public_fields_exposed`, the `public_exposure` gate and "agents never set `writes_require_approval=false`" in 02 §13.2. Nothing open. |
-| 03 API | **Resolved in the final 03, nothing open:** `voucher_types` in the DS map and `/v1/me` `data_scopes`, `@none` member semantics including customer-price rows without `customer_code` (03 §2.4 DS-10, §9.4, §18.1); `omitted_data_scope` section status (03 §14); `revoke_token` request type and its target rule, publishable requests always getting the PD hides, `writes_require_approval: false` as `approval_weaker` (03 §18.3); violation codes `get_all_not_held`, `browser_weaker`, `requester_inactive`, `public_fields_exposed` (03 §22.2); the §16 error codes with the same names and statuses, including `409 secret_delivery_expired` and `429 approval_limit_reached` (03 §15.3, §16, §18.3, §22.2); `order_code` required for store-, salesman-, customer- and currency-restricted tokens on `orders.status` (03 §12.5); webhook `*.removed` reason `no_longer_visible` (03 §17.2, §17.7); ISCO I-2 carries §17.3 question 8 (03 §27.3); lineage-keyed idempotency and approval visibility (03 §15.2, §16); `rate_limit_approaching` with `bucket` (03 §23.4). The upstream-units bucket originates in 03 §23.3 and is adopted in §14.1. |
+| 03 API | **Resolved in the final 03, nothing open:** `voucher_types` in the DS map and `/v1/me` `data_scopes`, `@none` member semantics including customer-price rows without `customer_code` (03 §2.4 DS-10, §9.4, §18.1); `omitted_data_scope` section status (03 §14); `revoke_token` request type and its target rule, publishable requests always getting the PD hides, `writes_require_approval: false` as `approval_weaker` (03 §18.3); violation codes `get_all_not_held`, `browser_weaker`, `requester_inactive`, `public_fields_exposed` (03 §22.2); the §16 error codes with the same names and statuses, including `409 secret_delivery_expired` and `429 approval_limit_reached` (03 §15.3, §16, §18.3, §22.2); `order_code` required for store-, salesman-, customer- and currency-restricted tokens on `orders.status` (03 §12.5); webhook `*.removed` reason `no_longer_visible` (03 §17.2, §17.7); 08 ISCO-33 (03 I-2) carries §17.3 question 8 (03 §27.3); lineage-keyed idempotency and approval visibility (03 §15.2, §16); `rate_limit_approaching` with `bucket` (03 §23.4). The upstream-units bucket originates in 03 §23.3 and is adopted in §14.1. |
 | 05 Operations | `large_unfiltered_request.records` and `stock.bulk_changed.changed_rows`/`store_ids` per token over visible rows; scope-transition rendering (§4.7); `approval.resolved` events generated outside poll streams; `rate_limit_approaching` warning; `error_code` dimension in usage rollups; **sandbox approvals** on a separate dashboard page and CLI filter, excluded from `write_approval_pending` (live only) and from live badge counts, digest count only (§11.9); new alert `approval_queue_full` (§11.1); access-request review page with the `public_exposure` banner and acknowledgement checkbox, and `--acknowledge-public` on `access-request approve` (§10.5); `token_auto_suspended` / `token_probe_suspected` per the containment rule (§2.4.6); CLI additions `token explain`, `token diff`, `token create --mirror`, `approval resolve`, `approval list --env test`, sandbox bulk approve/reject, `access-request approve --narrow` (exists), `token revoke --cascade`. **The 05 §7.4 example** (`--profile agent-test request-token … --env live`) contradicts the subset rule (a test agent cannot request a live token, 00 §6 "never more than its own token holds"; 02 §13.2; 03 §18.3); it should use a live agent profile or `--env test`. |
 
 ### 17.2 Reconciliation notes
 
 - **Field name:** `writes_require_approval` (02, 03, here) = the brief's `requires_write_approval`.
 - **Approval state name:** internal `submitted` = 03 §16 `executing`.
-- **IP rule error code:** `ip_blocked` (02 §10.9) supersedes 01 S5's `ip_not_allowed_for_token`.
+- **IP rule error code (resolved):** `ip_blocked` (02 §10.9); 01 v2 S5 uses it too.
 - **Revocation bound (resolved):** 01 §5.4 and the revised 02 §9.7 agree on `config.poll_interval` = 5 s (2 s while
   Valkey is unavailable) plus pub/sub (p99 < 1 s); `bwb:deny` covers PostgreSQL outages (§2.4.2, §9.4).
 - **Snapshots (resolved):** one unfiltered snapshot per coalesced fetch, read only through token-bound views and
@@ -1640,31 +1642,30 @@ alerts proposed for 05 §3.3: `approval_queue_full`. Compile-time (control plane
 - **Rate-limit cost model (resolved):** this document's earlier "1 unit per request; combined endpoints cost their
   sub-calls" is replaced by 03 §23.3's reads bucket (1 unit per request, combined endpoints included) plus the
   per-token upstream-units bucket (§14.1); the subset rule compares the upstream fields too (§10.3, `rate_higher`).
-- **Credential custody:** connector mode keeps credentials sealed to the connectors and the Shamel session on the
-  connector (02 §7.5, a 02 designer decision); 01 §7.1 still describes gateway-held sessions. Authorization is
-  unaffected either way because tokens bind to `cred_id` (§6.1).
+- **Credential custody (resolved):** connector mode keeps credentials sealed to the connectors and the Shamel
+  session on the holder connector (02 §7.5), and 01 v2 §7.1 describes the same. Authorization is unaffected either
+  way because tokens bind to `cred_id` (§6.1).
 - **Price-class dimension on customers:** kept as in 03 §2.4 (customers outside the allowed classes are hidden),
   because a tool that cannot see a class's prices cannot price that class's customers.
 - **Last-price `customer`:** treated as a code (03 §13.2); if it is a name, the op becomes `X` for customer- and
   salesman-restricted tokens.
 
-### 17.3 Open questions for ISCO (to merge into the consolidated list)
+### 17.3 Open questions for ISCO
 
-1. Which endpoints apply salesman scoping for a salesman-bound user besides `GetCustomers` and `GetDelivery`
-   (balances, items, vouchers, prices, reports, serials)? (Q17)
-2. For a user with **no** salesman binding, does `GetCustomers` without `getAll` return all customers? (decides whether
-   service-account tokens need `get_all`)
-3. Does Shamel enforce salesman scoping on writes (can a salesman user post vouchers for another salesman's
-   customer, or create customers for another salesman)?
-4. `LastPriceRepColumn.customer`: code or name? (Q21)
-5. `AccountsheetColumns.type`: format of the voucher-type label (would allow future voucher-type evaluation of
-   statement rows for display; filtering stays impossible under running balances).
-6. `GetSalesmen` response shape (Q24), needed to validate `salesmen` allow-set values.
-7. Can an API-only Shamel user be restricted inside Shamel (read-only, no voucher types), as a backstop below
-   Bawaba's policy? (complements 02 §20.2 Q5)
-8. `GetCustomerPricesAsRows` (Q25, 03 I-2): can a row have a null or empty `customer_code`, and if so, is it always a
-   general price-class row (with a non-empty `price_class_name`), or can a customer-specific price come back without
-   its customer? Until answered, such rows follow the `@none` rule (§4.4).
+Asked in the consolidated list [`08-isco-questions.md`](08-isco-questions.md) (ids ISCO-01 … ISCO-53; 08 Appendix A.4
+maps "04 §17.3 #n" to them). The numbers stay as stable aliases; record answers in 08, then update the section named
+here.
+
+| # | Question (short) | 08 id | Affects |
+|---|---|---|---|
+| 1 | Which endpoints besides `GetCustomers` and `GetDelivery` apply salesman scoping for a salesman-bound user? (Q17) | ISCO-25 (a) | §4.4, §6.2 |
+| 2 | For a user with **no** salesman binding, does `GetCustomers` without `getAll` return all customers? (decides whether service-account tokens need `get_all`) | ISCO-25 (b) | §6.3 |
+| 3 | Does Shamel enforce salesman scoping on writes? | ISCO-25 (d) | §4.6 |
+| 4 | `LastPriceRepColumn.customer`: code or name? (Q21) | ISCO-37 (c) | §4.4, §17.2 |
+| 5 | `AccountsheetColumns.type`: format of the voucher-type label (display only; filtering stays impossible under running balances) | ISCO-38 (d) | §4.4 |
+| 6 | `GetSalesmen` response shape (Q24), to validate `salesmen` allow-set values | ISCO-26 | §4.2, §6.2 |
+| 7 | Can an API-only Shamel user be restricted inside Shamel (read-only, no voucher types) as a backstop? (02 §20.2 #5) | ISCO-04 | §6.1 |
+| 8 | `GetCustomerPricesAsRows` (Q25, 03 I-2): are rows without `customer_code` always general price-class rows? Until answered they follow the `@none` rule (§4.4) | ISCO-33 (e) | §4.4, §17.4 #3 |
 
 ### 17.4 Assumptions
 

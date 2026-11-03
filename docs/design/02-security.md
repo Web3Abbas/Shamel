@@ -555,7 +555,7 @@ sequenceDiagram
   dead only when **no inbound bytes at all** arrived for `tunnel.liveness_timeout` (60 s). yamux's own keepalive is
   disabled (its `ConnectionWriteTimeout` is 60 s), because on a saturated office uplink pings queue behind data
   frames; a session busy streaming a body is alive by definition. A dead session is closed and redialed with
-  backoff; its in-flight streams fail as transport outcomes, never as partial bodies.
+  backoff (01 §8.3).
 - **Two sessions per connector instance** (01 §8.5): each instance opens `tunnel.sessions` (default 2) independent
   sessions, each its own WebSocket, inner TLS handshake and yamux stack with the same client certificate. Session 0
   is `interactive` (small calls, writes, control traffic), session 1 is `bulk` (calls of cost class `report` or
@@ -1588,8 +1588,8 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
 ### 12.5 Step-up authentication and the admin event log
 
 - **Step-up:** these actions need the password (and TOTP) within the last 5 minutes (`control.stepup_window`):
-  approving an access request or queued write, creating or promoting a live token, firewall edits, connector
-  kill/confirm, key operations, owner settings and audit decryption.
+  approving an access request, queued write or webhook target host (05 §2.7.4), creating or promoting a live token,
+  firewall edits, connector kill/confirm, key operations, owner settings and audit decryption.
 - **Admin event log:** `admin_events(seq, ts, actor, peer, action, target, diff, prev, mac)` with
   `mac = HMAC-SHA256(admin_chain, prev ‖ canonical(event))`. `admin_chain` is control-only (§9.2), so a compromised
   data plane cannot forge admin events. The audit index is chained in the same way per node and hour with the
