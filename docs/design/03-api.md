@@ -1476,8 +1476,9 @@ accounts), roughly 3–5 KB of JSON each, and has no paging. At 200 vouchers per
 - Cost: one `report`-class charge per slice in the upstream-units bucket (§23.3); `x-bawaba-cost` documents
   "5 units × number of slices". Tools that need a year should page by month, add `customer_code`, or use webhooks.
 
-Rejected alternative: one call per request with a low cap (31 days) and no slicing; it keeps single upstream
-responses of up to about 30 MB for a busy month and still exceeds the single-call timeout on slow links.
+Rejected alternative: a 31-day cap with one call per request; a busy month is then a single upstream response of
+about 25 MB that must fit one 30 s read budget, while 7-day slices stay near 6 MB each and fail or succeed
+independently of the client's range.
 
 ### 12.3 `GET /v1/voucher-summaries`
 
@@ -1532,8 +1533,11 @@ Exactly one of:
 | `manual_code` | direct status lookup by the order's paper reference | `GET /Voucher/GetStatus` + `Hdr manual: <manual_code>` |
 | `order_code` | `GetVoucher` first (404 if missing, out of scope or not an `order`; `422 validation_failed` with detail `missing_manual_code` if the order has none), then the status lookup with its `manual_code` | `Voucher/GetVoucher`, then `/Voucher/GetStatus` |
 
-Customer- or salesman-restricted tokens must use `order_code` (`403 data_scope_filter_required`, DS-7), because a
-status reply carries nothing to check the scope against.
+Tokens restricted on stores, salesmen, customers or currencies must use `order_code` (`403
+data_scope_filter_required`, `details[].param` = `order_code`, DS-7), because a status reply carries nothing to check
+the scope against and paper `manual_code`s are guessable; with `order_code` the order is fetched and checked exactly
+as `GET /v1/vouchers/{code}` (DS-5). A token whose `voucher_types` excludes `order` gets `404 not_found` for either
+parameter, decided from its own allow-set without an upstream call (04 §4.3, §4.4).
 
 ```json
 { "data": { "order_code": "O20412", "manual_code": "P-7781", "status": "sent_partially", "status_id": 3 } }
@@ -1651,11 +1655,11 @@ Combined endpoints replace the N+1 request loops that AI-built dashboards tend t
 | Ordering | The **base** sub-call runs first: it performs the existence and data-scope check (`404` early, no other upstream contact for invisible records). The remaining sub-calls run in parallel. |
 | Consistency | Each section is live but fetched at a slightly different instant; there is no cross-call transaction in Shamel. `meta.fetched_at` gives the start time. |
 | Failure | Base sub-call failure fails the request with its error. An optional sub-call failure sets the section to `null`, `meta.sections.<name> = "failed"` and adds `Bawaba-Warning: partial_result;missing="<name>"`. |
-| Scope | A section whose scope the token lacks is **absent** and marked `omitted_scope`; a section whose fields are all hidden is absent and marked `omitted_hidden`. Combined endpoints never return `403` for an optional section. |
-| Cost | Each upstream sub-call actually made counts as one unit against the rate limit (`x-bawaba-cost` documents the maximum). |
+| Scope | A section whose scope the token lacks is **absent** and marked `omitted_scope`; a section whose fields are all hidden is absent and marked `omitted_hidden`; a section that the token's data scope makes unavailable (its operation would answer `data_scope_unsupported`, e.g. `recent_vouchers` for a store-restricted token or `statement_summary` for a `voucher_types`-restricted one, §2.4) is absent and marked `omitted_data_scope` (04 §4.4). Combined endpoints never return `403` for an optional section. |
+| Cost | 1 unit in the reads bucket, plus, in the upstream-units bucket, the sum of the cost classes of the sub-calls the plan makes for this token; sections omitted for scope or not requested are not charged (§23.3; `x-bawaba-cost` documents the maximum). |
 | Size | Not paginated; every list section is bounded by parameters. No snapshot or cursor is created. |
 
-`meta.sections` values: `ok`, `failed`, `omitted_scope`, `omitted_hidden`, `not_requested`.
+`meta.sections` values: `ok`, `failed`, `omitted_scope`, `omitted_hidden`, `omitted_data_scope`, `not_requested`.
 
 ### 14.1 Customer 360: `GET /v1/customers/{code}/overview`
 
@@ -1775,10 +1779,10 @@ Write rate limits are separate from read limits (§23.3). Publishable tokens can
 |---|---|
 | Required on | `POST /v1/customers`, `/v1/items`, `/v1/cost-centers`, `/v1/vouchers/{voucher_type}`; missing → `400 idempotency_key_required`. `/v1/batch` uses per-operation keys (§15.8). Other `POST`s honour the header if sent. |
 | Format | `^[A-Za-z0-9_-]{8,128}$`; a UUID or ULID per logical operation is recommended. |
-| Namespace | Per token: the same key used by two tokens never collides (02 §9.10). |
+| Namespace | Per token **lineage** (§2.2, 04 §2.4.5): the same key used by two lineages never collides, and a tool that timed out on a write and resends the same key after its token was rotated gets the stored outcome instead of a duplicate voucher (Shamel has no idempotency, Q39). |
 | Fingerprint | `SHA-256(method ‖ route template ‖ path parameters ‖ canonical JSON body)`; canonical JSON sorts object keys, removes insignificant whitespace and writes decimals in canonical form (§4.6), so `38`, `"38"` and `"38.0"` are equal. Strings are compared exactly (Arabic is not normalized). |
-| Primary store | Valkey `bwb:<t>:idem:<token_id>:<sha256(key)>`, value encrypted (02 §9.10): `{state, fingerprint, created_at, write_id, approval_id?, http_status, body_enc, reference_id}`. |
-| Durable backstop | PostgreSQL `idempotency_keys(tenant_id, token_id, key_hash, fingerprint, state, write_id, created_at)`, primary key `(tenant_id, token_id, key_hash)`, inserted in the write-ahead transaction and consulted when the Valkey record is missing (for example after a Valkey restart without persistence). Purged after TTL + 1 day. |
+| Primary store | Valkey `bwb:<t>:idem:<lineage_id>:<sha256(key)>`, value encrypted (02 §9.10): `{state, fingerprint, created_at, token_id, write_id, approval_id?, http_status, body_enc, reference_id}`. |
+| Durable backstop | PostgreSQL `idempotency_keys(tenant_id, lineage_id, key_hash, token_id, fingerprint, state, write_id, created_at)`, primary key `(tenant_id, lineage_id, key_hash)`, inserted in the write-ahead transaction and consulted when the Valkey record is missing (for example after a Valkey restart without persistence). Purged after TTL + 1 day. |
 | TTL | `api.idempotency.ttl` (default **24 h**) after the record becomes final. Records of approval-held writes live until the approval is final, plus the TTL. |
 | Store unavailable | `503 idempotency_unavailable`; nothing is sent to Shamel (fail closed). |
 
@@ -1786,14 +1790,17 @@ Write rate limits are separate from read limits (§23.3). Publishable tokens can
 |---|---|---|
 | none | reserve `in_progress`, execute | – |
 | `in_progress` | `409 request_in_progress` + `Retry-After: 1` | `409 idempotency_conflict` |
-| `pending_approval` | `202` with the approval as it is now; once the approval is final, the final response | `409 idempotency_conflict` |
-| `completed` | replay the stored status and body with `Bawaba-Idempotent-Replay: true` | `409 idempotency_conflict` |
+| `pending_approval` | `202` with the approval as it is now; once the approval is final, the final response (rows below) | `409 idempotency_conflict` |
+| `completed` | replay the stored status and body with `Bawaba-Idempotent-Replay: true`, re-masked with the token's current field mask | `409 idempotency_conflict` |
 | `outcome_unknown` | replay `504 write_outcome_unknown`; after the owner reconciles, the reconciled result | `409 idempotency_conflict` |
+| `approval_closed` (approval `rejected`, `expired` or `cancelled`) | `409 approval_rejected`, `409 approval_expired` or `409 approval_cancelled`; nothing was sent to Shamel, and a new attempt needs a new key | `409 idempotency_conflict` |
 
-What becomes `completed`: `201` results and deterministic Shamel rejections (`422 upstream_rejected` or a mapped code,
-`409 duplicate_code`, `502 upstream_error` from an unclassified Shamel 500 on a write). What **releases** the key
-(the record is deleted, the same key can be reused with a corrected body): every failure before the request was
-written to Shamel (`400`, `401`, `403`, `404`, `413`, `415`, `422` validation codes, `429`, `503`).
+What becomes `completed`: `201` results and deterministic Shamel rejections (`422 upstream_rejected` or a mapped code
+such as `422 duplicate_code`, `502 upstream_error` from an unclassified Shamel 500 on a write). An approval that ends
+`succeeded` or `failed` finalizes the record as `completed`; one that ends `rejected`, `expired` or `cancelled`
+finalizes it as `approval_closed` (04 §11.8). What **releases** the key (the record is deleted, the same key can be
+reused with a corrected body): every failure before the request was written to Shamel or held for approval (`400`,
+`401`, `403`, `404`, `413`, `415`, `422` validation codes, `429`, `503`).
 
 ### 15.3 Approval-held writes
 
@@ -2041,7 +2048,7 @@ Posts up to `api.batch.max_operations` (100) writes in one request. Shamel has n
 | Rule | Detail |
 |---|---|
 | Allowed operations | `POST` to the four write routes only; anything else → `422 validation_failed` (detail `not_allowed`) for the whole batch. |
-| Idempotency | Each operation **must** carry `idempotency_key` (same semantics as §15.2, same per-token namespace as the header). The batch request takes no `Idempotency-Key` header: resending a batch replays finished operations and executes the rest. |
+| Idempotency | Each operation **must** carry `idempotency_key` (same semantics as §15.2, same per-lineage namespace as the header). The batch request takes no `Idempotency-Key` header: resending a batch replays finished operations and executes the rest. |
 | Validation | All operations are validated (schema, scopes, data scope) before any executes; any failure → `422 validation_failed` with `details[].field` = `/operations/<i>/…`; nothing runs. Reference pre-checks (§15.7) run per operation at execution time, because an earlier operation may create the referenced record. |
 | Execution | Sequential; `stop_on_error=true` (default) marks the remaining operations `not_attempted` after the first failure. |
 | Deadline | If the request deadline would be exceeded, remaining operations are `not_attempted` with code `batch_deadline_exceeded`; resend the batch. |
@@ -2071,11 +2078,12 @@ earlier under the same key), `not_attempted` (with `code`), `outcome_unknown` (w
 
 ## 16. Approvals (M2)
 
-Approvals are visible to the token that created them; only the owner decides (control plane, localhost or CLI).
+Approvals are visible to the token lineage that created them (the creating token and its rotation successors,
+§2.2, 04 §2.4.5); only the owner decides (control plane, localhost or CLI).
 
 | Route | Behaviour |
 |---|---|
-| `GET /v1/approvals` | Own approvals, newest first; filters `status` (list), `operation`; durable keyset cursor. |
+| `GET /v1/approvals` | Own lineage's approvals, newest first; filters `status` (list), `operation`; durable keyset cursor. |
 | `GET /v1/approvals/{id}` | One approval. Recommended poll interval: `poll_after_seconds` (30 s); faster → `polling_too_frequent`. |
 | `POST /v1/approvals/{id}/cancel` | Withdraw a `pending` approval → `200` with status `cancelled`; otherwise `409 approval_not_pending`. |
 
@@ -2115,7 +2123,10 @@ stateDiagram-v2
 At execution the executor re-checks that the token is active and still holds the required scope atoms (otherwise
 `cancelled` with `token_revoked` / `scope_revoked`), then runs the stored request through S10–S13 with the stored
 identity (01 §6.4). Final states also finalize the idempotency record, so replays of the original key return the
-final result. With webhooks (M3) the token can subscribe to `approval.resolved` instead of polling (§17.2).
+final result: the `201` body on `succeeded`, the mapped error on `failed`, `504 write_outcome_unknown` while
+`outcome_unknown`, and `409 approval_rejected` / `409 approval_expired` / `409 approval_cancelled` for the three
+states in which nothing was executed (§15.2). With webhooks (M3) the token can subscribe to `approval.resolved`
+instead of polling (§17.2).
 
 ---
 ## 17. Webhooks API (M3)
@@ -2123,7 +2134,23 @@ final result. With webhooks (M3) the token can subscribe to `approval.resolved` 
 The engine (detection, ledger, fan-out, delivery workers) is specified in 05 §2; this section fixes the contract.
 Shamel has no change feed, so Bawaba **polls Shamel every `webhooks.poll_interval` (default 5 min, minimum 1 min),
 only for detectors that have at least one active subscription** (00 §9). An event's `created_at` is the detection
-time, not the business change time; worst-case latency is one poll interval plus delivery time.
+time, not the business change time. Detection latency depends on the detector tier (05 §2.4); delivery time (§17.5)
+comes on top. With default settings:
+
+| Change | Detected within | Detector (05 §2.4) |
+|---|---|---|
+| `customer.*` / `item.*` created or updated, and Shamel advances `lastupdatedate` | 1 poll interval | incremental call with overlap |
+| `customer.*` / `item.*` change that Shamel does not date-stamp | ≤ 24 h | daily reconciliation |
+| `stock.changed`, `stock.bulk_changed`, `customer.balance_changed` | 1 poll interval | full diff every cycle |
+| `voucher.created` / `voucher.updated`, voucher dated within the last `window_days` (3) | 1 poll interval | fast window |
+| `voucher.created` back-dated 4–35 days, or a changed amount on a voucher 4–35 days old | ≤ `extra_scan_every` (1 h) | back-date sweep |
+| other `voucher.updated` on a voucher 4–35 days old (lines, notes, cheques) | ≤ 24 h | nightly deep scan |
+| `order.status_changed` | 1 poll interval for orders < 24 h old; ≤ 30 min at 1–7 days; ≤ 3 h at 7–30 days | order-status schedule |
+| `*.removed` | ≤ 48 h (two consecutive misses in daily full fetches) | reconciliation / deep scan |
+| changes to vouchers dated more than `deep_scan_days` (35) days ago; orders older than 30 days | **not detected** | out of window |
+
+Tools that must not miss old-voucher edits combine events with a periodic `GET /v1/vouchers` over the relevant
+range.
 
 ### 17.1 Delivery modes
 
@@ -2138,18 +2165,24 @@ time, not the business change time; worst-case latency is one poll interval plus
 |---|---|---|
 | `customer.created` | `customers:read` | `object` (customer resource as §9.1 with `classifications` and `contacts`, without `balance`) |
 | `customer.updated` | `customers:read` | `object`, `changed_fields`, `previous` (visible changed fields only) |
-| `customer.removed` | `customers:read` | `object` (last known state), `reason: "not_returned_by_upstream"` |
+| `customer.removed` | `customers:read` | `object` (last known state visible to the token), `reason: "no_longer_visible"` |
 | `customer.balance_changed` | `customers:read` (balance visible) | `customer_code`, `currency_code`, `balance`, `previous_balance`, `delta`, `as_of` |
 | `item.created` / `item.updated` / `item.removed` | `items:read` | as for customers (item resource §10.1) |
 | `stock.changed` | `stock:read` | `item_code`, `store_id`, `quantity`, `previous_quantity`, `delta`, `shelf`, `row_removed` |
 | `stock.bulk_changed` | `stock:read` | `changed_rows`, `store_ids`, `resync_hint` (sent instead of more than `max_events_per_cycle` single events) |
-| `voucher.created` / `voucher.updated` / `voucher.removed` | `vouchers:read` | `object` (voucher resource §12.1 with `lines`, `cheques`, `accounts`), `changed_fields`, `previous` |
+| `voucher.created` / `voucher.updated` / `voucher.removed` | `vouchers:read` | `object` (voucher resource §12.1 with `lines`, `cheques`, `accounts`), `changed_fields`, `previous` (updated); `reason` (removed, as for customers) |
 | `order.status_changed` | `vouchers:read` | `order_code`, `manual_code`, `customer_code`, `status`, `status_id`, `previous_status` |
 | `approval.resolved` | none (own approvals) | approval resource (§16) when it reaches a final state *(proposed addition to 05 §2.2; generated by Bawaba, not detected from Shamel)* |
 | `webhook.test` | none | `{"message": "test"}` |
 
 `data` objects use the `/v1` encoders, so names, typo fixes, dates and decimals match the API exactly (05 §2.2).
 Subscriptions may narrow events with `filters`: `voucher_types`, `store_ids`, `customer_codes`, `item_codes`.
+
+**Events are rendered from the subscribing token's view** (04 §4.7): a record that enters the token's data scope
+(for example a customer reassigned to one of the token's salesmen) is delivered as `*.created`; one that leaves it
+(reassigned away, or a voucher whose new line store is not allowed) is delivered as `*.removed`. `*.removed` always
+carries the single reason `no_longer_visible`, both for records deleted upstream and for records that left the
+scope, so a receiver cannot tell a reassignment from a deletion. A record that stays invisible produces nothing.
 
 `GET /v1/event-types` (any token kind) returns the catalogue with `type`, `required_scopes`,
 `description`, `description_ar` and `eligible` (whether the calling token holds the scopes).
@@ -2211,8 +2244,8 @@ time only**:
 
 | Route | Behaviour |
 |---|---|
-| `GET /v1/webhooks` | the token's own subscriptions (owner sees all in the dashboard) |
-| `GET /v1/webhooks/{id}` | one subscription (`404` if not owned by the token) |
+| `GET /v1/webhooks` | the subscriptions of the token's lineage (owner sees all in the dashboard); rotation keeps them working (04 §2.4.5) |
+| `GET /v1/webhooks/{id}` | one subscription (`404` if not owned by the token's lineage) |
 | `PATCH /v1/webhooks/{id}` | merge patch of `description`, `url`, `event_types`, `filters`, `status` (`active` or `paused`; setting `active` on a failing subscription resets its counters). Same validation as create. |
 | `DELETE /v1/webhooks/{id}` | `204`; pending deliveries become `cancelled` |
 | `POST /v1/webhooks/{id}/test` | `202 {"data":{"event_id":"evt_…","delivery_id":"whd_…"}}`; sends `webhook.test` immediately |
@@ -2239,8 +2272,13 @@ Bawaba-Signature: t=1793701200,v1=c051b7672d95079998bac6a35d6a4d3ec2fae7059ad1f6
 - During a rotation the header carries two `v1=` values (new first); accept if any matches.
 - **Receiver algorithm:** (1) parse `t` and all `v1`; (2) reject if `|now − t| > 300 s` (replay window);
   (3) compute the HMAC over the **raw** body bytes, before any JSON parsing; (4) constant-time compare against each
-  `v1`; (5) de-duplicate by `id` (keep ids for at least 72 h); (6) answer `2xx` within 10 s and process
-  asynchronously.
+  `v1`; (5) de-duplicate by `id` (keep ids for at least 72 h, the longest automatic retry period); (6) if the
+  envelope carries `replayed_at`, the event is a manual re-send (§17.5): apply it idempotently (upsert by resource,
+  "highest `sequence` wins") and do not re-trigger side effects that were already performed for that `id`;
+  (7) answer `2xx` within 10 s and process asynchronously.
+- **Manual re-sends** carry the header `Bawaba-Delivery-Replay: true` and the envelope field
+  `"replayed_at": "<RFC 3339>"`. The header is informational; the envelope field is covered by the signature, so a
+  receiver can trust it. Automatic retries carry neither (the field is absent, not `null`).
 - **Test vector** (fake secret, for receiver unit tests): secret `whsec_TestVectorOnlyDoNotUse0000000000000000000`,
   `t=1793701200` (2026-11-03T10:20:00Z), body exactly as in the request above (195 bytes, no trailing newline) →
   `v1=c051b7672d95079998bac6a35d6a4d3ec2fae7059ad1f6e37e85c86c67568128`.
@@ -2265,13 +2303,18 @@ After 10 consecutive failures a subscription becomes `failing` (owner alerted); 
 |---|---|
 | `GET /v1/webhooks/{id}/deliveries` | filters `state` (`pending`, `in_flight`, `retry_scheduled`, `delivered`, `dead`, `suppressed`, `cancelled`), `event_type`; newest first; durable cursor; retention 30 d |
 | `GET /v1/webhooks/{id}/deliveries/{delivery_id}` | adds `attempts[]` |
-| `POST /v1/webhooks/{id}/deliveries/{delivery_id}/retry` | `dead` or `delivered` → `202`, a new attempt with a fresh signature; other states → `409 delivery_not_retryable` |
+| `POST /v1/webhooks/{id}/deliveries/{delivery_id}/retry` | `dead` (within the 30 d delivery-log retention) or `delivered` less than 72 h ago → `202`, a new attempt with a fresh signature, marked as a re-send (`Bawaba-Delivery-Replay: true`, `replayed_at`, §17.4); a `delivered` delivery older than 72 h, or any other state → `409 delivery_not_retryable` |
 
 Delivery item: `id`, `event_id`, `event_type`, `state`, `attempts`, `created_at`, `next_attempt_at`,
 `delivered_at`, `suppressed_reason` (`token_inactive`, `insufficient_scope`, `outside_data_scope`,
 `hidden_fields_only`), `last_attempt {at, outcome, http_status, duration_ms}`. `outcome` ∈ `delivered`,
 `http_status`, `connect_failed`, `tls_failed`, `timeout`, `blocked_target`. Receiver bodies and error strings are
 never shown (02 §5.5), so webhooks cannot be used as a port scanner.
+
+The 72 h limit on re-sending `delivered` events equals the receivers' de-duplication window (§17.4), so a stolen
+token holding `webhooks:write` cannot re-sign old, already-processed events with fresh timestamps after receivers
+have forgotten their ids; every re-send is also marked as such inside the signed envelope. The owner can still replay
+anything from the CLI (05 §2.7.2), with the same marking.
 
 ### 17.6 Pull mode: `GET /v1/webhooks/{id}/events`
 
@@ -2288,6 +2331,12 @@ Evaluated **at send or read time** with the subscribing token's **current** poli
 type's read scope held → data scope (vouchers atomic, DS-5) → field mask on `object` and `previous`, hidden fields
 removed from `changed_fields`; an event whose only changes are hidden is suppressed (`hidden_fields_only`) so a token
 cannot learn that, say, `purchase_price` changed. Revocation or narrowing applies to queued retries too.
+
+The data-scope step compares the record's previous and new visibility for the token: invisible → visible renders
+`*.created`, visible → invisible renders `*.removed` with `reason: "no_longer_visible"` and the last state the token
+could see, invisible → invisible is suppressed (`outside_data_scope`). Upstream deletions use the same `*.removed`
+shape and reason (§17.2). Subscription `filters` naming out-of-scope values are accepted and match nothing (04 §4.7);
+`approval.resolved` goes only to subscriptions of the same lineage.
 
 ---
 
@@ -2306,7 +2355,8 @@ Introspection for every token kind. Parameter: `usage_window` = `24h` (default),
     "scopes": ["customers:read", "items:read", "stock:read", "vouchers:write:order"],
     "data_scopes": { "stores": "all", "salesmen": { "values": ["S07"], "count": 1, "truncated": false },
                      "customers": "all", "currencies": { "values": ["NIS", "USD"], "count": 2, "truncated": false },
-                     "price_classes": { "values": [1, 2], "count": 2, "truncated": false } },
+                     "price_classes": { "values": [1, 2], "count": 2, "truncated": false },
+                     "voucher_types": { "values": ["order", "sales_invoice", "receipt"], "count": 3, "truncated": false } },
     "hidden_fields": { "items": ["purchase_price", "credit_account_code", "debit_account_code", "units.unit_price"],
                        "customers": ["credit_limit", "balance"] },
     "identity": { "salesman_scoped": true, "salesman_code": "S07" },
@@ -2314,7 +2364,9 @@ Introspection for every token kind. Parameter: `usage_window` = `24h` (default),
     "legacy": { "enabled": false, "endpoints": [] },
     "network": { "ip_restricted": true },
     "rate_limit": { "limit": 1200, "window_seconds": 60, "remaining": 1187, "reset_seconds": 3,
-                    "writes": { "limit": 60, "window_seconds": 60, "remaining": 60, "reset_seconds": 0 } },
+                    "writes": { "limit": 60, "window_seconds": 60, "remaining": 60, "reset_seconds": 0 },
+                    "upstream": { "limit": 600, "window_seconds": 60, "remaining": 571, "reset_seconds": 6,
+                                  "costs": { "small": 1, "report": 5, "list": 10 } } },
     "usage": { "window": "24h", "requests": 18234, "errors": { "rate_limited": 12, "snapshot_expired": 3 },
                "p95_ms": 420, "top_operations": [ { "operation": "customers.list", "requests": 9120 } ] },
     "advice": { "score": 64, "flags": ["buggy_pattern"], "hints": [ { "code": "use_webhooks", "operation": "customers.list",
@@ -2327,10 +2379,16 @@ Introspection for every token kind. Parameter: `usage_window` = `24h` (default),
 }
 ```
 
-- Data-scope dimensions are `"all"` or `{values, count, truncated}` (at most 1000 values listed).
+- Data-scope dimensions (`stores`, `salesmen`, `customers`, `currencies`, `price_classes`, `voucher_types`) are
+  `"all"` or `{values, count, truncated}` (at most 1000 values listed); `"@none"` in `values` means records without
+  a value in that dimension are visible (DS-10).
 - `scopes` lists atoms (shorthands expanded).
-- Publishable tokens receive `token`, `scopes`, `data_scopes`, `hidden_fields`, `browser.allowed_origins` and
-  `rate_limit` only (a publishable token is public, so its usage is not exposed).
+- `rate_limit.upstream.costs` gives the unit weight of each upstream cost class (§23.3); each operation's class is
+  in OpenAPI (`x-bawaba-cost`).
+- Publishable tokens receive a **reduced view**: `token`, `scopes`, `hidden_fields`, `rate_limit`, and `data_scopes`
+  with each dimension rendered only as `"all"` or `"restricted"`, without values. Allowed origins, usage, identity,
+  network and the other sections are omitted: a publishable token is public (02 §10.7), so anyone could otherwise
+  read the owner's allow-sets (customer, salesman and store codes) and the list of sites that use the token.
 - Test tokens add `sandbox: {dataset_version, overlay_namespace}` (§21).
 - Content contract and advice semantics: 05 §4.4. Recommended poll interval 60 s.
 
@@ -2352,8 +2410,9 @@ bodies, no upstream details.
 ### 18.3 Access requests (agent tokens, M2)
 
 The "request, you approve" model (00 §6, 02 §13). Only `agent` tokens holding `access_requests:write` may create
-requests; an agent can never approve, and can never request more than it holds (subset rule, 02 §13.2), checked at
-creation and again at approval.
+requests; an agent can never approve, and can never request more than it holds (subset rule: 04 §10.3 is the
+authoritative definition, 02 §13.2 its security properties), checked at creation, when the owner opens the request,
+and again at approval.
 
 `POST /v1/access-requests`:
 
@@ -2382,24 +2441,29 @@ creation and again at approval.
 
 | Field | Rule |
 |---|---|
-| `type` | `create_token`, or `modify_token` with `target_token_id` = a token born from this agent's own requests |
+| `type` | `create_token`; `modify_token` (new policy for the target; kind, environment and upstream are immutable) or `revoke_token` (revoke the target), both with `target_token_id` = a non-revoked token born from requests of this agent's lineage, else `404 not_found` (04 §10.2) |
+| `spec` | required for `create_token` and `modify_token` (for `modify_token`: the changes, merged into the target's current spec); must be omitted for `revoke_token` |
 | `reason` | 1–1000 chars; shown to the owner as untrusted text |
 | `spec.kind` | `tool` or `publishable` (never `agent`) |
 | `spec.environment` | `test` or `live`, not above the agent's own |
-| `spec.data_scopes` | an omitted dimension **inherits the agent's restriction**; the agent's hidden fields are added to `spec.hidden_fields` automatically, so a minimal request passes the subset rule |
+| `spec.data_scopes` | keys `stores`, `salesmen`, `customers`, `currencies`, `price_classes`, `voucher_types`, each `"all"` or a list (may contain `"@none"`, DS-10) |
+| Auto-fill (`create_token`, 04 §10.3) | an omitted dimension **inherits the agent's restriction**; the agent's hidden fields are added to `spec.hidden_fields`; omitted `writes_require_approval` → `true`; omitted `expires_at` → the agent's expiry (if any); omitted `rate_limit` fields → min(kind default, agent's value); omitted `get_all` → `false`. IP lists are not auto-filled. A minimal request therefore passes the subset rule. |
 | `spec` publishable | read scopes only, 1–10 exact origins (02 §10.7) |
 | `delivery_public_key` | optional; enables sealed delivery (recommended) |
 
 Responses: `202` + `Location` and the access-request resource; `403 exceeds_own_grant` with one `details` entry per
 violation (`field` = JSON pointer, `code` ∈ `scope_not_held`, `environment_higher`, `dimension_wider`,
-`hidden_fields_missing`, `ip_wider`, `expiry_later`, `legacy_wider`, `approval_weaker`, `rate_higher`,
-`kind_not_allowed`, `credential_differs`); `429 access_request_limit_reached` (20 pending, 50 per day,
-02 §13.2); `403 token_kind_not_allowed` for non-agent tokens.
+`hidden_fields_missing`, `ip_wider`, `expiry_later`, `legacy_wider`, `approval_weaker`, `get_all_not_held`,
+`browser_weaker`, `rate_higher`, `kind_not_allowed`, `credential_differs`, `requester_inactive`; 04 §10.3);
+`404 not_found` for a `target_token_id` outside the agent's lineage; `429 access_request_limit_reached` (20
+pending, 50 per day, 02 §13.2); `403 token_kind_not_allowed` for non-agent tokens. A pending request whose agent
+becomes inactive is `rejected` with reason `requester_inactive`.
 
 **Access-request resource**: `id` (`areq_…`), `type`, `status` (`pending`, `approved`, `rejected`, `expired`,
 `cancelled`), `reason`, `spec` (as submitted, after auto-fill), `created_at`, `expires_at` (pending requests expire
-after `agents.request_ttl`, 14 d), `decided_at`, `decision` (`{outcome, narrowed, granted_spec, owner_note,
-token_id}`, where `granted_spec` may be narrower than requested, never wider), `secret` (`{status: none |
+after `agents.request_ttl`, 14 d), `decided_at`, `decision` (`{outcome, reason, narrowed, granted_spec,
+owner_note, token_id}`, where `reason` is `rejected_by_owner` or `requester_inactive` for rejections and
+`granted_spec` may be narrower than requested, never wider), `secret` (`{status: none |
 available | claimed | expired | delivered_to_owner, delivery: sealed | plain, claim_before}`),
 `poll_after_seconds` (10).
 
@@ -2411,8 +2475,9 @@ available | claimed | expired | delivered_to_owner, delivery: sealed | plain, cl
 | `POST /v1/access-requests/{id}/cancel` | `pending` → `cancelled`; else `409 approval_not_pending` |
 
 **One-time secret retrieval.** Retrieval is a `POST` because it changes state (a `GET` must stay safe to repeat;
-this refines the `GET` shown in 02 §13.3). `Idempotency-Key` is required. Only the requesting agent token may claim,
-within `agents.secret_pickup_window` (72 h).
+the status `GET` never carries the secret; 02 §13.3, 04 §10.7). `Idempotency-Key` is required. Only the requesting
+agent token, or its rotation successor in the same lineage, may claim, within `agents.secret_pickup_window` (72 h
+from approval). Applies to `create_token` requests; `modify_token` and `revoke_token` produce no secret.
 
 ```json
 { "data": { "token_id": "tok_01JC3…", "delivery": "sealed",
@@ -2426,6 +2491,10 @@ within `agents.secret_pickup_window` (72 h).
 - After the first successful claim the stored secret is deleted. A replay with the **same** `Idempotency-Key` within
   `agents.secret_claim_replay_window` (10 min) returns the same body (safe: sealed tokens only open with the agent's
   key, and the replay goes to the same authenticated agent). Any other later claim → `409 secret_already_claimed`.
+- A claim after the pickup window, when the secret was never claimed and has been destroyed (`secret.status:
+  expired`), → `409 secret_delivery_expired`; the token stays valid but unusable until the owner rotates it with
+  owner delivery or revokes it (04 §10.7). A claim while `secret.status` is `none` (request not approved, or a type
+  without a secret) or `delivered_to_owner` → `404 not_found` (there is no secret to claim).
 - Responses carry `Cache-Control: no-store`; claims are audited; a claim from a different IP than the request
   raises an owner alert (02 §13.3). The CLI `bawaba request-token --wait` performs the whole flow.
 
@@ -2462,7 +2531,8 @@ integration can migrate by changing its base URL and its authentication (00 §9)
 (`legacy.enabled` plus an endpoint allowlist on the token) and runs the same pipeline as `/v1` (01 §6.5): Bawaba
 token auth, scopes, data scope, field hiding, firewall, rate limits, coalescing and full audit. Responses are
 **rebuilt** from Bawaba's typed upstream structs, never relayed (02 OH-2). There is no pagination: a legacy list
-returns the whole (scoped) list, as Shamel does, bounded by `http.max_response_bytes`.
+returns the whole (scoped) list, as Shamel does, bounded by `http.max_response_bytes` (256 MiB, 02 §10.6); responses
+above `http.response_spill_bytes` (8 MiB) are assembled in an encrypted temporary file before sending (02 §10.8).
 
 ### 20.2 Allowlist
 
@@ -2559,8 +2629,14 @@ token: <session-token from /Main/Login>           itemcode: ITM-0001
 itemcode: ITM-0001
 ```
 
-The legacy reference (`api/openapi/bawaba.legacy.yaml`) is served at `/docs/legacy/openapi.json` only to bearer
-tokens with legacy enabled (02 LV-13).
+**Legacy reference: `GET /v1/docs/legacy`** (operation `docs.legacy`). The legacy reference
+(`api/openapi/bawaba.legacy.yaml`) lists upstream-shaped paths and wire names, so it is **not** under the public,
+cacheable `/docs` tree (02 LV-13, 05 §8.4). It is an authenticated `/v1` operation: kinds `tool` and `agent`,
+legacy entitlement required (`403 legacy_not_enabled` otherwise; anonymous → `401 unauthenticated`), no scope
+beyond that. The response is `200` with the OpenAPI 3.1 document itself (`application/json`, not wrapped in `data`),
+restricted to the legacy endpoints the calling token is entitled to, with `Cache-Control: no-store`. The origin-leak
+suite asserts that anonymous requests get `401` and that no `/docs` path serves it. The owner reads the full
+reference with `bawaba docs legacy`.
 
 ---
 
@@ -2647,8 +2723,10 @@ is the sole problem; otherwise the top-level code is `validation_failed` and eac
 
 Detail codes: `required`, `unknown_field`, `duplicate_key`, `invalid_type`, `invalid_format`, `invalid_enum`,
 `out_of_range`, `too_long`, `too_many_items`, `not_allowed`, `must_match_prefix`, `mismatch`, `unbalanced`,
-`missing_scope`, `field_hidden`, `missing_manual_code`, `not_an_order`, `reference_not_found`, plus the
-`exceeds_own_grant` violation codes (§18.3).
+`missing_scope`, `field_hidden`, `missing_manual_code`, `not_an_order`, `reference_not_found`,
+`required_by_data_scope` (a field the token's data scope makes mandatory, e.g. `salesman_code` for a
+salesman-restricted token, 04 §4.6), `bucket_exhausted` (on `429 rate_limited`, `param` = `reads`, `writes` or
+`upstream`, §23.3), plus the `exceeds_own_grant` violation codes (§18.3).
 
 ### 22.2 Catalogue
 
@@ -2656,26 +2734,26 @@ Detail codes: `required`, `unknown_field`, `duplicate_key`, `invalid_type`, `inv
 
 | Code | HTTP | English message | Arabic message | When | Retry |
 |---|---|---|---|---|---|
-| `invalid_request` | 400 | The request is malformed. | الطلب غير صالح من حيث الصياغة. | bad JSON, unknown body field, duplicate key, bad header value, unclean path | no |
+| `invalid_request` | 400 | The request is malformed. | الطلب غير صالح من حيث الصياغة. | bad JSON, unknown body field, duplicate key, bad header value, bad edge header, unclean path | no |
 | `unknown_parameter` | 400 | Unknown or repeated query parameter. | معامل استعلام غير معروف أو مكرر. | parameter not allowlisted for the route, or repeated | no |
 | `invalid_cursor` | 400 | The cursor is not valid for this request. | مؤشر الصفحات غير صالح لهذا الطلب. | tampered cursor, other token/route/query | no |
 | `token_in_url` | 400 | Access tokens must not be sent in the URL. | يجب عدم إرسال رمز الوصول ضمن عنوان URL. | token-shaped string in path or query | no |
 | `shamel_credentials_not_accepted` | 400 | Accounting-system credentials are not accepted. Authenticate with a Bawaba token in the Authorization header. | لا تُقبل بيانات اعتماد النظام المحاسبي. استخدم رمز وصول Bawaba في ترويسة Authorization. | `/legacy/Main/Login`; Shamel credential headers on `/legacy` | no |
 | `idempotency_key_required` | 400 | This write requires an Idempotency-Key header. | عملية الكتابة هذه تتطلب ترويسة Idempotency-Key. | Shamel write without the header | no |
 | `unauthenticated` | 401 | Authentication required. Send the access token in the Authorization header. | المصادقة مطلوبة. أرسل رمز الوصول في ترويسة Authorization. | no `Authorization` header | no |
-| `invalid_token` | 401 | The access token is invalid. | رمز الوصول غير صالح. | malformed, unknown, revoked, suspended; bad media signature | no |
+| `invalid_token` | 401 | The access token is invalid. | رمز الوصول غير صالح. | malformed, bad checksum, unknown, revoked, suspended, prefix/record environment mismatch; bad media signature | no |
 | `token_expired` | 401 | The access token has expired. | انتهت صلاحية رمز الوصول. | past `expires_at` | no |
-| `ip_blocked` | 403 | Requests from this address are not allowed. | الطلبات من هذا العنوان غير مسموح بها. | ban, global or token IP rule | no |
+| `ip_blocked` | 403 | Requests from this address are not allowed. | الطلبات من هذا العنوان غير مسموح بها. | ban, global or token IP rule (which one is never disclosed) | no (temporary ban: after `Retry-After`) |
 | `origin_not_allowed` | 403 | This origin is not allowed to use this token. | هذا المصدر (Origin) غير مسموح له باستخدام رمز الوصول هذا. | publishable token from an unlisted origin | no |
 | `secret_token_in_browser` | 403 | Secret tokens must not be used from a browser. Use a publishable token. | لا يجوز استخدام رمز وصول سري من المتصفح. استخدم رمزًا قابلًا للنشر. | non-publishable token with `Origin` | no |
 | `insufficient_scope` | 403 | The token lacks a permission required for this operation. | رمز الوصول لا يملك صلاحية مطلوبة لهذه العملية. | missing scope atom (`details[].scope`) | no |
 | `token_kind_not_allowed` | 403 | This kind of token cannot perform this operation. | لا يمكن لهذا النوع من رموز الوصول تنفيذ هذه العملية. | publishable writing or using webhooks; non-agent access request | no |
-| `legacy_not_enabled` | 403 | Legacy access is not enabled for this token or endpoint. | الوصول القديم (legacy) غير مفعّل لهذا الرمز أو لهذه النقطة. | §20 | no |
+| `legacy_not_enabled` | 403 | Legacy access is not enabled for this token or endpoint. | الوصول القديم (legacy) غير مفعّل لهذا الرمز أو لهذه النقطة. | §20; `GET /v1/docs/legacy` | no |
 | `exceeds_own_grant` | 403 | The request asks for more than this agent token holds. | الطلب يتجاوز الصلاحيات التي يملكها رمز الوكيل نفسه. | subset rule (§18.3) | no |
 | `data_scope_filter_required` | 403 | Your token's data scope requires an additional filter on this endpoint. | نطاق بيانات رمز الوصول يتطلب عامل تصفية إضافيًا لهذه النقطة. | DS-7 (`details[].param`) | no |
 | `data_scope_unsupported` | 403 | This endpoint is not available under your token's data scope. | هذه النقطة غير متاحة ضمن نطاق بيانات رمز الوصول الخاص بك. | DS-7 | no |
 | `approval_not_supported_in_legacy` | 403 | Writes that require approval are not available on the legacy interface. Use /v1. | عمليات الكتابة التي تتطلب موافقة غير متاحة عبر الواجهة القديمة. استخدم ‎/v1. | §20.3 | no |
-| `not_found` | 404 | The resource was not found. | المورد غير موجود. | missing or outside the data scope | no |
+| `not_found` | 404 | The resource was not found. | المورد غير موجود. | missing or outside the data scope; unknown public path prefix (before authentication, 02 §10.1) | no |
 | `route_not_found` | 404 | No such route. | المسار غير موجود. | unknown route (after authentication) | no |
 | `method_not_allowed` | 405 | This HTTP method is not allowed on this route. | طريقة HTTP هذه غير مسموح بها على هذا المسار. | §4.3 | no |
 | `snapshot_expired` | 409 | The data snapshot for this cursor has expired. Start again from the first page. | انتهت صلاحية لقطة البيانات الخاصة بهذا المؤشر. ابدأ من الصفحة الأولى. | cursor after TTL or eviction | restart |
@@ -2684,17 +2762,21 @@ Detail codes: `required`, `unknown_field`, `duplicate_key`, `invalid_type`, `inv
 | `idempotency_conflict` | 409 | This Idempotency-Key was already used with a different request. | استُخدم مفتاح Idempotency-Key هذا من قبل مع طلب مختلف. | §15.2 | no |
 | `request_in_progress` | 409 | A request with this Idempotency-Key is still being processed. | ما زال طلب بمفتاح Idempotency-Key نفسه قيد المعالجة. | §15.2 | yes, same key |
 | `approval_not_pending` | 409 | This request is no longer pending. | هذا الطلب لم يعد قيد الانتظار. | cancel of a non-pending approval or access request | no |
-| `secret_already_claimed` | 409 | The secret was already retrieved or the retrieval period has ended. | تم استلام السر مسبقًا أو انتهت مدة استلامه. | §18.3 | no |
-| `delivery_not_retryable` | 409 | This delivery cannot be retried in its current state. | لا يمكن إعادة محاولة هذا التسليم في حالته الحالية. | §17.5 | no |
-| `duplicate_code` | 409 | The code already exists in the accounting system. | الرمز موجود مسبقًا في النظام المحاسبي. | mapped Shamel rejection (§22.3) | no |
+| `approval_rejected` | 409 | The owner rejected this request. It was not executed. | رفض المالك هذا الطلب، ولم يُنفَّذ. | replay of a write whose approval was rejected (§15.2, §16) | no (new key for a new attempt) |
+| `approval_expired` | 409 | The approval request expired before the owner decided. It was not executed. | انتهت صلاحية طلب الموافقة قبل أن يبتّ فيه المالك، ولم يُنفَّذ. | replay after the approval expired (§15.2, §16) | no (new key for a new attempt) |
+| `approval_cancelled` | 409 | The approval request was cancelled. It was not executed. | أُلغي طلب الموافقة، ولم يُنفَّذ. | replay after cancellation (`cancelled_by_client`, `token_revoked`, `scope_revoked`; §15.2, §16) | no (new key for a new attempt) |
+| `secret_already_claimed` | 409 | The secret was already retrieved. | تم استلام السر مسبقًا. | second claim outside the replay window (§18.3) | no |
+| `secret_delivery_expired` | 409 | The pickup period for this secret has ended and the secret was destroyed. Ask the owner to reissue the token. | انتهت مدة استلام هذا السر وتم إتلافه. اطلب من المالك إعادة إصدار رمز الوصول. | claim after `agents.secret_pickup_window` (§18.3) | no |
+| `delivery_not_retryable` | 409 | This delivery cannot be retried in its current state. | لا يمكن إعادة محاولة هذا التسليم في حالته الحالية. | §17.5 (wrong state, or `delivered` more than 72 h ago) | no |
 | `payload_too_large` | 413 | The request body is too large. | حجم جسم الطلب أكبر من المسموح. | §4.10 | no |
 | `uri_too_long` | 414 | The request URL is too long. | عنوان URL للطلب أطول من المسموح. | 02 §10.6 | no |
 | `unsupported_media_type` | 415 | Unsupported content type. Use application/json. | نوع المحتوى غير مدعوم. استخدم application/json. | §4.10 | no |
 | `headers_too_large` | 431 | The request headers are too large. | ترويسات الطلب أكبر من المسموح. | 02 §10.6 | no |
 | `validation_failed` | 422 | The request failed validation. See details. | فشل التحقق من صحة الطلب. راجع التفاصيل. | semantic validation (`details`) | no |
 | `upstream_rejected` | 422 | The accounting system rejected the operation. | رفض النظام المحاسبي العملية. | `Success=false` or rejection without a mapped code | no |
-| `result_too_large` | 422 | The result is too large. Narrow it with filters. | النتيجة كبيرة جدًا. ضيّقها باستخدام عوامل التصفية. | snapshot above `pagination.snapshot_max_bytes` | no |
-| `date_range_too_large` | 422 | The date range exceeds the allowed maximum. | نطاق التاريخ يتجاوز الحد المسموح. | §12.2, §13 | no |
+| `duplicate_code` | 422 | The code already exists in the accounting system. | الرمز موجود مسبقًا في النظام المحاسبي. | mapped Shamel rejection (§22.3; known-pattern business rejections are 422, 02 §5.6) | no |
+| `result_too_large` | 422 | The result is too large. Narrow it with pushdown filters. | النتيجة كبيرة جدًا. ضيّقها باستخدام عوامل التصفية التي تُطبَّق في المصدر (pushdown). | normalized snapshot above `pagination.snapshot_max_bytes` (§5.3) | no |
+| `date_range_too_large` | 422 | The date range exceeds the allowed maximum. | نطاق التاريخ يتجاوز الحد المسموح. | §12.2, §12.3, §13 | no |
 | `reference_not_found` | 422 | The request refers to a record that does not exist. | يشير الطلب إلى سجل غير موجود. | write references a missing or out-of-scope entity (DS-8) | no |
 | `voucher_code_prefix_invalid` | 422 | The voucher code must start with the letter assigned to this voucher type. | يجب أن يبدأ رقم السند بالحرف المخصص لنوع السند. | §15.7 | no |
 | `voucher_code_not_allowed` | 422 | A voucher code cannot be supplied for this voucher type. | لا يمكن تحديد رقم السند لهذا النوع من السندات. | `purchase_delivery` | no |
@@ -2703,11 +2785,12 @@ Detail codes: `required`, `unknown_field`, `duplicate_key`, `invalid_type`, `inv
 | `webhook_target_not_allowed` | 422 | This webhook URL is not allowed. | عنوان استقبال الإشعارات (webhook) هذا غير مسموح به. | §17.3 | no |
 | `subscription_limit_reached` | 422 | The maximum number of webhook subscriptions for this token has been reached. | تم بلوغ الحد الأقصى لاشتراكات الإشعارات (webhook) لهذا الرمز. | §17.3 | no |
 | `batch_too_large` | 422 | The batch contains too many operations. | تحتوي الدفعة على عدد عمليات أكبر من المسموح. | §15.8 | no |
-| `rate_limited` | 429 | Rate limit exceeded. Retry after the time given in Retry-After. | تم تجاوز حد معدل الطلبات. أعد المحاولة بعد المدة المحددة في Retry-After. | per-token or pre-auth limit | yes |
+| `rate_limited` | 429 | Rate limit exceeded. Retry after the time given in Retry-After. | تم تجاوز حد معدل الطلبات. أعد المحاولة بعد المدة المحددة في Retry-After. | per-token bucket (`reads`, `writes` or `upstream`, `details[].param`, §23.3), (token, IP) throttle or pre-auth limit | yes |
 | `access_request_limit_reached` | 429 | Too many access requests. Wait for pending requests to be decided. | طلبات الوصول كثيرة جدًا. انتظر البت في الطلبات المعلّقة. | 20 pending / 50 per day | later |
+| `approval_limit_reached` | 429 | Too many writes are waiting for approval. Wait for the owner to decide pending requests. | عدد عمليات الكتابة التي تنتظر الموافقة كبير جدًا. انتظر حتى يبتّ المالك في الطلبات المعلّقة. | a held write would exceed the lineage's pending or daily approval cap (§15.3; `details[].reason` = `pending` \| `daily`) | later (same key; `Retry-After` only for `daily`) |
 | `internal_error` | 500 | An internal error occurred in Bawaba. | حدث خطأ داخلي في Bawaba. | Bawaba bug (no detail) | once |
 | `upstream_error` | 502 | The accounting system could not complete the request. | تعذّر على النظام المحاسبي إتمام الطلب. | unclassified upstream failure, bad response, credential problem (02 §5.6) | reads once |
-| `upstream_response_too_large` | 502 | The accounting system's response exceeded the size limit. | تجاوزت استجابة النظام المحاسبي الحد المسموح للحجم. | above `upstream.max_response_bytes` | no |
+| `upstream_response_too_large` | 502 | The accounting system's response exceeded the size limit. Narrow the request with pushdown filters. | تجاوزت استجابة النظام المحاسبي الحد المسموح للحجم. ضيّق الطلب باستخدام عوامل التصفية التي تُطبَّق في المصدر (pushdown). | upstream body above the operation's response cap (02 §10.6), or an encoded response above `http.max_response_bytes` (02 §10.8); §5.3 | no |
 | `upstream_unavailable` | 503 | The accounting system is currently unreachable. | يتعذّر الوصول إلى النظام المحاسبي حاليًا. | no tunnel, breaker open, connect failure | yes |
 | `upstream_busy` | 503 | The accounting system is busy. Retry shortly. | النظام المحاسبي مشغول. أعد المحاولة بعد قليل. | upstream queue full or timed out | yes |
 | `service_unavailable` | 503 | The service is temporarily unavailable. | الخدمة غير متاحة مؤقتًا. | lockdown, stale policy (02 §16) | yes |

@@ -16,11 +16,11 @@
 
 | Item | Convention |
 |---|---|
-| IDs | `req_` request (01 §6.3 S2; see §11 on its format), `tok_` token, `up_` upstream, `conn_` connector, `areq_` access request, `apr_` write approval, `whs_` webhook subscription, `evt_` event, `whd_` delivery, `alr_` alert instance, `exp_` audit export, `bkp_` backup run. Audit object ids are shown as `b_` + 26-char base32. New ids are UUIDv7 unless stated. |
+| IDs | `req_` request (`req_` + 26-character Crockford base32 UUIDv7, 01 S2, 02 LV-24), `tok_` token, `up_` upstream, `conn_` connector, `areq_` access request, `apr_` write approval, `whs_` webhook subscription, `evt_` event, `whd_` delivery, `alr_` alert instance, `exp_` audit export, `bkp_` backup run. Audit object ids are shown as `b_` + 26-char base32. New ids are UUIDv7 unless stated. |
 | Valkey keys | As 01: `bwb:<t>:…` tenant-scoped, `{…}` hash tag, `bwb:lease:<job>` worker leases, `bwb:q:<name>` queues. |
 | Time | Timestamps RFC 3339; business dates `YYYY-MM-DD` in the upstream's business timezone (default `Asia/Hebron`). Schedules are 5-field cron strings evaluated in the business timezone. |
 | Config | **Bootstrap** keys live in `/etc/bawaba/bawaba.yaml` (restart/SIGHUP); **runtime** keys live in PostgreSQL and propagate through compiled config (01 §5.4, §15). Each config block below says which. Listener addresses and ports are defined in 01 §5.2 / 02 §12.1 and are referred to here by name (`control`, `ops`). |
-| Keys | The key hierarchy is owned by [`02-security.md`](02-security.md) §9 (master key → KEK → per-purpose keys in `crypto_keys`, record envelope §9.3). This document uses the purposes `audit_body` (audit objects and raw spool events), `audit_meta` (encrypted metadata columns, WAL records, cold segments), `audit_addr` (keyed object ids; 01 calls it `blobid`), `audit_chain` (integrity anchors), `webhook_secret`, `webhook_url`, `queue`, and requests three additions: MAC `audit_index` (blind indexes), AEAD `webhook_event` (webhook ledger state, event payloads) and MAC `webhook_ledger` (ledger key and record hashes). Backup archives use a random archive key wrapped directly by the master key (§9.1). |
+| Keys | The key hierarchy is owned by [`02-security.md`](02-security.md) §9.2: two root files, `master.key` (MK, loaded only by the control plane) and `data.key` (DK, loaded only by the data plane), wrap KEK_control and KEK_data, which wrap the per-purpose keys in `crypto_keys` (record envelope 02 §9.3). Data-plane purposes used here: `audit_addr` (keyed object ids; 01 calls it `blobid`), `audit_index` (blind indexes), `audit_chain` (integrity chain), `audit_spool` (overflow spool and WAL framing), `webhook_secret`, `webhook_url`, `webhook_event` (ledger state, event payloads), `webhook_ledger` (ledger keys and hashes), `queue`. Control-only purposes: `audit_seal` (HPKE key pair that opens audit epoch keys), `admin_chain`, `smtp_password`. **Audit bodies (`audit_body`) and audit metadata (`audit_meta`) are encrypted under per-node, per-epoch DEKs sealed to `audit_seal`** (§1.4.5), so the data plane can write audit content but cannot read stored content. One addition is requested from 02: the data-plane AEAD purpose `audit_dict` (compression dictionaries, §1.4.4). Backup archives use a random archive key wrapped directly by MK (§9.1). |
 | Severity words | `critical` > `high` > `warning` > `info` (alerts, §3). |
 
 ---
@@ -32,13 +32,13 @@
 | Topic | Decision |
 |---|---|
 | Coverage | **Every** data-plane request (`/v1`, `/legacy`; `/docs` metadata only), every upstream call (raw request and raw response, including Shamel's error text), every background upstream call (webhook polling, approved-write execution), every control-plane action. |
-| Metadata | One compact row per request in **daily range-partitioned** PostgreSQL tables (`audit_events`, `audit_upstream_calls`); sensitive parameters encrypted in the row; searchable values exposed only as keyed **blind indexes**. |
-| Bodies | **Content-addressed objects**: id = truncated `HMAC-SHA256(audit_addr, …)`; **record-aligned content-defined chunking** for large JSON arrays (FastCDC for other large bodies); **zstd** with **trained dictionaries**; **AES-256-GCM** envelopes (purpose `audit_body`, 02 §9.3); objects appended to immutable **pack files** in the blob store (filesystem or S3-compatible). |
-| Dedup | Identical bodies and identical chunks are stored once per tenant. Estimated **~61× smaller than raw** and **~8× smaller than compression alone** for the medium workload (§1.7). |
-| Pipeline | Asynchronous, non-blocking: bounded ring → per-worker encrypted local **WAL** (dedup-first) → packs + batched `COPY`. Overflow **spool** on disk; when the disk budget is exhausted the gateway **fails closed** (`503 audit_unavailable`) or, if the owner opted in, records metadata only — never silently. |
+| Metadata | One compact row per request in **daily range-partitioned** PostgreSQL tables (`audit_events`, `audit_upstream_calls`); sensitive parameters encrypted in the row; searchable values exposed only as keyed **blind indexes**. Above the PostgreSQL ingest rating, `audit.metadata_mode: segment_first` writes metadata straight to encrypted segments in the blob store (§1.12). |
+| Bodies | **Content-addressed objects**: id = truncated `HMAC-SHA256(audit_addr, …)`; **record-aligned content-defined chunking** for large JSON arrays (FastCDC for other large bodies); **zstd** with **trained dictionaries**; **AES-256-GCM** envelopes (purpose `audit_body`, 02 §9.3) under **per-node, per-epoch DEKs sealed to the control plane** (write-only for the data plane, §1.4.5); objects appended to immutable **pack files** in the blob store (filesystem or S3-compatible). |
+| Dedup | Identical bodies and identical chunks are stored once per tenant. Estimated **~60× smaller than raw** and **~9× smaller than compression alone** for the medium workload (§1.7). |
+| Pipeline | Asynchronous, non-blocking: bounded ring (events **and** bytes) → per-worker encrypted local **WAL** (dedup-first) → packs + batched `COPY`. Overflow goes to a dedicated spill goroutine and an on-disk **spool**; the request goroutine never writes or fsyncs in `standard` mode. When the disk budget is exhausted the gateway **fails closed** (`503 audit_unavailable`) or, if the owner opted in, records metadata only — never silently. |
 | Retention | Metadata 2 y (90 d hot in PostgreSQL, then **cold Parquet segments** in the blob store), write bodies 2 y, read bodies 90 d, sandbox bodies 14 d; GC by per-object `retain_until` leases; pack compaction. |
 | Caps | Size caps per store with alerts at 70/85/95 %; at the hard cap read bodies are trimmed oldest-first (recorded as a gap), never write bodies or metadata. |
-| Access | Querying, decryption and export exist **only on the control plane** (admin API, dashboard, local CLI). The data-plane DB role can insert but not read audit content. Every body view and export is itself audited. |
+| Access | Querying, decryption and export exist **only on the control plane** (admin API, dashboard, local CLI), which alone holds the `audit_seal` private keys. The data-plane DB role can insert but not read audit content, and data-plane keys cannot decrypt stored audit content (§1.10). Every body view and export is itself audited. |
 
 ### 1.2 What is recorded
 
@@ -46,7 +46,7 @@
 |---|---|---|---|
 | `api_v1`, `api_legacy` | S16 of every request that reached S2 | full row | client request body (if any), client response body, per upstream call: raw upstream request + raw upstream response |
 | `docs` | `/docs` | row without bodies (body = build id + path, reproducible from the binary) | none |
-| `blocked` | S3 rejections of banned / non-allowlisted / over-budget IPs | **aggregated** per (IP, reason, minute): count, first/last request id (flood protection; disable with `audit.aggregate_blocked: false`) | none |
+| `blocked` | S3 rejections of banned / non-allowlisted / over-budget IPs | **full row per request** (stage, reason, IP, declared `Content-Length`). Flood guard: only while one IP exceeds `audit.blocked.aggregate_above` (120/min) are its further blocked requests folded into one row per (IP, reason, minute) with count and first/last request id; every such window writes an `audit_gaps` row (kind `blocked_aggregated`) and raises `audit_gap_detected` (warning), so the reduction is never silent | client response body (the error envelope, inline, §1.4.1); the request body is not read at S3 (rejected before it is consumed, 02 §10.1) and the row carries `body_not_read` |
 | `webhook_poll` | change-detection cycles (§2) | row per cycle, `token_id` NULL, actor `system:webhooks:<detector>` | raw upstream request/response per call |
 | `approved_write` | approved-write executor (01 §6.4) | row linked to the original `202` request (`upstream_ref`) | raw upstream request/response |
 | `webhook_delivery` | delivery attempts (§2.7) | in `webhook_delivery_attempts` (not `audit_events`) | rendered payload hash + first 1 KiB of the receiver response |
@@ -67,7 +67,7 @@ in `audit_writes` (01 §6.4) and referenced from the event row instead of being 
 ```sql
 CREATE TABLE audit_events (
   ts              timestamptz NOT NULL,  -- request start (partition key)
-  request_id      uuid        NOT NULL,  -- req_ (128-bit; if UUIDv7, its timestamp ≈ ts → partition pruning)
+  request_id      uuid        NOT NULL,  -- req_ (UUIDv7: its timestamp ≈ ts → partition pruning)
   tenant_id       smallint    NOT NULL,
   node_id         smallint    NOT NULL,  -- dictionary of node ids
   event_kind      smallint    NOT NULL,  -- §1.2
@@ -82,8 +82,9 @@ CREATE TABLE audit_events (
   error_code      smallint,              -- apierr catalogue id
   stage_reached   smallint    NOT NULL,  -- S1..S17
   flags           integer     NOT NULL,  -- bit set: coalesce_leader/follower/local, cursor_read, client_abort,
-                                         -- approval_hold, idempotent_replay, bodies_dropped, slow, legacy
-  warnings        smallint,              -- bit set of Bawaba-Warning codes emitted (§4.2)
+                                         -- approval_hold, idempotent_replay, bodies_dropped, body_not_read,
+                                         -- blocked_aggregate, slow, legacy
+  warnings        integer,               -- bit set of Bawaba-Warning codes emitted (§4.2; 15 codes today)
   dur_total_us    integer     NOT NULL,
   dur_gateway_us  integer,               -- overhead (01 §10.1)
   dur_queue_us    integer,               -- upstream limiter wait
@@ -95,8 +96,9 @@ CREATE TABLE audit_events (
   bytes_out       integer,
   req_body        bytea,                 -- body ref (§1.4.1), NULL if no body
   resp_body       bytea,
-  params_enc      bytea,                 -- audit_meta envelope(zstd(canonical JSON)): raw path+query, route vars,
-                                         -- normalized typed request, cursor {snapshot_id, offset},
+  params_enc      bytea,                 -- audit_meta envelope(zstd(canonical JSON)) under the node's epoch DEK
+                                         -- (§1.4.5): raw path+query, route vars, normalized typed request,
+                                         -- cursor {view_id, snapshot_id, offset, policy_version}, policy_version,
                                          -- Idempotency-Key hash, client correlation id, CF-Ray, decision trace
   subject_keys    bigint[],              -- blind index (§1.3.3)
   stage_timings   bytea,                 -- per-stage µs, only when slow (> audit.slow_threshold, 1 s) or error
@@ -109,9 +111,8 @@ CREATE TABLE audit_events (
 
 - Paths are stored as `op_id` (whose dictionary row holds the route template, e.g. `/v1/customers/{code}`); the
   concrete path, which may contain customer codes, is only inside `params_enc`.
-- Lookup by request id needs no global index. With UUIDv7 request ids (01 §6.3) the embedded timestamp selects the
-  partition and a ±2 s `ts` range; with purely random ids (02 LV-24) the lookup probes the unique index of each hot
-  partition (90 probes, a few ms) and cold segments carry a request-id Bloom filter (§1.8).
+- Lookup by request id needs no global index: request ids are UUIDv7 (01 S2, 02 LV-24), so the embedded timestamp
+  selects the partition (or cold segment) and a ±2 s `ts` range, and the unique index answers in one probe.
 - Partitions are created 7 days ahead by the retention/partition singleton (01 §5.6) and are append-only.
 
 #### 1.3.2 `audit_upstream_calls` (one row per upstream call)
@@ -156,12 +157,13 @@ decrypting `params_enc`. Finding responses that *contained* a customer is a sepa
 | Table | Content | Partitioning / retention default |
 |---|---|---|
 | `audit_writes` | 01 §6.4 write-ahead record: token, idempotency key, request hash, `payload_enc`, status, Shamel reference id, outcome. `UNIQUE (tenant_id, token_id, idempotency_key)` also acts as a durable backstop when Valkey idempotency records are lost (§9.5). | monthly · 2 y |
-| `admin_events` | defined in 02 §12.5 (`seq, ts, actor, peer, action, target, diff, prev, mac`, HMAC-chained with `audit_chain`); actions include `token.create`, `approval.approve`, `audit.body.view`, `audit.export`, `key.rotate`, `firewall.ban`, `alert.silence` | monthly · 5 y, never archived |
+| `admin_events` | defined in 02 §12.5 (`seq, ts, actor, peer, action, target, diff, prev, mac`, HMAC-chained with the control-only key `admin_chain`); actions include `token.create`, `approval.approve`, `audit.body.view`, `audit.export`, `key.rotate`, `firewall.ban`, `alert.silence` | monthly · 5 y, never archived |
 | `audit_ops`, `audit_user_agents` | small dictionaries (id ↔ text) | — |
 | `audit_blobs`, `audit_packs`, `audit_zstd_dicts` | object index and storage bookkeeping (§1.4) | `audit_blobs` hash-partitioned (16) by id |
-| `audit_segments` | cold-tier segment catalogue (§1.8) | — |
+| `audit_epoch_keys` | defined in 02 §9.2: one HPKE-sealed DEK per (node, epoch); opened only by the control plane (§1.4.5) | until destroyed by the GC (§1.4.5) |
+| `audit_segments` | cold-tier segment catalogue (§1.8; in `segment_first` mode also the hot catalogue, §1.12) | — |
 | `audit_batches`, `audit_anchors` | integrity chain and hourly anchors (§1.9, 02 §12.5) | with metadata |
-| `audit_gaps` | detected losses: unclean shutdown windows, cap-trimmed body ranges, blob loss after restore | forever |
+| `audit_gaps` | detected losses and reductions: unclean shutdown windows, cap-trimmed body ranges, blob loss after restore, blocked-request aggregation windows (§1.2) | forever |
 | `audit_exports` | export jobs: who, filters, row count, output hash | 5 y |
 
 ### 1.4 Body storage
@@ -777,8 +779,8 @@ sequenceDiagram
   participant R as Receiver
   L->>V: renew bwb:lease:wh:<stream>
   L->>U: GetCustomers (lastupdatedate = D)
-  U-->>L: normalized records (streamed; audited as webhook_poll)
-  L->>P: SELECT ledger rows WHERE key = ANY(batch)
+  U-->>L: normalized records (streamed, audited as webhook_poll)
+  L->>P: SELECT ledger rows WHERE key_hash = ANY(batch)
   L->>L: hash and diff
   L->>P: BEGIN · fence epoch · upsert ledger · INSERT events · INSERT deliveries (matching push subs) · advance watermark · COMMIT
   L->>V: XADD bwb:q:webhooks (delivery ids)
