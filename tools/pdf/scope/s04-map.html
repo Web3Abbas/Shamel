@@ -1,0 +1,83 @@
+<section class="page" id="map">
+  <div class="kicker"><span class="section-no">03</span>The data map</div>
+  <h2 class="page-title">What lives inside Shamel, and how it connects</h2>
+  <p class="lead">The API exposes five areas of business data. Customers and items are the core records; vouchers (invoices, orders, receipts…) tie them together; master data supplies the codes they share; reports summarise the results.</p>
+
+  <svg class="dg" viewBox="0 0 600 372" role="img" aria-label="Shamel data map">
+    <defs><marker id="mah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#C9803A"/></marker></defs>
+    <style>
+      .cl{fill:#F6FAFA;stroke:#9FC3C8;stroke-width:1}
+      .clt{font-size:7.6px;font-weight:800;letter-spacing:.08em;fill:#5B6B73}
+      .bx{fill:#fff;stroke:#BFD8DC;stroke-width:1}
+      .bxm{fill:#0F4C5C}
+      .t{font-size:8.6px;font-weight:700;fill:#16232A}
+      .s{font-size:6.6px;fill:#5B6B73}
+      .tw{font-size:9px;font-weight:700;fill:#fff}
+      .sw{font-size:6.6px;fill:#BFD6D9}
+      .ar{stroke:#C9803A;stroke-width:1.6;fill:none}
+      .al{font-size:6.6px;fill:#8A5A1F;font-weight:700}
+    </style>
+    <!-- Master data -->
+    <rect x="6" y="14" width="132" height="352" rx="10" class="cl"/><text x="16" y="30" class="clt">MASTER DATA</text>
+    <rect x="14" y="40" width="116" height="36" rx="6" class="bx"/><text x="22" y="55" class="t">Currencies &amp; rates</text><text x="22" y="67" class="s">codes · latest 10 rates</text>
+    <rect x="14" y="82" width="116" height="36" rx="6" class="bx"/><text x="22" y="97" class="t">Price classes</text><text x="22" y="109" class="s">6 named price levels</text>
+    <rect x="14" y="124" width="116" height="36" rx="6" class="bx"/><text x="22" y="139" class="t">Stores</text><text x="22" y="151" class="s">warehouses · type · car code</text>
+    <rect x="14" y="166" width="116" height="36" rx="6" class="bx"/><text x="22" y="181" class="t">Cities</text><text x="22" y="193" class="s">id · name</text>
+    <rect x="14" y="208" width="116" height="36" rx="6" class="bx"/><text x="22" y="223" class="t">Banks &amp; branches</text><text x="22" y="235" class="s">for cheques</text>
+    <rect x="14" y="250" width="116" height="36" rx="6" class="bx"/><text x="22" y="265" class="t">Salesmen</text><text x="22" y="277" class="s">response undocumented</text>
+    <rect x="14" y="292" width="116" height="36" rx="6" class="bx"/><text x="22" y="307" class="t">Login user</text><text x="22" y="319" class="s">userId · salesmanCode</text>
+
+    <!-- Customers -->
+    <rect x="176" y="14" width="204" height="160" rx="10" class="cl"/><text x="186" y="30" class="clt">CUSTOMERS</text>
+    <rect x="186" y="38" width="184" height="44" rx="7" class="bxm"/><text x="196" y="55" class="tw">Customer</text><text x="196" y="68" class="sw">code · name · phone · salesman · price class</text><text x="196" y="77" class="sw">credit limit · currency · VAT no. · location</text>
+    <rect x="186" y="90" width="58" height="40" rx="6" class="bx"/><text x="192" y="105" class="t">Balances</text><text x="192" y="117" class="s">rows w/ currency</text><text x="192" y="125" class="s">+ cheque totals</text>
+    <rect x="249" y="90" width="58" height="40" rx="6" class="bx"/><text x="255" y="105" class="t">Price rows</text><text x="255" y="117" class="s">purpose</text><text x="255" y="125" class="s">unstated</text>
+    <rect x="312" y="90" width="58" height="40" rx="6" class="bx"/><text x="318" y="105" class="t">Contacts</text><text x="318" y="117" class="s">&amp; classifi-</text><text x="318" y="125" class="s">cations</text>
+    <text x="186" y="152" class="s">filters: code · VAT no. · stopped · changed since</text>
+    <text x="186" y="162" class="s">salesman scoping (getAll to lift)</text>
+
+    <!-- Items -->
+    <rect x="176" y="190" width="204" height="176" rx="10" class="cl"/><text x="186" y="206" class="clt">ITEMS &amp; STOCK</text>
+    <rect x="186" y="214" width="184" height="44" rx="7" class="bxm"/><text x="196" y="231" class="tw">Item</text><text x="196" y="244" class="sw">up to 6 units · 6 sale prices · barcode · group</text><text x="196" y="253" class="sw">purchase price · accounts · currencies</text>
+    <rect x="186" y="266" width="58" height="40" rx="6" class="bx"/><text x="192" y="281" class="t">Groups</text><text x="192" y="293" class="s">tree with</text><text x="192" y="301" class="s">parents</text>
+    <rect x="249" y="266" width="58" height="40" rx="6" class="bx"/><text x="255" y="281" class="t">Stock</text><text x="255" y="293" class="s">qty per store</text><text x="255" y="301" class="s">+ shelf</text>
+    <rect x="312" y="266" width="58" height="40" rx="6" class="bx"/><text x="318" y="281" class="t">Serials</text><text x="318" y="293" class="s">status · store</text><text x="318" y="301" class="s">warranty</text>
+    <rect x="186" y="314" width="184" height="26" rx="6" class="bx"/><text x="192" y="331" class="t">Catalog images</text><text x="268" y="331" class="s">item → image path</text>
+    <text x="186" y="355" class="s">filters: code · serial · store · model · changed since</text>
+
+    <!-- Vouchers -->
+    <rect x="418" y="14" width="176" height="210" rx="10" class="cl"/><text x="428" y="30" class="clt">VOUCHERS · 13 TYPES</text>
+    <rect x="428" y="38" width="156" height="40" rx="7" class="bxm"/><text x="438" y="55" class="tw">Voucher header</text><text x="438" y="68" class="sw">type · code · date · customer · currency · totals</text>
+    <rect x="428" y="84" width="75" height="40" rx="6" class="bx"/><text x="434" y="99" class="t">Lines</text><text x="434" y="111" class="s">item · qty · price</text><text x="434" y="119" class="s">store · cost centers</text>
+    <rect x="509" y="84" width="75" height="40" rx="6" class="bx"/><text x="515" y="99" class="t">Cheques</text><text x="515" y="111" class="s">bank · branch</text><text x="515" y="119" class="s">due date · amount</text>
+    <rect x="428" y="130" width="75" height="40" rx="6" class="bx"/><text x="434" y="145" class="t">Accounts</text><text x="434" y="157" class="s">GL lines (journal)</text><text x="434" y="165" class="s">debit/credit</text>
+    <rect x="509" y="130" width="75" height="40" rx="6" class="bx"/><text x="515" y="145" class="t">Order status</text><text x="515" y="157" class="s">0 not ready …</text><text x="515" y="165" class="s">4 sent</text>
+    <rect x="428" y="176" width="156" height="36" rx="6" class="bx"/><text x="434" y="191" class="t">Salesman’s prepared delivery</text><text x="434" y="203" class="s">one Voucher, “prepared to the salesman”</text>
+
+    <!-- Reports -->
+    <rect x="418" y="238" width="176" height="128" rx="10" class="cl"/><text x="428" y="254" class="clt">REPORTS &amp; COST CENTERS</text>
+    <rect x="428" y="262" width="156" height="30" rx="6" class="bx"/><text x="434" y="275" class="t">Account statement</text><text x="434" y="286" class="s">per customer, date range, currency</text>
+    <rect x="428" y="296" width="156" height="30" rx="6" class="bx"/><text x="434" y="309" class="t">Last price report</text><text x="434" y="320" class="s">recent prices of one item</text>
+    <rect x="428" y="330" width="156" height="30" rx="6" class="bx"/><text x="434" y="343" class="t">Cost centers</text><text x="434" y="354" class="s">create · cost-center statement</text>
+
+    <!-- relationships -->
+    <path class="ar" d="M138 100 C158 100,160 64,186 62" marker-end="url(#mah)"/>
+    <text x="141" y="92" class="al">codes</text>
+    <path class="ar" d="M138 140 C158 140,160 236,186 236" marker-end="url(#mah)"/>
+    <text x="141" y="178" class="al">codes</text>
+    <path class="ar" d="M370 58 L428 58" marker-end="url(#mah)"/>
+    <text x="378" y="52" class="al">customer_code</text>
+    <path class="ar" d="M370 236 C398 236,404 106,428 104" marker-end="url(#mah)"/>
+    <text x="384" y="172" class="al">item code</text>
+    <path class="ar" d="M370 150 C398 150,404 277,428 277" marker-end="url(#mah)" stroke-dasharray="4 3"/>
+    <path class="ar" d="M370 330 C396 330,404 311,428 311" marker-end="url(#mah)" stroke-dasharray="4 3"/>
+  </svg>
+
+  <div class="grid g4 mt4">
+    <div class="stat"><div class="n">{{N_ENTITIES}}</div><div class="l">record types described in the manual</div></div>
+    <div class="stat"><div class="n">{{N_FIELDS}}</div><div class="l">fields across those records</div></div>
+    <div class="stat"><div class="n">13</div><div class="l">voucher types, from orders to journal entries</div></div>
+    <div class="stat"><div class="n">6<small> + 6</small></div><div class="l">unit fields and sale-price fields per item (meaning not documented)</div></div>
+  </div>
+  <div class="page-foot"><span><b>Shamel Pro API</b> · Capabilities &amp; scope</span><span class="pn"></span></div>
+</section>

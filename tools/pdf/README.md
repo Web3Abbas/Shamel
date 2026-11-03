@@ -6,11 +6,12 @@ Builds the two PDFs in [`docs/pdf/`](../../docs/pdf/):
 |---|---|---|
 | `Bawaba-Visual-Overview.pdf` | `overview/part*.html` + `overview/base.css` | Hand-designed ~20-page visual summary (diagrams, decisions, flows) |
 | `Bawaba-Design-Reference.pdf` | `docs/design/*.md`, `docs/upstream/shamel-api.md` | Every design document rendered with diagrams, contents and bookmarks |
+| `Shamel-API-Scope.pdf` | `scope/` generator + `docs/upstream/scope-data/*.json` | What the Shamel Pro API can do: data map, capability matrix, domains, writes, 30 tool ideas, 30 limits, endpoint reference, data dictionary |
 
 ```bash
 cd tools/pdf
 npm install            # Chromium comes from Playwright (npx playwright install chromium if missing)
-npm run build          # or: npm run overview / npm run reference
+npm run build          # or: npm run overview / npm run reference / npm run scope
 ```
 
 Notes

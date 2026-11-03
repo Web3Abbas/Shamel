@@ -1,0 +1,71 @@
+<section class="page" id="how">
+  <div class="kicker"><span class="section-no">02</span>How the API works</div>
+  <h2 class="page-title">Log in, then headers on every call</h2>
+  <p class="lead">The Shamel Pro Web API is a small HTTP API published by ISCO next to the Shamel accounting program. You log in with a Shamel username and password, receive a token, and send it with your username on every later request. Read filters travel in HTTP headers (the account statements use a form field), and new records are posted as a JSON string inside a form field.</p>
+
+  <svg class="dg" viewBox="0 0 600 150" role="img" aria-label="Login and request flow">
+    <defs><marker id="sah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1F6F7F"/></marker></defs>
+    <style>.h{font-size:9.6px;font-weight:700;fill:#16232A}.s{font-size:7.4px;fill:#5B6B73}.m{font-family:"JetBrains Mono",monospace;font-size:7px;fill:#0B4A57}.w{font-size:9.6px;font-weight:700;fill:#fff}.ws{font-size:7.2px;fill:#BFD6D9}.n{font-size:8px;font-weight:800;fill:#fff}</style>
+    <rect x="4" y="10" width="170" height="130" rx="10" fill="#F6FAFA" stroke="#9FC3C8"/>
+    <circle cx="20" cy="26" r="8" fill="#C9803A"/><text x="20" y="29" text-anchor="middle" class="n">1</text>
+    <text x="34" y="29" class="h">Log in first</text>
+    <text x="14" y="50" class="m">POST /Main/Login</text>
+    <text x="14" y="63" class="s">form fields (x-www-form-urlencoded):</text>
+    <text x="14" y="75" class="m">username, password</text>
+    <text x="14" y="94" class="s">returns AuthResult:</text>
+    <text x="14" y="106" class="m">success, token, userId,</text>
+    <text x="14" y="117" class="m">userCode, userName,</text>
+    <text x="14" y="128" class="m">salesmanCode, userIsDisabled</text>
+
+    <path d="M174 75 L212 75" stroke="#1F6F7F" stroke-width="1.4" marker-end="url(#sah)"/>
+
+    <rect x="214" y="10" width="190" height="130" rx="10" fill="#F6FAFA" stroke="#9FC3C8"/>
+    <circle cx="230" cy="26" r="8" fill="#C9803A"/><text x="230" y="29" text-anchor="middle" class="n">2</text>
+    <text x="244" y="29" class="h">Call any endpoint</text>
+    <text x="224" y="50" class="m">/Customer/GetCustomers</text>
+    <text x="224" y="63" class="s">headers on every call:</text>
+    <text x="224" y="75" class="m">username: …   token: …</text>
+    <text x="224" y="94" class="s">plus optional filter headers, e.g.</text>
+    <text x="224" y="106" class="m">lastupdatedate: 2026-11-01</text>
+    <text x="224" y="117" class="m">getBalance: true</text>
+    <text x="224" y="128" class="s">writes: form field obj = JSON text</text>
+
+    <path d="M404 75 L442 75" stroke="#1F6F7F" stroke-width="1.4" marker-end="url(#sah)"/>
+
+    <rect x="444" y="10" width="152" height="130" rx="10" fill="#0F4C5C"/>
+    <circle cx="460" cy="26" r="8" fill="#C9803A"/><text x="460" y="29" text-anchor="middle" class="n">3</text>
+    <text x="474" y="29" class="w">Get results back</text>
+    <text x="454" y="50" class="ws">reads: a list (or one object)</text>
+    <text x="454" y="63" class="ws">of the documented class</text>
+    <text x="454" y="82" class="ws">writes: Success, ErrorMessage;</text>
+    <text x="454" y="95" class="ws">customers &amp; vouchers: new code</text>
+    <text x="454" y="114" class="ws">any error: HTTP 500</text>
+    <text x="454" y="127" class="ws">“with the error details”</text>
+  </svg>
+
+  <div class="grid g3 mt4 mb4">
+    <div class="card soft"><h4>Filters are headers</h4><p class="tiny muted">Options such as <code>code</code>, <code>itemCode</code>, <code>getBalance</code> or <code>filters</code> (a JSON object) are sent as HTTP headers, not as URL parameters (p. 4–18).</p></div>
+    <div class="card soft"><h4>Writes are form posts</h4><p class="tiny muted">The four write endpoints take a form field named <code>obj</code> holding a JSON string of the record (p. 8–20). The manual says “post parameter” for 7 endpoints in total.</p></div>
+    <div class="card soft"><h4>Dates and sync</h4><p class="tiny muted">“Date format is always yyyy-MM-dd” (p. 4). Customers and items return records “updated after” <code>lastupdatedate</code>; the stock endpoint takes the same header, effect unstated.</p></div>
+    <div class="card soft"><h4>Salesman scoping</h4><p class="tiny muted">Login returns the user’s <code>salesmanCode</code>; customer lists are limited to that salesman unless <code>getAll=true</code> is sent (p. 4, 7).</p></div>
+    <div class="card soft"><h4>Errors</h4><p class="tiny muted">“Any error occurred the service will return Http error 500 with the error details” (p. 4); write results also carry <code>Success</code> and <code>ErrorMessage</code>.</p></div>
+    <div class="card soft"><h4>What the manual leaves out</h4><p class="tiny muted">No base URL, HTTPS, token lifetime, rate limits, paging, versioning or HTTP methods for 23 endpoints. These are in the ISCO question list.</p></div>
+  </div>
+
+  <h3>Example: read one customer with balance</h3>
+  <div class="grid g2">
+    <div class="code"><span class="k">GET</span> /Customer/GetCustomers   <span class="c"># method assumed</span>
+username: api-user
+token: 9f8e…
+code: C1001
+getBalance: true
+getContacts: true</div>
+    <div class="code"><span class="c"># 200, a list of Customer (illustrative values)</span>
+[ { "code": "C1001", "name": "…",
+    "salesman_code": "S07", "price_class": 2.0,
+    "credit_limit": 5000.0, "currency": "NIS",
+    "balance": 1250.5, "notPayedCheqsBalance": 0,
+    "returnedCheqsBalance": 0, "contacts": [ … ], … } ]</div>
+  </div>
+  <div class="page-foot"><span><b>Shamel Pro API</b> · Capabilities &amp; scope</span><span class="pn"></span></div>
+</section>
