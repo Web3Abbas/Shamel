@@ -717,7 +717,8 @@ Event `object` and `previous` are rendered by the `/v1` encoder with the mask of
 - Credentials are owned by the upstream (`shamel_credentials(id, tenant_id, upstream_id, label, salesman_code,
   status, …)`). Storage and custody follow 02 §7.5:
   - **Connector mode:** the gateway stores only HPKE ciphertexts sealed to each connector instance's sealing key
-    (one ciphertext per connector) and learns only `cred_id` and the owner's label. The connector logs in and holds
+    (one ciphertext per connector) and learns only `cred_id`, the owner's label and the non-secret login result
+    (success, `salesman_code`, §6.2). The connector logs in and holds
     the Shamel session. With several connectors per upstream, the session-holder protocol
     (`upstreams[].credential_session_mode`, default `single_holder`) decides which connector instance logs in for a
     given `cred_id`.
@@ -1104,20 +1105,26 @@ must keep; any change to this section must keep every row of this table.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> pending: agent POST /v1/access-requests (subset rule passed)
-  pending --> approved: owner approves on the server (step-up, subset rule re-checked)
-  pending --> rejected: owner rejects / system (requester_inactive)
-  pending --> expired: agents.request_ttl (14 d)
+  [*] --> pending: agent creates request, subset rule passed
+  pending --> approved: owner approves on the server, subset rule re-checked
+  pending --> rejected: owner rejects, or requester inactive
+  pending --> expired: request TTL elapsed
   pending --> cancelled: agent cancels
-  approved --> secret_retrieved: agent claims once (create_token) / owner reveals (owner delivery)
-  approved --> delivery_expired: agents.secret_pickup_window (72 h) elapsed, secret destroyed
-  approved --> [*]: modify_token / revoke_token applied (no secret)
+  approved --> secret_retrieved: agent claims once, or owner delivery
+  approved --> delivery_expired: pickup window elapsed, secret destroyed
+  approved --> [*]: modify or revoke applied, no secret
   secret_retrieved --> [*]
   delivery_expired --> [*]
   rejected --> [*]
   expired --> [*]
   cancelled --> [*]
 ```
+
+Transitions in detail: creation is `POST /v1/access-requests` after the subset rule passed (§10.3); approval needs
+step-up and re-runs the subset rule; the system rejects with reason `requester_inactive`; the request TTL is
+`agents.request_ttl` (14 d); `secret_retrieved` is the agent's one-time claim (`create_token`) or the owner's
+reveal (owner delivery); the pickup window is `agents.secret_pickup_window` (72 h); `modify_token` and
+`revoke_token` end at approval because no secret exists.
 
 API mapping (03 §18.3): `status` ∈ `pending | approved | rejected | expired | cancelled`; the post-approval states are
 `secret.status` = `available` → `claimed` (`secret_retrieved`) | `expired` (`delivery_expired`) |
@@ -1190,27 +1197,37 @@ trigger), `SELECT` own rows, and `EXECUTE` on two `SECURITY DEFINER` functions o
 ```mermaid
 sequenceDiagram
   autonumber
-  participant A as Agent (off-server)
+  participant A as Agent, off-server
   participant DP as Data plane
   participant PG as PostgreSQL
   participant CP as Control plane
-  actor O as Owner (on server)
-  A->>DP: POST /v1/access-requests {type, spec, reason, delivery_public_key?}
-  DP->>DP: agent kind + access_requests:write, caps, subset rule
-  DP->>PG: INSERT access_requests (pending)
-  DP-->>A: 202 areq_… (pending)
-  CP-->>O: e-mail access_request_pending (no secrets)
-  O->>CP: review diff, optional narrowing, step-up, approve
-  CP->>CP: re-check subset rule vs agent's current policy
-  CP->>PG: INSERT tokens + token_policies, UPDATE request approved, admin_event
-  CP->>CP: secret = HPKE.Seal(agent key, aad=areq id) or AES-GCM(pending_secret DEK)
-  CP->>PG: INSERT access_request_secrets (expires = now + 72 h), plaintext zeroized
-  A->>DP: GET /v1/access-requests/areq_… (every ≥ 10 s)
-  DP-->>A: approved, secret.status = available
-  A->>DP: POST /v1/access-requests/areq_…/claim-secret (Idempotency-Key)
-  DP->>PG: claim_access_request_secret() — DELETE … RETURNING (once)
-  DP-->>A: 200 sealed_token (or token), Cache-Control: no-store
+  actor O as Owner, on the server
+  A->>DP: POST request with spec and reason
+  DP->>DP: kind, scope, caps, subset rule
+  DP->>PG: INSERT request, pending
+  DP-->>A: 202, request id, pending
+  CP-->>O: e-mail alert, no secrets
+  O->>CP: review, narrow, step-up, approve
+  CP->>CP: re-check subset rule
+  CP->>PG: INSERT token, mark approved
+  CP->>CP: seal secret to agent key
+  CP->>PG: store sealed secret, 72 h
+  A->>DP: GET status, every 10 s
+  DP-->>A: approved, secret available
+  A->>DP: POST claim-secret
+  DP->>PG: claim function, once
+  DP-->>A: 200 sealed token
 ```
+
+Message details: (1) `POST /v1/access-requests` with body `{type, spec, reason, delivery_public_key?}`; (2) the
+token must be `kind=agent` and hold `access_requests:write`, then caps (§10.2) and the subset rule (§10.3);
+(3) `INSERT access_requests` with `status = pending`; (5) alert `access_request_pending` (§10.6); (7) against the
+agent's *current* compiled policy; (8) one transaction: `tokens`, `token_policies`, request `approved`,
+`admin_events`; (9) `HPKE.Seal(agent key, aad = request id)` or AES-256-GCM under a per-record `pending_secret` DEK;
+(10) `INSERT access_request_secrets` with `expires_at = now + 72 h`, plaintext zeroized; (11)
+`GET /v1/access-requests/{id}`, no faster than every 10 s; (13) `POST /v1/access-requests/{id}/claim-secret` with an
+`Idempotency-Key`; (14) `claim_access_request_secret()`, a single `DELETE … RETURNING`; (15) `sealed_token` (or
+`token` for plain delivery) with `Cache-Control: no-store`.
 
 - **Methods** (02 §13.3, 03 §18.3): `sealed` (preferred; HPKE to the agent's X25519 key, only the agent can open it,
   plaintext exists only in control-plane memory during creation); `plain` (no key: encrypted at rest with purpose
@@ -1247,8 +1264,8 @@ revocation.
   publishable tokens cannot write.
 - Held writes are not available on `/legacy` (`403 approval_not_supported_in_legacy`, 03 §20.3).
 - A batch from an approval-required token becomes **one** approval (`kind: batch`, 03 §15.8).
-- **Caps (decision).** Like access requests (§10.2), pending approvals are bounded per lineage and environment, so
-  a buggy or prompt-injected tool cannot bury the owner's queue:
+- **Caps (decision).** Like access requests (§10.2), approvals are bounded per lineage (a lineage has one
+  environment, which selects the default), so a buggy or prompt-injected tool cannot bury the owner's queue:
 
   | Key | `live` | `test` | On excess |
   |---|---|---|---|
@@ -1257,7 +1274,7 @@ revocation.
 
   The live defaults leave room for a field app whose orders wait between two owner reviews a day. The check runs in
   the transaction that inserts the approval, serialized per lineage (`pg_advisory_xact_lock(hash(lineage_id))`, then
-  counts over the index `(lineage_id, environment, status, created_at)`), so concurrent submissions cannot overshoot.
+  counts over the index `(lineage_id, status, created_at)`), so concurrent submissions cannot overshoot.
   A refused write stores nothing: no approval and no final idempotency state, so the client may resend the same
   `Idempotency-Key` once the queue has room. Reaching the live pending cap raises the owner alert
   `approval_queue_full` (warning, per lineage; requirement on 05 §3.3).
@@ -1578,17 +1595,23 @@ alerts proposed for 05 §3.3: `approval_queue_full`. Compile-time (control plane
 |---|---|
 | 01 Architecture | `Operation.Dimensions` gains `voucher_type`; the registry carries the §4.4 enforcement code per (operation, dimension) and occurrence bits per field. S8 short-circuit rule of §4.3/§9.3 (allow-set-only decisions may skip the upstream call; derived decisions must not). Executor claim/finalise as §11.6. |
 | 01 / 03 | Idempotency namespace, approval visibility and webhook ownership keyed by `lineage_id` (§2.4.5) instead of token id. |
-| 02 Security | This document's §10.3 is the authoritative subset rule (adds `get_all`, browser flag, rate mode, lineage targets, effective-form comparison). Data-role privileges via the `SECURITY DEFINER` functions of §10.4 and §11.6. Per-token IP rules stored in the policy spec (§2.2); `firewall_rules` holds global rules. |
-| 03 API | Add `voucher_types` to the DS map (§4.4) and `/v1/me` `data_scopes`; `@none` member semantics; `omitted_data_scope` section status; `revoke_token` request type; error codes of §16; `orders.status` requires `order_code` for store- and currency-restricted tokens too (03 §12.5 lists customer and salesman only); webhook `*.removed` reason `no_longer_visible` (§4.7). |
-| 05 Operations | `large_unfiltered_request.records` and `stock.bulk_changed.changed_rows`/`store_ids` per token over visible rows; scope-transition rendering (§4.7); `approval.resolved` events generated outside poll streams; `rate_limit_approaching` warning; `error_code` dimension in usage rollups; CLI additions `token explain`, `token diff`, `token create --mirror`, `approval resolve`, `access-request approve --narrow` (exists), `token revoke --cascade`. **The 05 §7.4 example** (`--profile agent-test request-token … --env live`) contradicts the subset rule (a test agent cannot request a live token, 00 §6 "never more than its own token holds"; 02 §13.2; 03 §18.3); it should use a live agent profile or `--env test`. |
+| 02 Security | **Already adopted in the revised 02:** §10.3 here is the authoritative subset rule (02 §13.2); data-role privileges via the `SECURITY DEFINER` functions of §10.4 and §11.6 (02 §12.4); per-token IP rules in the policy spec (02 §10.2); token containment for auto-suspension (02 §10.3, mirrored in §2.4.6). **Still open:** (a) 02 §9.3/§9.10 key the idempotency record and its AAD binding by `token_id`; this document keys the idempotency namespace by `lineage_id` (§2.4.5), so the binding should become `idem/<lineage_id>/<sha256(key)>` (the property "one token can never replay another's" then holds across lineages; a rotation successor is the same tool). (b) The `approval_payload` binding `approval/<id>` should append the column name, as 02 does for webhooks, since `approval_items` has several encrypted columns (§11.2). (c) 02 §9.10 names the approval hash `approved_payload_sha256`; the column here is `approved_upstream_sha256` (hash of the exact upstream bytes) next to `payload_sha256` (canonical request); 02 should use these names. (d) Add the new subset-rule items to 02 §13.2's property list: `public_fields_exposed`, the `public_exposure` approval gate (§10.5), and "agent requests never set `writes_require_approval=false`" (§10.3). |
+| 03 API | Add `voucher_types` to the DS map (§4.4) and `/v1/me` `data_scopes`; `@none` member semantics, including customer-price rows without `customer_code` (§4.4; 03 §2.4 and §9.4); `omitted_data_scope` section status; `revoke_token` request type and its target rule (§10.3); the §18.3 field table: publishable requests always get the PD hides, and `writes_require_approval: false` in a request is `approval_weaker`; violation codes `get_all_not_held`, `browser_weaker`, `requester_inactive`, `public_fields_exposed`; error codes of §16 (incl. `429 approval_limit_reached` on held writes, 03 §15.3/§16); `orders.status` requires `order_code` for store- and currency-restricted tokens too (03 §12.5 lists customer and salesman only); webhook `*.removed` reason `no_longer_visible` (§4.7); I-2 gains §17.3 question 8. |
+| 05 Operations | `large_unfiltered_request.records` and `stock.bulk_changed.changed_rows`/`store_ids` per token over visible rows; scope-transition rendering (§4.7); `approval.resolved` events generated outside poll streams; `rate_limit_approaching` warning; `error_code` dimension in usage rollups; **sandbox approvals** on a separate dashboard page and CLI filter, excluded from `write_approval_pending` (live only) and from live badge counts, digest count only (§11.9); new alert `approval_queue_full` (§11.1); access-request review page with the `public_exposure` banner and acknowledgement checkbox, and `--acknowledge-public` on `access-request approve` (§10.5); `token_auto_suspended` / `token_probe_suspected` per the containment rule (§2.4.6); CLI additions `token explain`, `token diff`, `token create --mirror`, `approval resolve`, `approval list --env test`, sandbox bulk approve/reject, `access-request approve --narrow` (exists), `token revoke --cascade`. **The 05 §7.4 example** (`--profile agent-test request-token … --env live`) contradicts the subset rule (a test agent cannot request a live token, 00 §6 "never more than its own token holds"; 02 §13.2; 03 §18.3); it should use a live agent profile or `--env test`. |
 
 ### 17.2 Reconciliation notes
 
 - **Field name:** `writes_require_approval` (02, 03, here) = the brief's `requires_write_approval`.
 - **Approval state name:** internal `submitted` = 03 §16 `executing`.
 - **IP rule error code:** `ip_blocked` (02 §10.9) supersedes 01 S5's `ip_not_allowed_for_token`.
-- **Revocation bound:** 01 §5.4 (poll 5 s) vs 02 §9.7 (epoch poll 1 s); this document states the bound as
-  `config.poll_interval`, which is 5 s by default and 1 s if 02's polling is adopted.
+- **Revocation bound (resolved):** 01 §5.4 and the revised 02 §9.7 agree on `config.poll_interval` = 5 s (2 s while
+  Valkey is unavailable) plus pub/sub (p99 < 1 s); `bwb:deny` covers PostgreSQL outages (§2.4.2, §9.4).
+- **Snapshots (resolved):** one unfiltered snapshot per coalesced fetch, read only through token-bound views and
+  cursors, policy applied per page (01 §9, 02 §9.10, §4.7 here).
+- **Approval hash names:** 02 §9.10 `approved_payload_sha256` = `approved_upstream_sha256` here (see §17.1, 02 row).
+- **Credential custody:** connector mode keeps credentials sealed to the connectors and the Shamel session on the
+  connector (02 §7.5, a 02 designer decision); 01 §7.1 still describes gateway-held sessions. Authorization is
+  unaffected either way because tokens bind to `cred_id` (§6.1).
 - **Price-class dimension on customers:** kept as in 03 §2.4 (customers outside the allowed classes are hidden),
   because a tool that cannot see a class's prices cannot price that class's customers.
 - **Last-price `customer`:** treated as a code (03 §13.2); if it is a name, the op becomes `X` for customer- and
