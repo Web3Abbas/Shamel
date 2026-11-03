@@ -34,7 +34,7 @@
 | Coverage | **Every** data-plane request (`/v1`, `/legacy`; `/docs` metadata only), every upstream call (raw request and raw response, including Shamel's error text), every background upstream call (webhook polling, approved-write execution), every control-plane action. |
 | Metadata | One compact row per request in **daily range-partitioned** PostgreSQL tables (`audit_events`, `audit_upstream_calls`); sensitive parameters encrypted in the row; searchable values exposed only as keyed **blind indexes**. Above the PostgreSQL ingest rating, `audit.metadata_mode: segment_first` writes metadata straight to encrypted segments in the blob store (§1.12). |
 | Bodies | **Content-addressed objects**: id = truncated `HMAC-SHA256(audit_addr, …)`; **record-aligned content-defined chunking** for large JSON arrays (FastCDC for other large bodies); **zstd** with **trained dictionaries**; **AES-256-GCM** envelopes (purpose `audit_body`, 02 §9.3) under **per-node, per-epoch DEKs sealed to the control plane** (write-only for the data plane, §1.4.5); objects appended to immutable **pack files** in the blob store (filesystem or S3-compatible). |
-| Dedup | Identical bodies and identical chunks are stored once per tenant. Estimated **~60× smaller than raw** and **~9× smaller than compression alone** for the medium workload (§1.7). |
+| Dedup | Identical bodies and identical chunks are stored once per tenant. Estimated **~61× smaller than raw** and **~9× smaller than compression alone** for the medium workload (§1.7). |
 | Pipeline | Asynchronous, non-blocking: bounded ring (events **and** bytes) → per-worker encrypted local **WAL** (dedup-first) → packs + batched `COPY`. Overflow goes to a dedicated spill goroutine and an on-disk **spool**; the request goroutine never writes or fsyncs in `standard` mode. When the disk budget is exhausted the gateway **fails closed** (`503 audit_unavailable`) or, if the owner opted in, records metadata only — never silently. |
 | Retention | Metadata 2 y (90 d hot in PostgreSQL, then **cold Parquet segments** in the blob store), write bodies 2 y, read bodies 90 d, sandbox bodies 14 d; GC by per-object `retain_until` leases; pack compaction. |
 | Caps | Size caps per store with alerts at 70/85/95 %; at the hard cap read bodies are trimmed oldest-first (recorded as a gap), never write bodies or metadata. |
@@ -193,9 +193,10 @@ object_id = HMAC-SHA256(audit_addr, tenant_id ‖ kind ‖ plaintext)[0:16]     
 ```
 
 - **Keyed** (02 §9.3): with a plain SHA-256 anyone holding the blob store or the database could test guesses ("is
-  there a response saying customer X has balance Y?") by hashing candidate plaintexts. The `audit_addr` key is
-  protected by the master key, which a thief of the database/bucket does not have. Adding tenant and kind to the
-  input and truncating to 128 bits are refinements of 02's `blob_id` definition.
+  there a response saying customer X has balance Y?") by hashing candidate plaintexts. `audit_addr` is a data-plane
+  MAC key under KEK_data, which only `master.key` and `data.key` unwrap; neither file is in the database, the
+  bucket or a backup. (The data plane itself holds `audit_addr`; see the residual in §1.10.) Adding tenant and kind
+  to the input and truncating to 128 bits are refinements of 02's `blob_id` definition.
 - **Tenant in the input**: no cross-tenant dedup, so a future SaaS tenant cannot probe another tenant's content
   through storage behaviour.
 - **128-bit truncation**: halves index and manifest size; accidental collision probability at 10⁹ objects is
@@ -234,22 +235,58 @@ index rows); byte-level CDC on JSON (boundaries inside records reduce dedup when
   the operation descriptor.
 - **Training**: singleton job weekly (`audit.compression.dictionaries.retrain_interval`, 168 h) samples up to
   20,000 recent chunks per class (decrypted in memory on the control node), trains a 112 KiB dictionary
-  (`zstd` COVER), keeps it only if it improves the sample ratio by ≥ 5 %. Dictionaries are stored encrypted
-  (`audit_body`) in `audit_zstd_dicts(dict_id, class, created_at, bytes_enc, objects_using)` and never deleted while
-  any object references them (they are tiny). Nodes load new dictionaries via a compiled-config-style notification.
+  (`zstd` COVER), keeps it only if it improves the sample ratio by ≥ 5 %. Dictionaries are stored in
+  `audit_zstd_dicts(dict_id, class, created_at, bytes_enc, objects_using)`, encrypted under the data-plane purpose
+  `audit_dict` (requested from 02, AAD `audit_dict/<dict_id>`), because data nodes must read them to compress; they
+  are never deleted while any object references them (they are tiny). Nodes load new dictionaries via a
+  compiled-config-style notification. **Residual:** a dictionary holds frequent byte sequences of past bodies
+  (mostly JSON keys and repeated values, not whole records), so it is the one piece of past audit content a data
+  node can read; owners who do not accept that set `audit.compression.dictionaries.enabled: false` (≈ 2× more
+  stored body bytes for small chunks).
 - The dictionary changes the compressed bytes, not the object id (computed over plaintext), so retraining never
   breaks dedup.
+- **Codec lifecycle** (klauspost/compress): one long-lived `*zstd.Encoder` per (dictionary id, level), created
+  once with `WithEncoderDict`, `WithWindowSize(256 KiB)` (the maximum chunk size, §1.4.3) and
+  `WithLowerEncoderMem(true)`, and used only through `EncodeAll`, which is safe for concurrent use; the same for
+  decoders (`DecodeAll`, dictionaries registered with `WithDecoderDicts`, `WithDecoderMaxWindow(256 KiB)`). No
+  per-object `NewWriter`/`NewReader`, whose window buffers would dominate CPU and GC at > 1.5 M objects/day.
+  Encoders for retired dictionaries are dropped when the new one is loaded. The spool's level-1 encoder and the
+  snapshot codec (01 §9.4) follow the same pattern. CI runs a `-benchmem` gate on the object-encode path
+  (hash → compress → seal for an 8 KiB chunk: ≤ 2 allocations, no allocation proportional to the window).
 
-#### 1.4.5 Encryption
+#### 1.4.5 Encryption (write-only for the data plane)
 
-- Each object is sealed with the standard envelope of 02 §9.3: purpose `audit_body`, AES-256-GCM with a
-  per-message HKDF subkey (so the random-nonce limit per key does not apply at audit volumes), AAD binding
-  `blob/<object_id>`. The envelope adds 61 bytes (version, key id, salt, nonce, tag).
-- `audit_body` key versions rotate monthly and automatically (02 §9.6); the envelope's key id identifies the version.
-  Rotation never rewrites object ciphertext. A version becomes `decrypt_only` and is destroyed only when the GC
-  reports zero live objects for it (`audit_blobs.key_version` is counted per version).
-- No crypto-shredding by key destruction before that point: a chunk created in month 1 may be referenced by a write
-  record kept two years. Deletion is by GC (§1.6).
+Audit content is encrypted so that the plane that writes it cannot read it back (02 §9.2 "write-only audit"):
+
+- **Epoch DEKs.** Each data-plane node generates a random 256-bit DEK per epoch (`security.audit_epoch`, 1 h, or
+  earlier after 64 GiB of output). It HPKE-seals the DEK to the control plane's current `audit_seal` public key
+  (`info = "bawaba/audit-epoch/v1"`, `aad = epoch_key_id ‖ node_id`), inserts the sealed DEK into
+  `audit_epoch_keys(id, tenant_id, node_id, seal_key_id, sealed_dek, created_at, not_after)` and also writes it into
+  the WAL segment header, so an epoch that starts during a PostgreSQL outage is still recoverable (replay inserts
+  the key row before any row that uses it). The plaintext DEK lives only in memory and is zeroized when the epoch
+  ends. Cost: one HPKE seal per node per epoch; per object it is plain AES-GCM.
+- **Objects** are sealed with the envelope of 02 §9.3: purpose `audit_body`, AES-256-GCM with a per-message HKDF
+  subkey of the epoch DEK, envelope key id = the `audit_epoch_keys` id, AAD binding `blob/<object_id>`. The
+  envelope adds 61 bytes (version, key id, salt, nonce, tag). **Metadata columns** (`params_enc`, inline bodies,
+  `stage_timings`) use purpose `audit_meta` under the same epoch DEK, AAD `audit_event/<request_id>/<column>`.
+- **Reading** happens only in the control plane: it holds the `audit_seal` private keys (wrapped by KEK_control,
+  which only `master.key` unwraps), opens an epoch DEK on first use and caches it in memory for the reader,
+  dictionary training, segment writing and restore-drill jobs.
+- **Dedup never decrypts.** Object ids are keyed HMACs over plaintext the worker already holds; the dedup query
+  reads only `id` and `retain_until`; a manifest's lease cascade (§1.5.1 step 7) uses the chunk ids the worker has
+  just computed from the body in hand, never a stored manifest.
+- **Rotation.** Epoch DEKs rotate every epoch; no ciphertext is ever rewritten. The `audit_seal` key pair rotates
+  monthly and automatically (`security.rotation.audit_seal`, 02 §9.6): nodes seal from their next epoch to the new
+  public key; the old private key becomes `decrypt_only` and is destroyed when no live epoch key is sealed under it.
+- **Destruction.** The GC (§1.6.2) destroys an epoch key only when (a) its epoch ended more than
+  `audit_retention.metadata` ago (inline bodies and `params_enc` in hot partitions and cold segments use it) and
+  (b) no live pack lists it in `audit_packs.epoch_key_ids` (the set of epoch key ids of the objects in the pack;
+  consolidation and compaction copy ciphertext verbatim and carry the ids along). No crypto-shredding before that
+  point: a chunk created in month 1 may be referenced by a write record kept two years. Deletion is by GC (§1.6).
+- **Other node-local files.** The overflow spool holds raw, unprocessed events and therefore uses the data-plane
+  purpose `audit_spool` (02 §9.2); WAL records are framed with `audit_spool` too (so replay after a restart needs no
+  past epoch DEK), but their bodies and sensitive columns inside are already sealed under the epoch DEK. Capture
+  temp files (§1.5.1) use a random per-file key held only in memory and are deleted when processed.
 
 #### 1.4.6 Pack files
 
@@ -259,7 +296,7 @@ Objects are therefore appended to **packs**:
 ```
 packs/<tenant>/<class>/<yyyy>/<mm>/<pack_id>.bwp
   header  : "BWP1", pack_id, node_id, created_at
-  records : [object_id 16][kind 1][dict_id 2][len 4][02 §9.3 envelope: version, key id, salt, nonce, ciphertext, tag]
+  records : [object_id 16][kind 1][dict_id 2][len 4][02 §9.3 envelope: version, epoch key id, salt, nonce, ciphertext, tag]
   footer  : index of (object_id, offset, len) + SHA-256 of the pack   -- allows rebuilding audit_blobs without PostgreSQL
 ```
 
@@ -268,11 +305,12 @@ packs/<tenant>/<class>/<yyyy>/<mm>/<pack_id>.bwp
 - Each audit worker owns one open pack, sealed at 32 MiB or 60 s (`audit.packs.seal_bytes`, `seal_interval`). With
   the FS backend the open pack is written in place and fsynced per batch; with S3 it is staged in the WAL directory
   and uploaded on seal.
-- `audit_blobs(id, tenant_id, pack_id, offset, len, raw_len, kind, dict_id, key_version, class, durable, retain_until)` indexes
-  objects; `durable = false` while the pack is only staged locally. Other nodes treat non-durable objects as misses
-  (they store their own copy), so cross-node references never point at another node's local disk.
+- `audit_blobs(id, tenant_id, pack_id, offset, len, raw_len, kind, dict_id, class, durable, retain_until)` indexes
+  objects (in `postgres` metadata mode, §1.12); `durable = false` while the pack is only staged locally. Other nodes
+  treat non-durable objects as misses (they store their own copy), so cross-node references never point at another
+  node's local disk.
 - `audit_packs(pack_id, tenant_id, class, backend_key, state staged|sealed|uploaded|compacting|deleted, bytes_total,
-  bytes_live, sealed_at)`.
+  bytes_live, epoch_key_ids uuid[], sealed_at)`; `epoch_key_ids` drives epoch-key destruction (§1.4.5).
 - **Consolidation**: hourly, small sealed packs (< 8 MiB) of the same class and week are merged into ~128 MiB packs
   by copying ciphertext verbatim (the AAD binds the object id, not its location).
 
@@ -280,8 +318,9 @@ packs/<tenant>/<class>/<yyyy>/<mm>/<pack_id>.bwp
 
 ```mermaid
 flowchart LR
-  s16["S16 audit emit<br/>(request goroutine)"] -->|"TryEnqueue O(1)"| ring["bounded MPSC ring<br/>65,536 events / node"]
-  s16 -.->|"ring full"| spool["overflow spool<br/>(raw events, encrypted, fsync)"]
+  s16["S16 audit emit<br/>(request goroutine)"] -->|"TryEnqueue O(1)"| ring["bounded MPSC ring<br/>65,536 events and 256 MiB / node"]
+  s16 -.->|"ring full: non-blocking send"| sp["spill goroutine<br/>(bounded channel)"]
+  sp --> spool["overflow spool<br/>(raw events, audit_spool, group fsync)"]
   ring --> w["audit workers (N)<br/>hash · chunk · dedup · compress · encrypt"]
   spool -->|"replay when drained"| w
   w -->|"group commit 100 ms"| wal["per-worker WAL segments<br/>(metadata + new objects only)"]
@@ -296,18 +335,25 @@ flowchart LR
 
 #### 1.5.1 Stages
 
-1. **Emit (request goroutine, S16).** Builds the event from references to buffers that already exist (the response
-   writer's buffer; the **capture buffer** into which the streaming decoder tees the raw upstream bytes as they
-   arrive — pooled memory up to `audit.capture_mem_max` (4 MiB) per body, spilling beyond that to an encrypted temp
-   file in the WAL directory, so a 50 MB list never pins heap); no copy. `ring.TryEnqueue`. Cost ≤ 20 µs
-   (01 §10.1).
+1. **Emit (request goroutine, S16).** Builds the event from the bodies that already exist: the response writer's
+   buffer and the **capture buffer** into which the streaming decoder tees the raw upstream bytes as they arrive
+   (pooled memory up to `audit.capture_mem_max`, 4 MiB, per body, spilling beyond that to an encrypted temp file in
+   the WAL directory, so a 50 MB list never pins heap). Bodies ≤ `audit.copy_max` (64 KiB) are **copied** into a
+   pooled event buffer, so the request's buffers return to their pools at once; larger pooled buffers are
+   **reference-counted** and released by the worker when it is done (temp files are deleted then). The event's
+   **charge** = copied bytes + referenced bytes + temp-file bytes. `ring.TryEnqueue` succeeds only if both
+   `audit.ring_size` (65,536 events) and `audit.ring_max_bytes` (256 MiB of charge) have room; otherwise the event
+   goes to the spill path (§1.5.3) by a non-blocking channel send. Cost ≤ 20 µs (01 §10.1). The request goroutine
+   never writes to disk or waits for an fsync in `standard` mode.
 2. **Workers** (`audit.workers`, default `GOMAXPROCS/2`) take events and, per body: strip framing → choose chunking →
    compute object ids → **dedup check** in order: (a) worker-local and node-shared LRU of recently stored ids
    (`audit.seen_cache`, 1 M entries ≈ 48 MiB), (b) batched `SELECT id, retain_until FROM audit_blobs WHERE id = ANY($1)`
    for misses → only unseen objects are compressed and encrypted.
-3. **WAL append.** The worker appends one WAL record per event: encrypted metadata row + manifests + **only new
-   objects** (already compressed+encrypted, so the WAL holds no plaintext and needs no second compression). WAL
-   segments (`audit.wal.dir`, 64 MiB each) are fsynced by group commit every `audit.wal.sync_interval` (100 ms).
+3. **WAL append.** The worker appends one WAL record per event: the metadata row (its sensitive columns already
+   sealed under the epoch DEK, the record framed with `audit_spool`, §1.4.5) + manifests + **only new objects**
+   (already compressed and sealed, so the WAL holds no plaintext and needs no second compression). WAL segments
+   (`audit.wal.dir`, 64 MiB each, header with `boot_id` and the sealed epoch DEKs in use) are fsynced by group
+   commit every `audit.wal.sync_interval` (100 ms).
 4. **Pack + index.** New objects are appended to the worker's open pack; `audit_blobs` rows are inserted with
    `ON CONFLICT DO NOTHING` in the same transaction as step 5.
 5. **COPY.** Metadata rows are copied every 250 ms or 1,000 rows (01 §10.2); a batch commits only after its new
@@ -317,14 +363,15 @@ flowchart LR
    On S3, staged packs are uploaded on seal, then marked `durable`.
 7. **Lease extension.** When a dedup hit references an object whose cached `retain_until` is below the new
    requirement, the batch issues `UPDATE audit_blobs SET retain_until = $d WHERE id = ANY($ids) AND retain_until < $d`
-   (at most once per object per day thanks to the cache); for manifests the extension cascades to their chunks.
+   (at most once per object per day thanks to the cache); for manifests the extension cascades to their chunks,
+   whose ids the worker has just computed from the body in hand (no stored manifest is read or decrypted).
 
 #### 1.5.2 Durability modes
 
 | Mode (`audit.durability`) | Behaviour | Crash exposure |
 |---|---|---|
 | `standard` (default) | Request returns before its audit record is on disk. | Events still in the ring plus ≤ 100 ms of un-fsynced WAL. Not silent: each node writes `(boot_id, last_durable_seq, ts)` into its WAL header; on restart after an unclean exit it inserts an `audit_gaps` row covering `[ts of last durable event, restart]` and raises the `audit_gap_detected` alert. |
-| `strict` | Every event takes the spool path: S16 appends the raw event (zstd level 1) to the spool with a 2 ms group commit and S17 sends the response only after that fsync (≈ 0.5–3 ms on SSD, more for multi-MB bodies); workers then consume the spool as usual. | None beyond disk loss. |
+| `strict` | Every event takes the spool path: S16 hands the event to the spill goroutine, which appends it (zstd level 1, `audit_spool`) with a 2 ms group commit, and S17 sends the response only after that fsync is confirmed (≈ 0.5–3 ms on SSD, more for multi-MB bodies); workers then consume the spool as usual. Waiting for the fsync is the point of this mode. | None beyond disk loss. |
 | Writes (always) | Synchronous write-ahead `audit_writes` insert before contacting Shamel (01 §6.4). | None. |
 
 `standard` is the default because the exposure is bounded, detected and limited to reads; owners who want
@@ -334,22 +381,26 @@ zero-loss read auditing switch to `strict` at a small latency cost.
 
 | Condition | Behaviour | Signals |
 |---|---|---|
-| Ring has space | Normal path. | `bawaba_audit_queue_depth` |
-| Ring full (workers CPU-bound) | S16 appends the **raw** event (zstd level 1, `spool` key) to the overflow spool synchronously (≈ 50–200 µs + group fsync); workers drain the spool after the ring. | `bawaba_audit_events_total{result="spilled"}` |
+| Ring has space (events and bytes) | Normal path. | `bawaba_audit_queue_depth`, `bawaba_audit_ring_bytes` |
+| Ring full by count or by `ring_max_bytes` (workers CPU-bound, or very large bodies) | S16 hands the event to the **spill goroutine** through a bounded channel (`audit.spill_queue`: 4,096 events or 64 MiB of charge) with a non-blocking send and returns. The spill goroutine appends the **raw** event (zstd level 1, `audit_spool`) to the overflow spool with group fsync and releases the event's buffers; workers drain the spool after the ring. | `bawaba_audit_events_total{result="spilled"}` |
+| Spill channel also full | The `audit.on_spool_full` policy applies to this event at once: `reject` → this request gets `503 audit_unavailable`; `metadata_only` → its metadata row is kept, bodies dropped, `bodies_dropped` flag, `audit_gaps` row. Alert `audit_unavailable`. | alert |
 | PostgreSQL or blob store slow/down | WAL and staged packs grow on local disk; requests unaffected. Dedup degrades to the local cache (more new objects written). | `bawaba_audit_lag_seconds`, `bawaba_audit_wal_bytes` |
-| WAL + spool ≥ 50 % of `audit.spool_max_bytes` (10 GiB) | Continue; alert `audit_spool_filling` (warning), ≥ 80 % critical. | alert |
-| WAL + spool = 100 % | `audit.on_spool_full: reject` (default) → new requests get `503 audit_unavailable` (fail closed, 01 S16). `metadata_only` → metadata rows are kept, bodies dropped, rows flagged `bodies_dropped`, `audit_gaps` row written. Alert `audit_unavailable` (critical). | alert |
+| WAL + spool + capture temp files ≥ 50 % of `audit.spool_max_bytes` (10 GiB, 02 §16) | Continue; alert `audit_spool_filling` (warning), ≥ 80 % critical. | alert |
+| WAL + spool + capture temp files = 100 % | `audit.on_spool_full: reject` (default) → new requests get `503 audit_unavailable` (fail closed, 01 S16). `metadata_only` → metadata rows are kept, bodies dropped, rows flagged `bodies_dropped`, `audit_gaps` row written. Alert `audit_unavailable` (critical). | alert |
 | Local disk itself full | Same as 100 % (disk-free check every 5 s with a 2 GiB reserve). | alert |
 | Any of the above while PostgreSQL or the blob store is unavailable | **Writes fail closed** (`503 audit_unavailable`, 02 §16) even though their `audit_writes` row could be stored; reads continue through WAL/spool as above. | alert |
 
 Sizing: at the medium workload the WAL receives ≈ 25 KiB/s (dedup-first). If PostgreSQL and the blob store are both
-down, 10 GiB holds ≈ 4 days with a warm dedup cache and ≈ 20 h in the worst case (no dedup hits, ~12 GB/day of
-compressed bodies, §1.7).
+down, 10 GiB holds ≈ 4 days with a warm dedup cache and ≈ 20 h in the worst case (no dedup hits, ~12.5 GB/day of
+compressed bodies, §1.7). Memory: the ring's byte bound caps pinned body memory at 256 MiB plus 64 MiB in the spill
+channel per node, whatever the body sizes; node sizing reserves ≈ 512 MiB of the `GOMEMLIMIT` budget (01 §10.2) for
+audit buffers, including capture buffers of requests in flight.
 
 #### 1.5.4 Recovery and replay
 
-On start each worker replays its WAL from the checkpoint: metadata via `INSERT … ON CONFLICT (ts, request_id) DO
-NOTHING` (instead of `COPY`), objects re-appended (duplicates in packs become garbage for compaction, index inserts
+On start each worker replays its WAL from the checkpoint: sealed epoch DEKs from the segment headers via
+`INSERT … ON CONFLICT (id) DO NOTHING` into `audit_epoch_keys` first, then metadata via `INSERT … ON CONFLICT (ts,
+request_id) DO NOTHING` (instead of `COPY`), objects re-appended (duplicates in packs become garbage for compaction, index inserts
 are idempotent). The overflow spool is replayed through the normal worker path. Spool and WAL files carry a format
 version; readers support N−1 (§9.6).
 
@@ -371,7 +422,9 @@ Each object carries `retain_until = max over referencing records (record date + 
 and extended on reuse (§1.5.1 step 7). A record outliving its bodies (metadata 2 y, read bodies 90 d) shows
 `body_expired` in queries.
 
-#### 1.6.2 GC and compaction (singleton, daily, `audit.blob_gc.schedule` = `23 4 * * *`)
+#### 1.6.2 GC and compaction (control-node singleton, daily, `audit.blob_gc.schedule` = `23 4 * * *`)
+
+This describes the `postgres` metadata mode; `segment_first` replaces steps 1 and 5 with a mark phase (§1.12).
 
 1. `DELETE FROM audit_blobs WHERE retain_until < current_date - audit.blob_gc.grace(7 d) RETURNING pack_id, len`
    in batches; decrement `audit_packs.bytes_live`.
@@ -383,6 +436,8 @@ and extended on reuse (§1.5.1 step 7). A record outliving its bodies (metadata 
    segments older than `metadata` are deleted.
 5. The 7-day grace makes the reuse race safe: a writer only trusts a cached object if its `retain_until ≥ today + 1`,
    otherwise it extends via `UPDATE … RETURNING`; zero rows (already deleted) → it stores the object again.
+6. Epoch keys that satisfy the destruction rule of §1.4.5 are destroyed (row deleted after the sealed DEK is
+   overwritten); `audit_seal` private keys with no live epoch key left are destroyed (02 §9.6).
 
 **Policy changes**: increasing a retention value triggers `bawaba audit retention reapply` (background mark phase over
 hot partitions and cold segments within the new window, extending `retain_until`); decreasing applies to new
@@ -417,10 +472,19 @@ Decimal units (1 KB = 1,000 B). 1,000 req/min = **1,440,000 req/day** = 525.6 M 
 | E writes (milestone 2) | 1 % | 14,400 | 2.5 KB | 3.3 KB (req + resp) | 1 |
 | F rejected before upstream (401/403/404/422/429) | 4 % | 57,600 | 0.4 KB | — | 0 |
 
-Change rate assumption for dedup: between two consecutive fetches of the same list, ≈ 2 % of its chunks change
-(≈ 1.3 of 63 chunks per 1 MB list); 20 % of page-1 responses differ from the previous identical query; 50 % of
-single-entity responses and 75 % of report/master-data responses are repeats of an earlier identical response;
-cursor pages are 15 % new bytes (page boundaries shift on inserts; CDC re-synchronises inside each page).
+Chunk geometry (§1.4.3): a 1 MB raw list of ≈ 2,000 records (≈ 500 B each) is cut into ≈ 125 chunks of 16 records
+(≈ 8 KB); a 60 KB client page of 100 records into ≈ 6 chunks of ≈ 9.6 KB. Manifest = 20 B per entry (16-byte id +
+length), so ≈ 2.5 KB for a 1 MB list.
+
+Change rate assumption for dedup: 30 % of consecutive fetches of the same list are byte-identical and the other 70 %
+change ≈ 3.6 chunks, i.e. on average ≈ 2 % of a list's chunks (≈ 2.5 of 125) change between consecutive fetches;
+20 % of page-1 responses differ from the previous identical query; 50 % of single-entity responses and 75 % of
+report/master-data responses are repeats of an earlier identical response; cursor pages are 15 % new bytes (page
+boundaries shift on inserts; CDC re-synchronises inside each page). Compression ratios: small bodies and 8–10 KB
+chunks ≈ 2.5× with zstd alone and 5–8× with a dictionary; whole large lists ≈ 8× with zstd alone (§1.4.4).
+
+Blocked traffic (§1.2) is outside this mix: each blocked request adds one ≈ 400 B metadata row with its error body
+inline, so a sustained 100 blocked req/s from IPs under the aggregation threshold would add ≈ 3.5 GB/day.
 
 #### 1.7.2 Metadata per request
 
@@ -439,31 +503,34 @@ cursor pages are 15 % new bytes (page boundaries shift on inserts; CDC re-synchr
 
 | Class | Raw | zstd only | Final (dedup + record CDC + dictionaries) | How the final figure arises |
 |---|---|---|---|---|
-| A | 3.60 GB | 0.72 GB | 0.36 GB | 50 % repeats; ≈ 5× compression with dictionaries |
-| B upstream | 50.40 GB | 6.30 GB | 0.22 GB | 50,400 calls × 1.3 new 16 KB chunks ÷ 8 = 0.13 GB + manifests (2.5 KB, unique 70 % of the time) 0.09 GB |
+| A | 3.60 GB | 1.44 GB | 0.36 GB | 50 % repeats → 1.80 GB new ÷ 5 (dictionaries) |
+| B upstream | 50.40 GB | 6.30 GB | 0.22 GB | 50,400 calls × 2.5 new 8 KB chunks ÷ 8 = 0.13 GB + manifests (2.5 KB, unique for the 70 % of calls that changed) 0.09 GB |
 | B client | 4.32 GB | 0.54 GB | 0.03 GB | 20 % changed × one 9.6 KB chunk ÷ 6 + manifests |
-| C | 17.28 GB | 2.88 GB | 0.47 GB | 15 % new bytes ÷ 6 + manifests |
+| C | 17.28 GB | 2.88 GB | 0.46 GB | 15 % new bytes ÷ 6 = 0.43 GB + manifests (≈ 165 B, unique for half of the pages) 0.02 GB |
 | D | 10.08 GB | 1.26 GB | 0.32 GB | 25 % new ÷ 8 |
 | E | 0.08 GB | 0.02 GB | 0.02 GB | no dedup assumed (request bodies live in `audit_writes`) |
-| F | 0.02 GB | 0.01 GB | ≈ 0 | error bodies are near-identical |
-| **Total** | **85.8 GB** | **11.7 GB** | **1.41 GB** | **61× vs raw, 8.3× vs compression only** |
+| F | 0.02 GB | 0.01 GB | ≈ 0 | each error envelope carries its own `request_id`, so it does not dedup; ≈ 150 B sealed, stored inline in the row (§1.4.1) |
+| **Total** | **85.8 GB** | **12.45 GB** | **1.41 GB** | **≈ 61× vs raw, ≈ 8.8× vs compression only** |
 
-Overheads on top: ≈ 1.46 M new objects/day × ≈ 85 B framing (pack record header + 02 §9.3 envelope) = 0.12 GB/day
-(blob store) and × ≈ 120 B
-`audit_blobs` row+index = 0.18 GB/day (PostgreSQL). The dominant saving is list polling (class B): the same 1 MB list
-fetched 1,680 times a day costs 1.7 GB raw but ≈ 4–8 MB stored.
+New objects per day: A 720,000 (client + upstream response of each new request) · B upstream 161,280 (126,000
+chunks + 35,280 manifests) · B client 28,800 · C ≈ 414,000 (270,000 chunks + ≈ 144,000 manifests) · D 144,000 ·
+E 43,200 → **≈ 1.51 M objects/day** (≈ 1.05 per request). Overheads on top: × ≈ 85 B framing (pack record header +
+02 §9.3 envelope) = 0.13 GB/day (blob store) and × ≈ 120 B `audit_blobs` row+index = 0.18 GB/day (PostgreSQL). The
+dominant saving is list polling (class B): the same 1 MB list fetched 1,680 times a day costs 1.7 GB raw but
+≈ 4–8 MB stored.
 
 #### 1.7.4 Steady state with default retention
 
 | Store | Content | Size |
 |---|---|---|
-| PostgreSQL | hot metadata 90 d (65 GB) + `audit_blobs` (126 M read objects + 32 M write objects × 120 B ≈ 19 GB) + `audit_writes` 2 y (≈ 16 GB) + webhooks/usage/config (≈ 5 GB) | **≈ 105 GB** |
-| Blob store | read bodies 90 d (≤ 90 × 1.51 GB ≈ 136 GB, less with cross-day dedup) + write bodies 2 y (≈ 10 GB) + cold metadata (46 GB) | **≈ 190 GB** |
-| **Total** | | **≈ 0.3 TB** |
-| Same retention, no optimisation (raw bodies, all metadata in PostgreSQL) | 85.7 GB × 90 + 0.06 TB + 0.53 TB | ≈ 8.3 TB (**≈ 28×**) |
-| Compression only | 11.7 GB × 90 + 0.53 TB | ≈ 1.6 TB (**≈ 5×**) |
+| PostgreSQL | hot metadata 90 d (65 GB) + `audit_blobs` (132 M read objects + 32 M write objects × 120 B ≈ 20 GB) + `audit_writes` 2 y (≈ 16 GB) + webhooks/usage/config (≈ 5 GB) | **≈ 106 GB** |
+| Blob store | read bodies 90 d (≤ 90 × 1.52 GB ≈ 137 GB, i.e. 1.39 GB bodies + 0.13 GB framing per day; less with cross-day dedup) + write bodies 2 y (730 × 0.024 GB ≈ 17 GB) + cold metadata (46 GB) | **≈ 200 GB** |
+| **Total** | | **≈ 0.31 TB** |
+| Same retention, no optimisation (raw bodies, all metadata in PostgreSQL) | 85.8 GB × 90 + 0.06 TB + 0.53 TB | ≈ 8.3 TB (**≈ 27×**) |
+| Compression only | 12.45 GB × 90 + 0.015 TB (write bodies) + 0.53 TB | ≈ 1.7 TB (**≈ 5×**) |
 
-Heavy load scales linearly in metadata and sub-linearly in bodies (more polling of the same lists dedups better).
+Heavy load scales linearly in metadata and sub-linearly in bodies (more polling of the same lists dedups better);
+the PostgreSQL ingest ceiling that linear metadata growth eventually reaches is quantified in §1.12.
 `bawaba audit stats` reports the live figures (raw vs stored bytes per class, dedup hit ratio, per-day growth) so the
 owner can check these assumptions against reality.
 
@@ -475,16 +542,19 @@ owner can check these assumptions against reality.
   may have several segment objects. Format: Parquet (`parquet-go`), one file each for `audit_events` and
   `audit_upstream_calls` rows, sorted by (`token_id`, `ts`) resp. (`ts`, `request_id`), zstd column compression,
   then each file encrypted in 64 KiB segments, each an `audit_meta` envelope (02 §9.3) bound to
-  `segment/<object_id>/<n>`.
-- Stored as a `meta`-class object; catalogued in `audit_segments(day, tenant_id, object_id, rows, sha256,
-  token_ids int[], op_ids smallint[], subject_bloom bytea (1 % FPR), request_id_bloom bytea (only if request ids
-  are not time-ordered), min_request_id, max_request_id, chain_heads)`.
+  `segment/<object_id>/<n>`. Segments are written by the control node under its own epoch DEK, sealed to
+  `audit_seal` like any node's (§1.4.5); the rows' already-sealed columns (`params_enc`, inline bodies) are copied
+  as ciphertext, never re-encrypted.
+- Stored as a `meta`-class object; catalogued in `audit_segments(day, tenant_id, node_id NULL, hour NULL, object_id,
+  rows, sha256, token_ids int[], op_ids smallint[], status_summary jsonb, subject_bloom bytea (1 % FPR),
+  min_request_id, max_request_id, chain_heads)` (`node_id`/`hour` are used by `segment_first` segments, §1.12).
 - Segments are written **immediately** after the day closes even though the PostgreSQL partition stays for 90 days:
   the segment is the long-term copy and the unit of backup (§9.1); the partition is only a query accelerator.
   The partition is dropped only after the segment has been re-read and its row count and chain heads verified.
 - Querying cold data: the control plane selects candidate segments by day range, `token_ids`, `op_ids` and the
   subject Bloom filter, decrypts them into a temporary directory under `/var/lib/bawaba/tmp` (0700) and scans with
-  predicate pushdown. A request-id lookup maps directly to one day. Typical cold query: seconds per day scanned.
+  predicate pushdown. A request-id lookup maps directly to one day (UUIDv7 timestamp) and is pruned further by
+  `min_request_id`/`max_request_id`. Typical cold query: seconds per day scanned.
 - `bawaba audit rehydrate --from --to` reloads segments into temporary partitions for heavy investigations.
 
 ### 1.9 Integrity chain
@@ -504,14 +574,30 @@ latest anchors in the owner's daily security digest. Implementation in the pipel
 ### 1.10 Querying, viewing, exporting (control plane only)
 
 **Separation.** Search, decryption and export code lives in `internal/audit/reader`, importable only by
-`internal/controlplane` (enforced by `tools/archcheck`). The `bawaba_data` role has `INSERT` on audit tables,
-column-level `SELECT (id, retain_until)` and `UPDATE (retain_until)` on `audit_blobs` (an addition to 02 §12.4,
-needed for dedup), and nothing else; `bawaba_control`
-has `SELECT`. In topology C, data nodes get write-only blob credentials where the backend supports it (S3 bucket
-policy: `PutObject` only on `packs/`), so a compromised data node cannot read stored bodies. Jobs that must read
-audit content — dictionary training, cold-segment writing, pack consolidation/compaction, GC and restore drills —
-therefore run as singleton workers on the **control node**, which holds the read credentials and the
-`bawaba_control` role.
+`internal/controlplane` (enforced by `tools/archcheck`). The data plane can write audit content but not read it
+back; three independent layers enforce this:
+
+| Layer | Data plane | Control plane |
+|---|---|---|
+| Keys (02 §9.2) | only the DEK of its **current** epoch (memory), plus `audit_addr`, `audit_index`, `audit_chain`, `audit_spool`, `audit_dict` | `audit_seal` private keys → every epoch DEK |
+| PostgreSQL (02 §12.4) | `bawaba_data`: `INSERT` on audit tables and `audit_epoch_keys`; column-level `SELECT (id, retain_until)` and `UPDATE (retain_until)` on `audit_blobs` (dedup); `SELECT` on `audit_zstd_dicts` and the `audit_seal` public keys; nothing else (full list §10) | `bawaba_control`: `SELECT` on everything audit |
+| Blob store | topology C: write-only credentials where the backend supports it (S3 bucket policy: `PutObject` only on `packs/`, read on `idx/` for `segment_first`, §1.12) | read/write |
+
+What this means per topology:
+
+- **Topology C** (data nodes on their own hosts): a compromised data node holds neither the keys nor the bucket or
+  database read rights for stored audit content.
+- **Topologies A/B** (one host, filesystem blob store and WAL on the same disk, readable by the gateway user): the
+  bytes are readable but not decryptable. A data-plane compromise at time T exposes only (1) the bodies of the
+  current epoch, which the node processes in plaintext anyway; (2) spooled events not yet processed (`audit_spool`,
+  normally an empty backlog) and capture temp files (per-file keys in memory); (3) the plaintext-safe columns of
+  WAL records not yet checkpointed (normally seconds of data); and (4) the ability to test whether an exact guessed
+  plaintext was stored, because the data plane holds `audit_addr` and the dedup `SELECT`. Bodies and `params_enc`
+  of earlier epochs and of other nodes stay unreadable (02 §9.2).
+
+Jobs that must read audit content (dictionary training, cold-segment writing, pack consolidation/compaction, GC
+and restore drills) therefore run as singleton workers on the **control node**, which holds the `audit_seal` keys,
+the read credentials and the `bawaba_control` role.
 
 **Query interface.** Admin API `POST /admin/v1/audit/search` (used by the dashboard and `bawaba audit search`):
 
@@ -546,18 +632,24 @@ with the SHA-256 of the output. Exports never leave the server by themselves.
 # bootstrap (/etc/bawaba/bawaba.yaml)
 audit:
   durability: standard              # standard | strict
-  ring_size: 65536
+  metadata_mode: postgres           # postgres | segment_first (§1.12)
+  ring_size: 65536                  # events
+  ring_max_bytes: 256MiB            # body bytes charged to queued events (copied + referenced + temp files)
+  copy_max: 64KiB                   # bodies up to this size are copied into the event; larger ones ref-counted
+  spill_queue: { events: 4096, max_bytes: 64MiB }   # ring full → spill goroutine; full → on_spool_full
   workers: 0                        # 0 = GOMAXPROCS/2
   seen_cache: 1000000               # object ids
   capture_mem_max: 4MiB             # raw upstream body capture in memory; beyond → encrypted temp file
   wal:   { dir: /var/lib/bawaba/audit-wal, segment_bytes: 64MiB, sync_interval: 100ms }
-  spool_dir: /var/lib/bawaba/spool  # overflow spool (01 §15.2); WAL + spool share spool_max_bytes
+  spool_dir: /var/lib/bawaba/spool  # overflow spool (01 §15.2); WAL + spool + capture temp files share spool_max_bytes
   spool_max_bytes: 10GiB
   on_spool_full: reject             # reject | metadata_only
   flush: { interval: 250ms, max_rows: 1000 }
   slow_threshold: 1s
   inline_max: 256B
-  aggregate_blocked: true
+  blocked: { aggregate_above: 120/min }   # per IP; below it every blocked request gets a full row; 0 = never aggregate
+  capacity: { pg_rows_per_second: 5600 }  # PostgreSQL ingest rating used by audit_ingest_near_capacity (§1.12)
+  segment_first: { roll_interval: 5m, roll_bytes: 64MiB, index_shards: 256 }
   chunking: { min_body: 32KiB, records: { avg: 16, min: 4, max: 64 }, max_chunk: 256KiB,
               fastcdc: { min: 16KiB, avg: 64KiB, max: 256KiB } }
   compression: { level: 3, dictionaries: { enabled: true, retrain_interval: 168h, sample_objects: 20000, size: 112KiB } }
@@ -572,6 +664,61 @@ audit_caps: { pg_bytes: 200GiB, blob_bytes: 500GiB, alert_at: [0.70, 0.85, 0.95]
               on_cap: trim_read_bodies, min_read_body_days: 7 }
 ```
 
+### 1.12 Capacity of the metadata store and the `segment_first` mode
+
+**Load per request in the default `postgres` mode** (medium mix of §1.7):
+
+| Quantity | Value |
+|---|---|
+| Indexed rows per request | ≈ 2.8: 1 `audit_events` + 0.745 `audit_upstream_calls` + ≈ 1.05 `audit_blobs` (§1.7.3) |
+| PostgreSQL bytes per request | ≈ 630 B: 505 B metadata (§1.7.2) + 1.05 × 120 B object index |
+| Ingest rating of one primary | **≤ 2,000 req/s sustained** (≈ 5,600 rows/s, ≈ 1.3 MB/s of table and index data, ≈ 3 MB/s of PostgreSQL WAL) on a dedicated 8 vCPU / NVMe primary, leaving room for autovacuum, the control plane and investigations. A CI load test (`audit-pg-ingest`) must sustain 1.5× the rating with `bawaba_audit_lag_seconds` p99 < 5 s. |
+| Storage | `pg_bytes` ≥ req/day × 630 B × `metadata_hot` days + `audit_writes` + ≈ 5 GB. The default cap (200 GiB, 90 d hot) therefore supports ≈ 3.8 M req/day (≈ 2,600 req/min average); beyond that the owner raises `pg_bytes`, lowers `metadata_hot`, or switches mode. |
+
+So the cluster-wide audited request rate in `postgres` mode is bounded by one PostgreSQL primary, well below the
+01 §10.1 per-node throughput targets multiplied by 8 nodes (≈ 34,000 req/s would mean ≈ 94,000 indexed rows/s and
+≈ 1.8 TB/day). 01's targets hold per node; cluster-wide they hold only in `segment_first` mode (requirement on 01
+§10.1 to say so). The alert `audit_ingest_near_capacity` (§3.3) fires when the 1-h average of audit rows/s exceeds
+70 % of `audit.capacity.pg_rows_per_second` (90 % → high), when `bawaba_audit_lag_seconds` p95 stays above 30 s
+for 15 min, or when the 7-day growth projects `pg_bytes` to fill within 30 days.
+
+**`segment_first` mode** (decision: opt-in, for heavy load; the default stays `postgres` because it gives
+millisecond investigations and simple GC at the owner's real load):
+
+1. **Metadata.** Workers write metadata rows into per-node Parquet segments in the §1.8 format, rolled every
+   `roll_interval` (5 min) or `roll_bytes` (64 MiB), staged in the WAL directory and uploaded to the blob store as
+   `meta`-class objects; an hourly control-node singleton compacts them into one segment per (tenant, node, hour).
+   PostgreSQL receives one `audit_segments` row per segment (token ids, op ids, `status_summary`, subject Bloom
+   filter, request-id range, chain heads), not one row per request. `audit_events` and `audit_upstream_calls` stay
+   empty. `audit_batches` rows (one per worker batch) and anchors are unchanged.
+2. **Object index.** No `audit_blobs` rows. Pack footers already list their objects (§1.4.6); the control-node
+   singleton merges new footers hourly into a sharded index in the blob store: `idx/<tenant>/<shard>/<generation>.bwi`
+   (256 shards by id prefix; sorted `object_id, pack_id, offset, len, retain_until` plus a Bloom filter). Index files
+   hold only keyed ids, locations and dates, the same columns `audit_blobs` holds in clear. Data nodes may read
+   `idx/` and cache shards locally.
+3. **Dedup check.** Seen cache → Bloom filter of the node's own recent packs → index shard lookup. Objects stored
+   by other nodes since the last index generation are misses and are stored again; duplicates are bounded by the
+   index lag (≈ 1 h) and removed by compaction.
+4. **Retention by mark-and-sweep.** There are no per-object lease updates. The daily GC reads only the body-ref
+   columns of the segments within retention (Parquet column projection), computes each object's `retain_until` =
+   max over referencing records of (record date + class retention), writes a new index generation with these dates,
+   and sweeps objects whose `retain_until + grace` (7 d) has passed (pack compaction as §1.6.2). A writer dedups
+   against an index entry only if its `retain_until ≥ today + 1 d`; its new reference lands in a segment within
+   minutes and is therefore marked long before the grace runs out. While any live node's audit watermark is older
+   than 24 h, GC skips its sweep (reported on the System page and by `bawaba audit stats`), so the references of a
+   delayed node are never missed.
+5. **Queries.** Time range → segment pruning by `token_ids`, `op_ids`, subject Bloom filter and request-id range →
+   scan with predicate pushdown. Recent-data searches take seconds instead of milliseconds and see data up to one
+   `roll_interval` late; request-id lookups probe that hour's segments of each node.
+6. **Unchanged in PostgreSQL:** `audit_writes` (writes are rare and need the unique key), `admin_events`,
+   `audit_segments`, `audit_batches`, `audit_anchors`, `audit_gaps`, `audit_exports`, `audit_packs` (per pack),
+   `audit_zstd_dicts`, `audit_epoch_keys`. Rows per request ≈ 0 (per node one segment row every 5 min).
+7. **Switching** takes effect at the next UTC day boundary. Existing partitions age out normally;
+   `bawaba audit blobs reindex --to-index` exports `audit_blobs` into a first index generation once.
+
+Trade-offs: slower and slightly delayed recent-data search, a cross-node dedup lag, and a heavier daily GC, in
+exchange for metadata throughput that scales with nodes and blob-store bandwidth instead of one primary.
+
 ---
 
 ## 2. Webhooks engine
@@ -581,13 +728,13 @@ audit_caps: { pg_bytes: 200GiB, blob_bytes: 500GiB, alert_at: [0.70, 0.85, 0.95]
 | Topic | Decision |
 |---|---|
 | Detection | Polling Shamel (it has no change feed) every `webhooks.poll_interval` (default **5 min**, minimum 1 min), **only for detectors that have at least one active subscription**. |
-| Unit of polling | A **poll stream** = (tenant, upstream, Shamel identity, request variant, detector). Identity is part of the key for the same reason it is part of the coalescing key (01 §9.1): two tokens share detection only if Shamel would return them identical data. |
+| Unit of polling | A **poll stream** = (tenant, upstream, Shamel identity, request variant, detector). Identity is part of the key for the same reason it is part of the coalescing key (01 §9.1): two tokens share detection only if Shamel would return them identical data. It is dropped from the key for Shamel endpoints that calibration has proven not to be identity-scoped (`identity_sensitive = false`, §2.3); per-token data scope still applies at fan-out. |
 | Leadership | One Valkey lease per poll stream (`bwb:lease:wh:<stream_id>`, 01 §5.6) plus a **PostgreSQL epoch fence** on the stream row, so a deposed leader can never commit events. |
 | Change logic | Customers/items: `lastupdatedate` with overlap windows + keyed record hashes (created vs updated, clock-skew tolerant) + daily full reconciliation. Stock and balances: full snapshot diff. Vouchers: tiered date-range scans (`GetVouchers` fast window, `GetExtraVouchers` back-date sweep, nightly deep scan). Order status: `GetStatus` for tracked orders with age-based schedule. |
-| Event store | PostgreSQL (`webhook_events`, payload encrypted, 30 d). Deliveries in PostgreSQL (source of truth) dispatched through Valkey Streams (`bwb:q:webhooks`). |
+| Event store | PostgreSQL (`webhook_events`, payload encrypted, 30 d). Deliveries in PostgreSQL (source of truth) dispatched through Valkey Streams (`bwb:q:webhooks`). Bawaba-generated events (`approval.resolved`) are written into the same store without a poll stream. |
 | Delivery | At-least-once, HMAC-SHA256 `Bawaba-Signature`, exponential backoff with jitter (16 attempts / ≈ 38 h), dead-letter state, delivery logs, replay. Optional **pull** mode (no inbound endpoint needed). |
-| Permissions | Evaluated **at send time** with the subscribing token's **current** policy: scope, data scope (row filter), field hiding. Events whose only changes are in hidden fields are not delivered to that token. |
-| Origin hiding | Push targets must be owner-allowlisted hosts unless an egress proxy is configured (deliveries would otherwise reveal the gateway's IP). |
+| Permissions | Evaluated **at send or read time** with the subscribing token's **current** policy: scope, data scope (row filter, vouchers atomic), field hiding, rendered from the token's view (scope transitions become `*.created` / `*.removed`, §2.6). Events whose only changes are in hidden fields are not delivered to that token. |
+| Targets and origin hiding | Every push target host must be **owner-approved** (global allowlist, or a per-token approval of a target request), in every egress mode, so no token can open a new data destination without the owner. Egress goes direct or through `webhooks.egress_proxy_url`; in both modes the gateway resolves and validates the target address itself (§2.7.3, §2.7.4). |
 
 ### 2.2 Event catalogue
 

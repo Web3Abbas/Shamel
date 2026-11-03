@@ -863,9 +863,9 @@ offset len  field
 | `audit_meta` | `audit_event/<request_id>/<column>` |
 | `snapshot` | `snapshot/<snapshot_id>/<chunk_n>` (one shared, unfiltered snapshot per coalesced fetch, 01 §9.4) |
 | `view` | `view/<view_id>/<token_id>/<policy_version>` |
-| `idempotency` | `idem/<token_id>/<sha256(idempotency_key)>` |
+| `idempotency` | `idem/<lineage_id>/<sha256(idempotency_key)>` (the idempotency namespace is the token lineage, 04 §2.4.5) |
 | `cursor` | `cursor/<token_id>/<route_id>` (contents add `view_id`, offset, `query_hash`, `policy_version`, expiry) |
-| `approval_payload` | `approval/<approval_id>` |
+| `approval_payload` | `approval/<approval_id>/<column>` (each `*_enc` column of `approval_items`: `payload_enc`, `upstream_request_enc`, `summary_enc`, `idempotency_key_enc`, `result_enc`; 04 §11.2) |
 | `pending_secret` | `access_request/<request_id>/<agent_token_id>` |
 | `pki_ca` | `pki/<ca_id>` |
 
@@ -1031,9 +1031,9 @@ yield `token_expired`, which helps developers and reveals almost nothing.
 | Pagination cursor | `base64url(envelope)` sealed with purpose `cursor`, AAD-bound to token and route. Contents: view id, offset, `query_hash`, `policy_version`, expiry (01 §9.6). Tampering, use by another token or with another query yields `invalid_cursor`. A cursor is honored only while the token is active and its `policy_version` is unchanged (`409 cursor_invalidated`), so revocation or narrowing applies immediately even to running walks. |
 | Snapshot payload (Valkey) | Encrypted (`snapshot`, AAD `snapshot/<sid>/<chunk_n>`), TTL 60 s absolute. It holds the **unfiltered** normalized records of one coalesced upstream call, shared by every requester of that call; the coalescing key covers (tenant, upstream, environment, credential, call signature, normalizer version) through a keyed HMAC (01 §9.1), so a snapshot contains exactly what Shamel returns to that credential and is never shared across credentials or environments. It therefore contains fields some readers may not see (`purchase_price`, balances, credit limits). Controls: snapshot ids are 128-bit random and never leave the gateway; no API accepts a snapshot id; a snapshot is read only through a view; every page, including page 1 and every cursor page, runs S14 (data scope) and S15 (field mask) with the requesting token's **current** policy; S15 is fused into the generated encoder, so a hidden field is never serialized into a response buffer; Valkey ACLs limit the keys to the data-plane user (§12.4). |
 | View (Valkey) | Encrypted (`view`, AAD `view/<vid>/<token_id>/<policy_version>`), TTL = the snapshot's remaining TTL. Holds the snapshot id and the record positions that passed this token's data scope and filters (01 §9.5). A view read by another token, or after a policy change, fails AEAD or the binding check and yields `invalid_cursor` / `cursor_invalidated`. |
-| Idempotency record (Valkey) | Encrypted (`idempotency`). Keyed by `(token_id, sha256(key))`, so one token can never replay another's. It stores a fingerprint of the canonical request, and reusing a key with a different body is rejected (API document). |
+| Idempotency record (Valkey) | Encrypted (`idempotency`, AAD `idem/<lineage_id>/<sha256(key)>`). Keyed by `(lineage_id, sha256(key))` (`bwb:<t>:idem:<lineage_id>:<sha256(key)>`, durable backstop row keyed the same way, 03 §15.2), so a token can never replay a record of another lineage, and a record moved to another lineage's key fails AEAD. A rotation successor shares its predecessor's `lineage_id` (04 §2.4.5): a write resent with the same `Idempotency-Key` after rotation gets the stored outcome instead of posting a second voucher. It stores a fingerprint of the canonical request and the id of the token that made it, and reusing a key with a different body is rejected (03 §15.2). |
 | Queues (webhooks, approved writes) | Payloads encrypted (`queue`). Policy is never carried in Valkey: only invalidation signals, after which nodes re-read PostgreSQL. |
-| Approval payloads (PostgreSQL) | Encrypted (`approval_payload`). The control plane records `approved_payload_sha256` at approval time, and the executor refuses a payload whose hash differs. |
+| Approval payloads (PostgreSQL) | Every `*_enc` column of `approval_items` is encrypted (`approval_payload`, AAD `approval/<approval_id>/<column>`, §9.3). At submission the gateway stores `payload_sha256` (canonical JSON of the frozen, normalized `/v1` request) and `upstream_request_sha256` (the exact prepared Shamel call). At approval the control plane records `approved_upstream_sha256` (the hash of the exact upstream bytes the owner saw) and `approved_credential_id`. Right before sending, the executor re-checks `payload_sha256` and refuses any upstream request whose hash differs from `approved_upstream_sha256`, or a different credential; a hash mismatch raises `security_invariant_violation` and freezes the item (04 §11.5, §11.6). |
 | Owner sessions | 256-bit random ids. PostgreSQL stores only `SHA-256(session_id)`. |
 
 ---
@@ -1232,7 +1232,8 @@ Upstream responses that use gzip are decompressed through a limiter that counts 
   - **Trust limit:** an origin lock stops *other websites* from using the token in browsers. It does **not** stop a
     non-browser client that forges `Origin`. Publishable tokens are therefore treated as public, and their grants and
     field hiding must be acceptable for anyone who can view the page. The dashboard warns about this when such a
-    token is created.
+    token is created, and `customers:read`, `vouchers:read` and `reports:read` need an explicit
+    `--acknowledge-public` on every path that creates or widens a publishable token (04 §13, §13.2).
 - **Secret tokens in browsers:** a non-publishable token sent with an `Origin` header gets `secret_token_in_browser`
   and an owner alert, because the token has probably been embedded in front-end code. This is controlled per token by
   `reject_browser_origin`, default `true`.
@@ -1566,15 +1567,32 @@ The authoritative definition, `violations(R, A)` with its auto-fill rules, is in
   - expiry, legacy endpoints, `writes_require_approval`, `legacy_require_idempotency_key`, `get_all`,
     `reject_browser_origin`, rate limits and the rate `mode` (`warn_only` is weaker than `enforce`);
   - publishable constraints (business read atoms only, 1–10 valid origins, §10.7).
+- **Publishable default hides (`public_fields_exposed`):** independently of A, a publishable R always gets the
+  kind-forced hides and the publishable default hides (`@pii`, `@free_text`, `tokens.publishable.default_hidden`),
+  and a request has no way to un-hide a field. A `modify_token` whose result would drop a default hide is a violation
+  unless the owner had already un-hidden that path on the target (an owner act with `--acknowledge-public`). An
+  agent can never make default-hidden data public; only the owner can, by an ordinary audited update.
+- **Public exposure gate:** a publishable R holding `customers:read`, `vouchers:read` or `reports:read` is not a
+  violation but carries the review flag `public_exposure`. The review screen shows a distinct bilingual banner
+  ("anyone who can load the page can read these resources") with the atoms, the effective visible fields and the
+  origins, and approval needs an explicit acknowledgement: `--acknowledge-public` on `bawaba access-request
+  approve` (refused otherwise) or a separate dashboard checkbox that is unticked by default. The acknowledgement is
+  recorded in the `access_request.approve` admin event. The same gate applies to a `modify_token` that adds these
+  atoms to a publishable target (04 §10.5).
 - **Targets:** `modify_token` and `revoke_token` requests may target only tokens born from this agent's lineage
   (`requested_by_token_id`); any other target is `404 not_found`. The resulting grant must satisfy the same rule.
 - Pinning a different Shamel user is a violation, because it could widen Shamel-side salesman scoping.
-- Tokens born from agent requests default to `writes_require_approval=true`. Only the owner can turn this off.
+- **Agent requests never set `writes_require_approval=false`.** This is stricter than "not weaker than A": tokens
+  born from agent requests start with `writes_require_approval=true` (an omitted value auto-fills to `true`); a
+  `create_token` asking for `false`, or a `modify_token` that would switch it off on its target, is `approval_weaker`.
+  A `modify_token` may keep an owner's earlier "off" but never set it. Only the owner turns approval off, after
+  approval, by an ordinary audited update.
 - **Caps:** at most 20 pending requests and 50 per day per agent token (`agents.max_pending_requests`,
-  `agents.max_requests_per_day`). Requests that widen permissions cannot be bulk-approved; only bulk rejection is
-  offered. This blunts approval-fatigue attacks.
-- At approval the owner may **narrow** a request, never widen it. Granting more than requested means creating a token
-  directly.
+  `agents.max_requests_per_day`). Requests that widen permissions, and requests flagged `public_exposure`, cannot be
+  bulk-approved; only bulk rejection is offered (revocation requests may be bulk-approved). This blunts
+  approval-fatigue attacks.
+- At approval the owner may **narrow** a request, never widen it. Granting more than requested is a separate owner
+  act after approval (an ordinary, separately audited token update, 04 §10.5).
 
 ### 13.3 Secret delivery for approved tokens
 
@@ -1613,7 +1631,7 @@ Retrieval is a `POST` because it changes state; the status `GET` never carries t
   `POST …/claim-secret` with an `Idempotency-Key`, at most once, within `agents.secret_pickup_window` (72 h). The
   stored secret row is deleted in the same statement that returns it. A retry with the same `Idempotency-Key` within
   `agents.secret_claim_replay_window` (10 min) gets the same body from an idempotency record (purpose `idempotency`,
-  bound to the agent token); any other later claim is `409 secret_already_claimed`. After the window the row is
+  bound to the agent's lineage, §9.3); any other later claim is `409 secret_already_claimed`. After the window the row is
   deleted; the token stays valid and the owner can rotate it. Claims are audited, and a claim from a different IP
   than the request raises `token_pickup_anomaly`. Polling the status faster than every 10 s returns
   `Bawaba-Warning: polling_too_frequent`.
@@ -1627,7 +1645,8 @@ judge meaning, so it limits what a misled tool can *do*:
 1. **Least privilege by construction:** grants are per resource and per voucher type. Read-only presets are the
    default for new tool tokens. Field hiding reduces what can be exfiltrated. Publishable tokens are read-only.
 2. **Approval queue:** writes from flagged tokens (the default for agent-originated tokens) wait for the owner. The
-   owner sees the exact payload, rendered safely, and the approval is tied to the payload hash.
+   owner sees the exact payload, rendered safely, and the approval is tied to the hash of the exact upstream
+   request (`approved_upstream_sha256`, §9.10).
 3. **Rate and anomaly signals:** a token's first write, write bursts and unusual hours trigger owner alerts. Per-token
    rate limits apply to writes.
 4. **Bawaba's own messages are trustworthy:** `Bawaba-Warning` texts and error messages come only from a fixed
@@ -1874,7 +1893,8 @@ if Shamel credentials or the host were exposed. Notify anyone else as required b
 - **Error mapper:** every outcome class produces the right code. Property: for random upstream error text, the client
   response never contains any substring of 4 or more characters from it.
 - **Crypto:** envelope round trips. AAD mismatches (wrong row, column, tenant or purpose; a view under another token
-  id or `policy_version`; a snapshot chunk under another `sid` or chunk number) must fail. Key rotation state
+  id or `policy_version`; a snapshot chunk under another `sid` or chunk number; an idempotency record under another
+  `lineage_id`; an `approval_items` ciphertext moved to another column of the same row) must fail. Key rotation state
   transitions. Master and data key file checks.
 - **Plane key split (§9.2):** with only `data.key`, no `plane = 'control'` KEK or key unwraps; the data-plane purpose
   list contains no control-only purpose; an audit object written under an epoch DEK opens with the control plane's
@@ -2064,9 +2084,10 @@ accept (§20.1). The connector's keys are in its own local config.
 | Architecture | **Key split (§9.2):** the data-plane role receives `data.key` (`security.data_key_file`), never `master.key`; 01 §15.3's single-file delivery and direct HKDF derivation of every purpose from the master key are replaced by the two-KEK hierarchy, and the control plane is the only process that loads MK. The SMTP sender and Cloudflare ban sync run in the control plane. Audit bodies and audit metadata are written under per-node epoch DEKs sealed to the control plane (§9.2). |
 | Architecture | The **coalescing key** MUST include `upstream_id`, `cred_id` (the Shamel user), env, endpoint id and canonical upstream parameters. Requests made as different Shamel users are never coalesced (salesman scoping, Q17). Policy is applied per requesting token after the shared fetch. |
 | Architecture | **Snapshots** follow 01 §9: one unfiltered, encrypted snapshot per coalesced fetch (AAD `snapshot/<sid>/<chunk_n>`), never exposed directly; token-bound views (AAD `view/<vid>/<token_id>/<policy_version>`) and cursors; S14/S15 applied with the token's current policy on every page; cursors honored only while the token is active and its policy is unchanged (§9.10, 01 §9.7). |
+| Architecture | **Idempotency records** are keyed by token lineage: Valkey `bwb:<t>:idem:<lineage_id>:<sha256(key)>`, AAD `idem/<lineage_id>/<sha256(key)>` (§9.3, §9.10; 03 §15.2; 04 §2.4.5). 01 §6.4 still shows `bwb:<t>:idem:<token>:<key>`; it should use the lineage and the hashed key (`LineageID` is in the compiled policy, 04 §9.1). Views and cursors stay token-bound. |
 | Architecture | **Registry and limits:** `Operation.MaxResponseBytes` by class (§10.6); per-operation upstream budgets of at most 80 s under `server.request_timeout` 90 s; legacy response assembly with spill-to-disk (§10.8). Configuration keys to accept: `security.data_key_file`, `security.audit_epoch`, `security.rotation.*`, `config.blind_staleness`, `http.*` limits of §10.6, `upstreams[].credential_session_mode`. Valkey key `bwb:<t>:credrole:<upstream>:<cred_id>` and the `credrole_changed` event (§7.5). The connector's `hello` advertises its endpoint table; `welcome` carries its credential roles. |
 | API | Error catalog entries (English and Arabic messages, `docs_url`) for every code in §10.9. A code for an expired or invalidated cursor. The public paths list for WAF rule R2. The webhook signature format of §9.9 documented for receivers. The `/v1/media/{id}` presigned contract (§5.4). Public docs must not name the upstream product or version (LV-13). |
-| Permissions | Atomic expansion of scopes and voucher types so the subset rule can be evaluated; 04 §10.3 is the authoritative rule and must keep the properties of §13.2. Publishable tokens limited to read scopes. `access_requests:write` is agent-only and never grantable. Per-token IP rules live in the policy spec (§10.2). Auto-suspension follows §10.3 (never publishable; secret tokens only for probes from inside their allowlist unless opted in). |
+| Permissions | **Resolved in 04, nothing open.** Atomic expansion of scopes and voucher types into a bitset so the subset rule can be evaluated (04 §3.1, §3.3, §9.1). 04 §10.3 is the authoritative subset rule; its conformance table maps every property of §13.2, including `public_fields_exposed`, the `public_exposure` approval gate (04 §10.5) and agent requests never setting `writes_require_approval=false`. Publishable tokens limited to the 7 business read atoms (04 §13). `access_requests:write` agent-only and never grantable (04 §3.1, §10.3). Per-token IP rules in the policy spec (04 §7; §10.2 here). Auto-suspension per §10.3: never publishable, secret tokens only for probes from inside their allowlist unless opted in (04 §2.4.6). Data-role privileges through `SECURITY DEFINER` functions (04 §10.4, §11.6; §12.4 here). Idempotency namespace by `lineage_id` (04 §2.4.5), adopted in the §9.3 binding and §9.10. `approval_items` encrypted columns and hash names (`payload_sha256`, `upstream_request_sha256`, `approved_upstream_sha256`; 04 §11.2), adopted in §9.3 and §9.10. **Standing:** any change to 04 §10.3 must keep every property of §13.2. |
 | Operations | Backups exclude `master.key` and `data.key` (§9.4, §14). Key backup and restore drills (§9.5), including `bawaba key reissue-data-key` after a restore. The incident runbook commands (§17). The daily security digest with audit anchors (§12.5). Audit encryption (05 §1.4.5) uses epoch DEKs whose key id is the envelope key id, `audit_epoch_keys` retention follows the objects that reference them, and monthly rotation applies to the `audit_seal` key pair (§9.2, §9.6). New alert `token_probe_suspected` (warning, per token) next to `token_auto_suspended`, whose trigger becomes the §10.3 rule. Grants for `audit_epoch_keys` (§12.4). |
 
 ### 20.2 Questions for ISCO (security-related; add them to the ISCO list)
