@@ -3338,7 +3338,7 @@ settings distributed through the compiled config unless noted.
 |---|---|---|---|
 | 1 | Access-request paths | kebab-case `/v1/access-requests`; the secret is retrieved with `POST …/claim-secret`, never on `GET` | **Resolved:** 02 §13.3 and 04 §10.7 now use the same paths and the `POST` claim |
 | 2 | Catalog image URLs | presigned `/v1/media/{media_id}` as in 02 §5.4 | 01 S13 (`/v1/items/{code}/image`) |
-| 3 | Oversized body | `413 payload_too_large` (02 §10.9); 405/413/414/415/431 are protocol-level statuses | 01 S7 (`400 request_too_large`) |
+| 3 | Oversized body | `413 payload_too_large` (02 §10.9); 405/413/414/415/431 are protocol-level statuses | 01 S7 (its `400 request_too_large` is superseded; not a catalogue code) |
 | 4 | `/legacy/Main/Login` | `400 shamel_credentials_not_accepted` instead of `404` for this one never-allowlisted path; `/Voucher/Post` stays `404` | 02 §11.3 |
 | 5 | `HEAD` | not supported | 01 S5 mentions `GET`/`HEAD` for publishable tokens |
 | 6 | Response headers | add `Bawaba-Environment`, `Bawaba-Idempotent-Replay`, `Location`, `Deprecation`, `Sunset`, `Server-Timing` to the allowlist; CORS also exposes `Bawaba-Environment` | **Resolved:** 02 §10.7 lists them and matches §23.5 exactly |
