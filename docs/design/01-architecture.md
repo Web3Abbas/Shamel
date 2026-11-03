@@ -5,11 +5,12 @@
 >
 > This document owns: component boundaries, deployment topologies, process/listener layout, the data-plane
 > pipeline order, upstream client mechanics, connector transport, cluster coordination (coalescing, snapshots,
-> config distribution), performance design, failure behaviour, repository layout, the configuration model and the
-> consolidated ISCO question list (§16.2). API resource shapes, the security model in depth, the data model, audit
-> storage and webhooks are refined in their own documents; where they touch this one, they must keep the pipeline
-> order and mechanisms defined here. On security mechanisms (keys, PKI, credential custody, edge trust, plane
-> separation) 02 is authoritative and this document summarizes it.
+> config distribution), performance design, failure behaviour, repository layout and the configuration model. The
+> consolidated list of questions for ISCO is [`08-isco-questions.md`](08-isco-questions.md) (cited "08 ISCO-nn");
+> §16.2 maps this document's open questions to it. API resource shapes, the security model in depth, the data model,
+> audit storage and webhooks are refined in their own documents; where they touch this one, they must keep the
+> pipeline order and mechanisms defined here. On security mechanisms (keys, PKI, credential custody, edge trust,
+> plane separation) 02 is authoritative and this document summarizes it.
 
 ---
 
@@ -785,7 +786,7 @@ Inserted without changing stage order:
    not retried: when the transport reports that the request was never sent (connector outcomes `not_sent`,
    `not_holder`, login failure before sending) the client gets `503 upstream_unavailable` and the idempotency key is
    released; otherwise `504 write_outcome_unknown`, because Shamel's ordering of authentication and execution is
-   unverified (ISCO-10). Timeout after the request was sent → outcome `unknown`: `504 write_outcome_unknown`; the
+   unverified (08 ISCO-54). Timeout after the request was sent → outcome `unknown`: `504 write_outcome_unknown`; the
    idempotency record stores `outcome_unknown`, and the owner is alerted to reconcile (Shamel has no idempotency
    support, Q39).
 7. **After S13:** Shamel reference id recorded in `audit_writes` and in the idempotency record.
@@ -879,7 +880,7 @@ The gateway has no session cache, no `shamel_credential` key use and no login co
 replacement connector instance needs the passwords re-entered (accepted cost: the gateway cannot decrypt them).
 
 **Session holder protocol** (`upstreams[].credential_session_mode`, 02 §7.5). Because a second login may invalidate
-the first (unknown, ISCO-8), independent logins by two connector instances could knock each other out forever.
+the first (unknown, 08 ISCO-01), independent logins by two connector instances could knock each other out forever.
 
 | Mode | Behaviour |
 |---|---|
@@ -906,7 +907,7 @@ the first (unknown, ISCO-8), independent logins by two connector instances could
   mode.
 
 **Direct and mock mode: gateway session manager.** Keyed by `(upstream_id, cred_id)`. Shamel's token lifetime and
-whether a new login invalidates older tokens are **unknown** (ISCO-8), so the design assumes the worst: tokens may
+whether a new login invalidates older tokens are **unknown** (08 ISCO-01), so the design assumes the worst: tokens may
 expire at any time and a new login may kill the previous token. Therefore sessions are **shared cluster-wide** and
 logins are **serialized**.
 
@@ -1289,7 +1290,7 @@ only if it canonicalizes under one of `media.roots` (no `..`, alternate data str
 `\\.\` prefixes, UNC unless the root is UNC; symlinks resolved and re-checked; regular files ≤ `media.max_bytes`,
 5 MiB) or, for HTTP image URLs, only on the Shamel base URL origin or a `media.http_prefixes` entry. The gateway
 sniffs the type, bounds dimensions and re-encodes the image (dropping metadata). `media.enabled=false` until ISCO
-confirms the format (ISCO-20).
+confirms the format (08 ISCO-34).
 
 ### 8.5 High availability
 
@@ -1754,7 +1755,7 @@ erDiagram
 | Coalescing | degrade | Local single-flight only. |
 | Snapshots / views / cursors | **fail closed for multi-page** | Single-page results served normally; results needing a cursor → `503 pagination_unavailable`; cursor reads → `503`. Never silent truncation. |
 | Idempotency records | **fail closed** | Writes `503 idempotency_unavailable`. |
-| Shamel session sharing (direct mode) | degrade | Per-node sessions and logins (risk of token churn if Shamel allows one session per user — ISCO-8). |
+| Shamel session sharing (direct mode) | degrade | Per-node sessions and logins (risk of token churn if Shamel allows one session per user — 08 ISCO-01). |
 | Session-holder records (tunnel mode) | degrade | Last known holder kept; a change only if exactly one instance is connected (§7.1). |
 | Distributed concurrency lease (direct mode) | degrade | Local `floor(cap / last_known_N)`, min 1. Tunnel mode is unaffected (connector cap). |
 | Background slots | pause | Webhook detection needs leases and pauses with them. |
@@ -2004,51 +2005,53 @@ Summary of 02 §9.2–§9.6, which is authoritative.
 
 Assumptions made in this document (to be validated):
 
-1. Shamel speaks HTTP/1.1 (likely IIS/ASP.NET); HTTPS availability unknown — the connector makes it irrelevant
-   for the Internet path.
+1. Shamel speaks HTTP/1.1 (likely IIS/ASP.NET); HTTPS availability unknown (08 ISCO-05) — the connector makes it
+   irrelevant for the Internet path.
 2. Shamel read endpoints are `GET` with header parameters except those documented as form posts; the exact
-   method per path will be confirmed by `bawaba upstream calibrate` and ISCO.
-3. Shamel's capacity is modest; default `max_concurrency = 8` until measured.
+   method per path will be confirmed by `bawaba upstream calibrate` and ISCO (08 ISCO-12).
+3. Shamel's capacity is modest; default `max_concurrency = 8` until measured (08 ISCO-20).
 4. Item `image_path` values are relative paths, local paths or URLs on the Shamel host; media stays disabled until
-   ISCO confirms the format (ISCO-20).
+   ISCO confirms the format (08 ISCO-34).
 5. The office uplink sustains at least 2 Mbit/s toward the Internet in connector mode (§10.1); calibration measures
    it.
 6. One Shamel session per credential (the holder's) carries all of that credential's traffic without per-session
-   throttling by Shamel (`single_holder`, until ISCO-8 or calibration says otherwise).
+   throttling by Shamel (`single_holder`, until 08 ISCO-01 or calibration says otherwise).
 
-### 16.2 Questions for ISCO (consolidated list)
+### 16.2 Questions for ISCO (see 08)
 
-This is the single list to hand to ISCO (00 §11). It merges and de-duplicates the questions of this document,
-02 §20.2, 03 §27.3 (I-1…I-22), 04 §17.3 and 05 §11, and adds those 00 §11 requires that no document asked yet. Ids
-are stable; other documents refer to them. "Q" numbers refer to the quirks in the upstream reference §7.
+The authoritative, bilingual list of questions for ISCO is [`08-isco-questions.md`](08-isco-questions.md) (ids
+`ISCO-01` … `ISCO-55`, cited "08 ISCO-nn"). Only that list is sent to ISCO, answers are recorded there, and new
+questions are added there, not here. The table maps the open questions of this document (and those 00 §11 requires)
+to it. An earlier draft of this section numbered its own list `ISCO-1` … `ISCO-28`; those ids are retired, the rows
+below keep their order, and 08 Appendix A.5 maps each old id to its 08 question.
 
-| Id | Question | Sources |
-|---|---|---|
-| ISCO-1 | Do we have written permission to wrap the Shamel Pro Web API behind Bawaba, and later to offer Bawaba to other Shamel customers (SaaS and self-hosted)? Any licence terms, fees or certification? | 00 §11 (new) |
-| ISCO-2 | Is the API versioned? How are breaking changes announced, with how much notice; is there a changelog or a test server? Which IIS, ASP.NET and Shamel versions are deployed, what is the security patch cadence, and how are vulnerabilities reported? | 00 §11 (new), 02 Q8 |
-| ISCO-3 | HTTPS support and certificate options; documented base URL and scheme; HTTP method per endpoint; gzip support; is JSON ever served with a `Content-Type` other than `application/json`? | Q4, Q11, Q12; 01, 02 Q1 |
-| ISCO-4 | Do any list endpoints accept undocumented paging, limit, sort or field-selection parameters? Largest expected response sizes for `GetItems`, `GetCustomers`, `GetItemsStores`, `GetVouchers` and `GetCustomerPricesAsRows`. | Q13; 00 §11 (new), 01, 02 Q9 |
-| ISCO-5 | Recommended maximum concurrent requests and requests per second; any server-side throttling or request timeouts. | Q47; 01, 02 Q9 |
-| ISCO-6 | Does the API site use IIS Windows authentication (NTLM/Negotiate) anywhere, or anonymous access plus Shamel tokens only? Can the API site be bound to `127.0.0.1` so that a connector on the same host is the only client? | 02 Q4, Q6 |
-| ISCO-7 | Is response serialization stable (field order) between identical calls? Wire JSON property casing; `null` versus empty-string conventions. | Q46; 03 I-19, 05 |
-| ISCO-8 | Session token lifetime. Does a second `/Main/Login` for the same user invalidate the first session (decides `credential_session_mode`)? Can sessions be revoked server-side; is there a logout? | Q14; 01, 02 Q3 |
-| ISCO-9 | Exact error bodies for an invalid or expired token and for failed logins; account lockout policy after failed logins; what exactly goes in the `username` header (login name or user id)? | Q1, Q15, Q16; 01 |
-| ISCO-10 | For a write sent with an expired or invalid token, is authentication always checked before anything executes, i.e. can an authentication-failure response ever follow a partly or fully executed write? | Q14; 01 §6.4 (new) |
-| ISCO-11 | Are API users the same accounts as desktop users (password reuse)? Can API access be enabled per user, and can an API-only user be created and restricted inside Shamel (read-only, no voucher types)? | 02 Q5, 04 Q7 |
-| ISCO-12 | Does Shamel or IIS log request headers (which would put `username` and `token` in its logs)? Where, and for how long? | 02 Q7 |
-| ISCO-13 | Error response format: can error bodies contain stack traces or SQL? Complete list of `ErrorMessage` shapes; exact rejection messages for duplicate `code`/`manual_code` and other validation failures (for the mapping table). | Q1–Q3, Q39; 01, 03 I-6 |
-| ISCO-14 | Which endpoints apply salesman scoping for a salesman-bound user (balances, items, stock, vouchers, prices, reports, serials)? Semantics of the `store` header on `GetItems`. | Q17; 03 I-16, 04 Q1, 05 |
-| ISCO-15 | For a user with no salesman binding, does `GetCustomers` without `getAll` return all customers? Does Shamel enforce salesman scoping on writes? | 04 Q2, Q3 |
-| ISCO-16 | `/Files/GetSalesmen`: response fields and types. | Q24; 00 §11, 03 I-1, 04 Q6 |
-| ISCO-17 | `lastupdatedate`: date or datetime, `>` or `>=`, granularity, timezone; which changes update it (balances, contacts, classifications, stock movements)? | Q18; 00 §11, 03 I-11, 05 |
-| ISCO-18 | Are `fromDate`/`toDate` inclusive, and is there a maximum range? Timezone of all dates. Does `GetVouchers` filter by voucher date or by entry/update date; does `VoucherHeader.update_date` change on every edit, and in which format? | 03 I-8, 05 |
-| ISCO-19 | Can vouchers, customers or items be deleted in Shamel, and is there any way to observe deletions? | 05 |
-| ISCO-20 | What does `ItemCatalog.image_path` contain (URL, local path, UNC path), and is there an endpoint that returns image bytes? | Q26; 01, 02 Q2 |
-| ISCO-21 | `GetCustomerPricesAsRows`: does it accept filters (customer, item); does it return all customers' rows; what are `code`, `discount_type` and `tax`? | Q25; 03 I-2 |
-| ISCO-22 | `GetLastPriceReport`: is `customer` a code or a name; is the report global or per customer? | Q21; 03 I-13, 04 Q4 |
-| ISCO-23 | `GetAccountsheet`: does it accept any account code or only customers? Number format of `AccountsheetColumns` amounts, meaning of `start_date`, format of `type` (voucher-type label). | Q35; 03 I-12, I-15, 04 Q5 |
-| ISCO-24 | Voucher reads: `GetDelivery` with zero or several prepared deliveries; which voucher types `GetExtraVouchers` returns; `GetStatus` — is `manual` the `manual_code` or the voucher code, what is the response for unknown values, are manual codes unique? | Q23; 03 I-9, I-10, 05 |
-| ISCO-25 | Voucher writes: values of `VoucherAccounts.debit_credit` and `ExtraVoucher.cr_dr`; are `accounts` allowed in non-journal vouchers; how is a receipt's or payment's cash amount expressed; is `VoucherHeader.balance` net of discount and does it include VAT; code prefix and format for `PurchaseDelivery`; how `InternalDelivery` names the destination store; meaning and bounds of `system_id`. | Q38, Q40, Q41; 03 I-3, I-4, I-5, I-7, I-14, I-17 |
-| ISCO-26 | Master data and models: `Currency.units`/`division` and whether `Currency.code` is a stable key; does `GetCurrencyRates` return the latest 10 in total or per currency; `Customer.MobileNumber` (fax or mobile), `referee2`, `man_name`, `citizen_code`, `attr`; values and labels of every undocumented enum (upstream §6.4). | Q29–Q31, Q36; 03 I-18, I-20, I-21, I-22 |
-| ISCO-27 | Is `/Voucher/Post` (implied by `/Voucher/Post2`) still active, and are there other undocumented endpoints we should know about or block? | Q22 |
-| ISCO-28 | Is SQL Server reachable from the LAN, and does the API host run other exposed services (RDP, file shares) that the deployment guide should tell the owner to firewall? | 02 Q10 |
+| Topic | 08 id(s) |
+|---|---|
+| Permission to wrap the API; offering Bawaba to other Shamel customers later; licence terms, fees | ISCO-53 |
+| API versioning, change notices, changelog, test server; deployed versions; patch cadence, vulnerability reports | ISCO-50, ISCO-51, ISCO-10 |
+| HTTPS and certificates; base URL and scheme; HTTP method per endpoint; gzip; response `Content-Type` | ISCO-05, ISCO-07 (a), ISCO-12, ISCO-11 (d), ISCO-17 (c), (f) |
+| Undocumented paging, limit, sort or field-selection parameters; largest response sizes | ISCO-21 (b), (c), (e) |
+| Recommended concurrency and requests per second; throttling; server-side timeouts | ISCO-20 |
+| IIS Windows authentication; binding the API site to `127.0.0.1` | ISCO-06, ISCO-07 (b) |
+| Stable serialization; wire JSON casing; `null` versus empty string | ISCO-17 (a), (b), (d) |
+| Session lifetime; second login invalidates the first (`credential_session_mode`); server-side revocation, logout | ISCO-01, ISCO-02 |
+| Error bodies for an invalid token and for failed logins; lockout policy; content of the `username` header | ISCO-18 (c), ISCO-03 |
+| Authentication checked before a write executes (§6.4 step 6) | ISCO-54 |
+| API users versus desktop users; API access per user; restricted API-only user | ISCO-04 |
+| Logging of request headers by Shamel or IIS | ISCO-08 |
+| Stack traces or SQL in errors; `ErrorMessage` shapes; rejection messages for duplicates and validation | ISCO-18 (a), (d), ISCO-19, ISCO-43 (b) |
+| Salesman scoping per endpoint; `store` header on `GetItems` | ISCO-25 (a), ISCO-35 (a) |
+| `GetCustomers` for a user without salesman binding; salesman scoping on writes | ISCO-25 (b), (d) |
+| `/Files/GetSalesmen` response | ISCO-26 |
+| `lastupdatedate` semantics | ISCO-22 |
+| Date-range inclusivity, maximum range, timezone; `GetVouchers` date basis; `update_date` | ISCO-24, ISCO-21 (d), ISCO-23 (c), (d) |
+| Deletions and how to observe them | ISCO-23 (a), ISCO-22 (g) |
+| `ItemCatalog.image_path` format; image endpoint (§8.4) | ISCO-34 |
+| `GetCustomerPricesAsRows` filters and fields | ISCO-33 |
+| `GetLastPriceReport`: `customer` code or name; global or per customer | ISCO-37 (b), (c) |
+| `GetAccountsheet`: accounts accepted, number format, `start_date`, `type` | ISCO-38 |
+| `GetDelivery`; voucher types of `GetExtraVouchers`; `GetStatus` | ISCO-41 (a), ISCO-40 (b), ISCO-42 |
+| Voucher-write semantics (`debit_credit`/`cr_dr`, `accounts`, cash amount, totals and VAT, prefixes, destination store, `system_id`) | ISCO-49, ISCO-47 (a), (b), (d), ISCO-46 (a), ISCO-45 (a), ISCO-44 |
+| Currency fields and rates; customer fields; undocumented enumerations | ISCO-28, ISCO-32, ISCO-49 |
+| `/Voucher/Post` still active; other undocumented endpoints to know about or block (§6.5) | ISCO-50 (d), ISCO-55 |
+| SQL Server reachable from the LAN; other exposed services | ISCO-09 |

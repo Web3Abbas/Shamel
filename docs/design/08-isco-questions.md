@@ -8,7 +8,7 @@
 > [`05-operations.md`](05-operations.md) §11.
 >
 > This document owns the **consolidated list of questions for ISCO** (Isra' Software & Computer, the vendor of Shamel
-> Pro). It has 53 questions; 10 are marked **Priority**. It merges every unknown, assumption and open question that the
+> Pro). It has 55 questions; 10 are marked **Priority**. It merges every unknown, assumption and open question that the
 > design set raised about the upstream API.
 
 ---
@@ -21,9 +21,12 @@
 - **Before sending:** fill the placeholders `[…]` in §1 and in ISCO-50 (our Shamel version, if known). Check ISCO's
   official Arabic company name for the salutation. Decide whether ISCO-53 (c) (possible commercial use later) should be
   asked now or in a separate, later conversation.
-- **Stable ids:** questions are `ISCO-01` … `ISCO-53`. Other design documents cite them as "08 ISCO-nn". The older ids
-  keep their meaning: `Qnn` (U §7), `I-n` (03 §27.3), "02 §20.2 #n", "04 §17.3 #n". Appendix A maps every one of them to
-  the question that now carries it.
+- **Stable ids:** questions are `ISCO-01` … `ISCO-55`. Other design documents cite them as "08 ISCO-nn". ISCO-54 and
+  ISCO-55 were added later (from 01 §16.2) and sit in their topic groups (§3.13 and §3.2), so ids are not in document
+  order there. Ids are never renumbered; a question added later takes the next free id, and a sub-item added later
+  takes the next free letter. The older ids keep their meaning: `Qnn` (U §7), `I-n` (03 §27.3), "02 §20.2 #n",
+  "04 §17.3 #n", and the retired `ISCO-1` … `ISCO-28` of an earlier draft of 01 §16.2. Appendix A maps every one of
+  them to the question that now carries it.
 - **Recording answers:** add `> **ISCO answer (YYYY-MM-DD):** …` under the question. Then update U §7 (mark the `Qnn`
   resolved) and the affected design document. Fields published as *(provisional)* (03 §3.4) may be renamed only before
   M1 GA.
@@ -53,7 +56,7 @@
 
 اعتمدنا في التصميم على دليل "التكامل مع برنامج الشامل للمحاسبة – API – العرض الفني"، ووجدناه واضحاً ومفيداً في معظمه. غير أن بعض النقاط لم يتطرق إليها الدليل أو تحتمل أكثر من تفسير، ونودّ التأكد منها قبل الاعتماد عليها في بيئة العمل الفعلية.
 
-لذا نرجو التكرم بالإجابة عن الأسئلة المرفقة. وهي مرقّمة من ISCO-01 إلى ISCO-53، ومقسّمة حسب الموضوع، ومكتوبة باللغتين العربية والإنجليزية، ويرافق كل سؤال سطر قصير بالإنجليزية بعنوان "Why we ask" يوضّح سبب السؤال وأثره على عملنا. أما الأسئلة العشرة المعلّمة بكلمة "أولوية" فهي الأهم بالنسبة لنا، ونرجو البدء بها إن أمكن.
+لذا نرجو التكرم بالإجابة عن الأسئلة المرفقة. وهي مرقّمة من ISCO-01 إلى ISCO-55، ومقسّمة حسب الموضوع، ومكتوبة باللغتين العربية والإنجليزية، ويرافق كل سؤال سطر قصير بالإنجليزية بعنوان "Why we ask" يوضّح سبب السؤال وأثره على عملنا. أما الأسئلة العشرة المعلّمة بكلمة "أولوية" فهي الأهم بالنسبة لنا، ونرجو البدء بها إن أمكن.
 
 لا مانع لدينا من تلقّي الإجابات على مراحل، أو من ترتيب اجتماع فني قصير (حضورياً أو عن بُعد) إن كان ذلك أيسر لكم. كما نرجو إعلامنا إن كانت الإجابة عن بعض هذه الأسئلة تتطلب طلب خدمة أو اتفاقية دعم.
 
@@ -83,7 +86,7 @@ We based our design on the manual "Integration with the Shamel accounting progra
 which we found clear and helpful for the most part. Some points, however, are not covered by the manual or can be read
 in more than one way, and we would like to confirm them before we rely on them in production.
 
-We would be grateful if you could answer the attached questions. They are numbered ISCO-01 to ISCO-53, grouped by topic
+We would be grateful if you could answer the attached questions. They are numbered ISCO-01 to ISCO-55, grouped by topic
 and written in Arabic and English. Each one has a short "Why we ask" line that explains its impact on our work. The ten
 questions marked "Priority" matter most to us, so we would appreciate answers to those first.
 
@@ -391,6 +394,30 @@ and how much bandwidth large lists will use.
 
 <sub>Ref: Q6 · Q7 · 01 §16 (gzip)</sub>
 
+#### ISCO-55 — Endpoints not described in the manual
+
+- (a) Apart from the endpoints in the manual and `/Voucher/Post` (ISCO-50 (d)), does the API site expose other
+  endpoints? For example: older versions of documented endpoints, update or delete operations, administrative or
+  diagnostic endpoints, or generated help pages (ASP.NET Web API Help, Swagger). Please list them with their purpose.
+- (b) Do any of them change or delete data, or answer without a valid `token`?
+- (c) Can they be disabled, or blocked in IIS, without affecting the Shamel desktop program or other ISCO products?
+
+<div dir="rtl" lang="ar">
+
+**نقاط نهاية غير مذكورة في الدليل**
+
+- أ. باستثناء نقاط النهاية الواردة في الدليل و`/Voucher/Post` (انظر ISCO-50، البند د)، هل يتيح موقع الواجهة البرمجية نقاط نهاية أخرى؟ ومن أمثلة ذلك: إصدارات أقدم من نقاط النهاية الموثّقة، أو عمليات تعديل أو حذف، أو نقاط نهاية إدارية أو تشخيصية، أو صفحات مساعدة مولَّدة تلقائياً (مثل ASP.NET Web API Help أو Swagger). نرجو تزويدنا بقائمة بها مع الغرض من كل منها.
+- ب. هل يعدّل أيٌّ منها البيانات أو يحذفها، أو يستجيب دون رمز جلسة (`token`) صالح؟
+- ج. هل يمكن تعطيلها، أو حجبها في IIS، دون التأثير على برنامج الشامل المكتبي أو على منتجات ISCO الأخرى؟
+
+</div>
+
+**Why we ask:** our layer forwards only the documented endpoints we have reviewed, but any other endpoint on the API
+site stays reachable to whoever can reach the Shamel server; we want to block what we do not use, and to learn about
+any endpoint we should use instead.
+
+<sub>Ref: Q22 · 01 §6.5 · 01 §16</sub>
+
 ### 3.3 Request and response conventions (قواعد الطلبات والاستجابات)
 
 #### ISCO-12 — Exact HTTP method per endpoint
@@ -542,6 +569,8 @@ or delete.
 - (c) Is JSON always returned, or can the API return XML depending on the `Accept` header?
 - (d) Is the field order stable, so that two identical calls return identical bodies when no data changed?
 - (e) Are decimal amounts rounded to a fixed number of decimal places?
+- (f) Is every JSON response, including error responses, sent with `Content-Type: application/json` (with or without
+  `charset=utf-8`)? Or can JSON arrive labelled as `text/html`, `text/plain` or another type?
 
 <div dir="rtl" lang="ar">
 
@@ -552,13 +581,14 @@ or delete.
 - ج. هل تُعاد الاستجابة بصيغة JSON دائماً، أم قد تُعاد بصيغة XML بحسب الترويسة `Accept`؟
 - د. هل ترتيب الحقول ثابت، بحيث يُعيد استدعاءان متطابقان المحتوى نفسه تماماً إذا لم تتغير البيانات؟
 - هـ. هل تُقرَّب المبالغ العشرية إلى عدد ثابت من المنازل العشرية؟
+- و. هل تُرسَل كل استجابة JSON، بما فيها استجابات الأخطاء، مع الترويسة `Content-Type: application/json` (مع `charset=utf-8` أو بدونها)؟ أم قد تصل بيانات JSON موسومة بنوع آخر مثل `text/html` أو `text/plain`؟
 
 </div>
 
 **Why we ask:** our decoders and our test server mirror your exact field names; stable output also lets us store
-identical audit records only once.
+identical audit records only once. We treat a response that is not labelled as JSON as an error.
 
-<sub>Ref: Q12 · Q46 · I-19 · 05 §11 (assumption 1 and stable-serialisation question)</sub>
+<sub>Ref: Q12 · Q46 · I-19 · 01 §7.4 · 05 §11 (assumption 1 and stable-serialisation question)</sub>
 
 ### 3.4 Errors (الأخطاء)
 
@@ -659,8 +689,11 @@ The list endpoints return all records in one response.
 - (a) Is there any hidden server-side limit, maximum row count or truncation for large results?
 - (b) Is pagination (page and size, or offset and limit) supported, even if undocumented, or is it planned?
 - (c) What response sizes should we expect from `GetItems`, `GetCustomers`, `GetItemsStores`,
-  `GetCustomerPricesAsRows`, `GetItemsCatalog` and `GetItemsSerials` with tens of thousands of records?
+  `GetCustomerPricesAsRows`, `GetItemsCatalog` and `GetItemsSerials` with tens of thousands of records, and from
+  `GetVouchers` over a wide date range?
 - (d) Is there a maximum date range for `GetVouchers`, `GetExtraVouchers` and the two account-statement reports?
+- (e) Apart from pagination, do any list endpoints accept other undocumented parameters, for example a maximum number
+  of rows, a sort order or a selection of fields?
 
 <div dir="rtl" lang="ar">
 
@@ -670,8 +703,9 @@ The list endpoints return all records in one response.
 
 - أ. هل يوجد من جهة الخادم أي حدّ خفي، أو عدد أقصى للسجلات، أو اقتطاع للنتائج الكبيرة؟
 - ب. هل يتوفر تقسيم النتائج إلى صفحات (رقم الصفحة وحجمها، أو الإزاحة والحد الأقصى) ولو بشكل غير موثق، أو هل هو مخطط له؟
-- ج. ما أحجام الاستجابة المتوقعة من `GetItems` و`GetCustomers` و`GetItemsStores` و`GetCustomerPricesAsRows` و`GetItemsCatalog` و`GetItemsSerials` عندما يبلغ عدد السجلات عشرات الآلاف؟
+- ج. ما أحجام الاستجابة المتوقعة من `GetItems` و`GetCustomers` و`GetItemsStores` و`GetCustomerPricesAsRows` و`GetItemsCatalog` و`GetItemsSerials` عندما يبلغ عدد السجلات عشرات الآلاف، ومن `GetVouchers` عند طلب فترة زمنية طويلة؟
 - د. هل يوجد حدّ أقصى للفترة الزمنية في `GetVouchers` و`GetExtraVouchers` وفي تقريرَي كشف الحساب؟
+- هـ. بالإضافة إلى تقسيم النتائج إلى صفحات، هل تقبل أيٌّ من نقاط النهاية الخاصة بالقوائم معاملات أخرى غير موثّقة، مثل حدّ أقصى لعدد السجلات، أو ترتيب النتائج، أو اختيار الحقول المطلوبة؟
 
 </div>
 
@@ -1411,6 +1445,35 @@ whoever approves the write.
 
 <sub>Ref: Q29 · Q42 · U §4.3 · U §4.4</sub>
 
+#### ISCO-54 — Authentication check before a write is executed
+
+Suppose a write (`/Voucher/Post2`, `/Customer/Post`, `/Item/Post` or `/CostCenter/Post`) is sent with a `token` that
+has expired or is invalid.
+
+- (a) Does the API always check the `username` and `token` headers before it executes anything, so that an
+  authentication failure guarantees that nothing was saved?
+- (b) Can an authentication-failure response ever follow a write that was partly or fully executed (for example, if
+  the session expires while a long voucher is being saved)?
+- (c) Is the response for an expired token on a write the same as on a read (ISCO-18 (c))?
+
+<div dir="rtl" lang="ar">
+
+**التحقق من المصادقة قبل تنفيذ عملية الإدخال**
+
+لنفترض أن عملية إدخال (`/Voucher/Post2` أو `/Customer/Post` أو `/Item/Post` أو `/CostCenter/Post`) أُرسلت برمز جلسة (`token`) منتهي الصلاحية أو غير صالح.
+
+- أ. هل تتحقق الواجهة البرمجية دائماً من الترويستين `username` و`token` قبل تنفيذ أي شيء، بحيث يعني فشل المصادقة يقيناً أنه لم يُحفظ أي شيء؟
+- ب. هل يمكن أن تُعاد استجابة فشل المصادقة بعد تنفيذ عملية الإدخال جزئياً أو كلياً (مثلاً إذا انتهت صلاحية الجلسة أثناء حفظ سند طويل)؟
+- ج. هل الاستجابة عند استخدام رمز منتهي الصلاحية في عملية إدخال هي نفسها الاستجابة في عملية القراءة (انظر ISCO-18، البند ج)؟
+
+</div>
+
+**Why we ask:** when a write fails with an authentication error, we must know whether it is safe to log in again and
+resend it. Until then we report the outcome as unknown and ask a person to check in Shamel; a guarantee that
+authentication comes first lets us resend such a write safely.
+
+<sub>Ref: Q14 · Q39 · 01 §6.4 (step 6) · 01 §7.5</sub>
+
 ### 3.14 Enumerations (القيم المرمّزة)
 
 #### ISCO-49 — Values of undocumented enumerations
@@ -1583,13 +1646,13 @@ Each older reference and the question(s) that now carry it. "–" = no question 
 | Q1 | ISCO-18 | Q2 | ISCO-19, ISCO-43 | Q3 | ISCO-19, ISCO-39 | Q4 | ISCO-12 |
 | Q5 | ISCO-13 | Q6 | ISCO-11 | Q7 | ISCO-11 | Q8 | ISCO-14 |
 | Q9 | ISCO-16 | Q10 | ISCO-13 | Q11 | ISCO-05, ISCO-07 | Q12 | ISCO-17 |
-| Q13 | ISCO-21, ISCO-52 | Q14 | ISCO-01, ISCO-02, ISCO-18 | Q15 | ISCO-03 | Q16 | ISCO-03 |
+| Q13 | ISCO-21, ISCO-52 | Q14 | ISCO-01, ISCO-02, ISCO-18, ISCO-54 | Q15 | ISCO-03 | Q16 | ISCO-03 |
 | Q17 | ISCO-25 | Q18 | ISCO-22 | Q19 | ISCO-15 | Q20 | ISCO-39 |
-| Q21 | ISCO-37 | Q22 | ISCO-50 | Q23 | ISCO-40, ISCO-41 | Q24 | ISCO-26 |
+| Q21 | ISCO-37 | Q22 | ISCO-50, ISCO-55 | Q23 | ISCO-40, ISCO-41 | Q24 | ISCO-26 |
 | Q25 | ISCO-33 | Q26 | ISCO-34 | Q27 | ISCO-27 | Q28 | ISCO-35 |
 | Q29 | ISCO-32, ISCO-35, ISCO-48 | Q30 | ISCO-32 | Q31 | ISCO-28 | Q32 | ISCO-35 |
 | Q33 | ISCO-29 | Q34 | ISCO-30 | Q35 | ISCO-38 | Q36 | ISCO-28 |
-| Q37 | ISCO-31 | Q38 | ISCO-44 | Q39 | ISCO-43 | Q40 | ISCO-45, ISCO-47 |
+| Q37 | ISCO-31 | Q38 | ISCO-44 | Q39 | ISCO-43, ISCO-54 | Q40 | ISCO-45, ISCO-47 |
 | Q41 | ISCO-24, ISCO-46, ISCO-47 | Q42 | ISCO-39, ISCO-48, ISCO-52 | Q43 | ISCO-23, ISCO-52 | Q44 | ISCO-49 |
 | Q45 | – (naming only; `/v1` renames regardless) | Q46 | ISCO-17 | Q47 | ISCO-20 | Q48 | ISCO-14 |
 
@@ -1637,6 +1700,44 @@ U §6.4 (undocumented enum values) → ISCO-49, plus ISCO-27, ISCO-33 and ISCO-3
 | HTTP methods (assumption 2), HTTPS (assumption 1), gzip, maximum response sizes | ISCO-12, ISCO-05, ISCO-11, ISCO-21 |
 | `image_path` format (assumption 4) | ISCO-34 |
 | Stack traces / SQL in errors | ISCO-18 (d) |
+| Authentication checked before a write executes (01 §6.4 step 6) | ISCO-54 |
+| Response `Content-Type` other than `application/json` (01 §7.4) | ISCO-17 (f) |
+| Undocumented endpoints to know about or block (01 §6.5) | ISCO-50 (d), ISCO-55 |
+
+**Retired ids of an earlier 01 §16.2 (`ISCO-1` … `ISCO-28`, without a leading zero).** That draft numbered its own
+list; 01 §16.2 now only maps its topics to this document. An old id must never be read as the `ISCO-0n` of the same
+digit (old `ISCO-8` is ISCO-01, not ISCO-08).
+
+| Old id | Topic | Question(s) here |
+|---|---|---|
+| ISCO-1 | Permission to wrap the API; offering Bawaba to other Shamel customers later; licence terms, fees | ISCO-53 |
+| ISCO-2 | API versioning, change notices, changelog, test server; deployed versions; patch cadence, vulnerability reports | ISCO-50, ISCO-51, ISCO-10 |
+| ISCO-3 | HTTPS and certificates; base URL and scheme; HTTP method per endpoint; gzip; response `Content-Type` | ISCO-05, ISCO-07 (a), ISCO-12, ISCO-11 (d), ISCO-17 (c), (f) |
+| ISCO-4 | Undocumented paging, limit, sort or field-selection parameters; largest response sizes | ISCO-21 (b), (c), (e) |
+| ISCO-5 | Recommended concurrency and requests per second; throttling; server-side timeouts | ISCO-20 |
+| ISCO-6 | IIS Windows authentication; binding the API site to `127.0.0.1` | ISCO-06, ISCO-07 (b) |
+| ISCO-7 | Stable serialization; wire JSON casing; `null` versus empty string | ISCO-17 (a), (b), (d) |
+| ISCO-8 | Session lifetime; second login invalidates the first; server-side revocation, logout | ISCO-01, ISCO-02 |
+| ISCO-9 | Error bodies for an invalid token and for failed logins; lockout policy; content of the `username` header | ISCO-18 (c), ISCO-03 |
+| ISCO-10 | Authentication checked before a write executes | ISCO-54 |
+| ISCO-11 | API users versus desktop users; API access per user; restricted API-only user | ISCO-04 |
+| ISCO-12 | Logging of request headers by Shamel or IIS | ISCO-08 |
+| ISCO-13 | Stack traces or SQL in errors; `ErrorMessage` shapes; rejection messages for duplicates and validation | ISCO-18 (a), (d), ISCO-19, ISCO-43 (b) |
+| ISCO-14 | Salesman scoping per endpoint; `store` header on `GetItems` | ISCO-25 (a), ISCO-35 (a) |
+| ISCO-15 | `GetCustomers` for a user without salesman binding; salesman scoping on writes | ISCO-25 (b), (d) |
+| ISCO-16 | `/Files/GetSalesmen` response | ISCO-26 |
+| ISCO-17 | `lastupdatedate` semantics | ISCO-22 |
+| ISCO-18 | Date-range inclusivity, maximum range, timezone; `GetVouchers` date basis; `update_date` | ISCO-24, ISCO-21 (d), ISCO-23 (c), (d) |
+| ISCO-19 | Deletions and how to observe them | ISCO-23 (a), ISCO-22 (g) |
+| ISCO-20 | `ItemCatalog.image_path` format; image endpoint | ISCO-34 |
+| ISCO-21 | `GetCustomerPricesAsRows` filters and fields | ISCO-33 |
+| ISCO-22 | `GetLastPriceReport`: `customer` code or name; global or per customer | ISCO-37 (b), (c) |
+| ISCO-23 | `GetAccountsheet`: accounts accepted, number format, `start_date`, `type` | ISCO-38 |
+| ISCO-24 | `GetDelivery`; voucher types of `GetExtraVouchers`; `GetStatus` | ISCO-41 (a), ISCO-40 (b), ISCO-42 |
+| ISCO-25 | Voucher-write semantics (`debit_credit`/`cr_dr`, `accounts`, cash amount, totals and VAT, prefixes, destination store, `system_id`) | ISCO-49, ISCO-47 (a), (b), (d), ISCO-46 (a), ISCO-45 (a), ISCO-44 |
+| ISCO-26 | Currency fields and rates; customer fields; undocumented enumerations | ISCO-28, ISCO-32, ISCO-49 |
+| ISCO-27 | `/Voucher/Post` still active; other undocumented endpoints | ISCO-50 (d), ISCO-55 |
+| ISCO-28 | SQL Server reachable from the LAN; other exposed services | ISCO-09 |
 
 ### A.6 Operations, 05 §11
 

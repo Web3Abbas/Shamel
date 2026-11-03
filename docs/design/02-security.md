@@ -315,8 +315,20 @@ Hiding the gateway's IP is a secondary goal: it protects Cloudflare's DDoS shiel
     rebinding). Rejected ranges: 0.0.0.0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.0.2/24,
     192.168/16, 198.18/15, 198.51.100/24, 203.0.113/24, 224/4, 240/4, `::/128`, `::1`, `::ffff:0:0/96` (checked after
     unmapping), `64:ff9b::/96`, `fc00::/7`, `fe80::/10` and `ff00::/8`. Also rejected: the configured upstream
-    addresses and the gateway's own addresses.
-  - No redirects. TLS is verified. At most 64 KiB of the response is read, then discarded.
+    addresses, the gateway's own addresses and `webhooks.deny_cidrs`. The check is re-run on every attempt.
+  - **The gateway resolves and validates the target itself in every egress mode** (05 §2.7.3). Directly, it dials
+    the validated address. With `webhooks.egress_proxy_url` set, it sends `CONNECT <validated-IP>:<port>`, never
+    `CONNECT <hostname>` (which would let the proxy resolve private, metadata or rebinding targets the gateway never
+    saw), then runs TLS through the tunnel with SNI and `Host` set to the hostname and the certificate verified
+    against the hostname. A proxy that refuses IP-literal `CONNECT` is a configuration error (`bawaba doctor`).
+  - **Owner-approved target hosts in every egress mode** (05 §2.7.4). A push target's host must match a global
+    `webhooks.allowed_target_hosts` entry or a per-lineage approval in `webhook_target_approvals`; any other host is
+    refused with `422 webhook_target_not_allowed` and files a target request that the owner approves locally
+    (`bawaba webhook targets approve <host> --token <id>`, step-up; alert `webhook_target_requested`). So no token,
+    including a live agent token with `webhooks:write`, can start pushing business data to a host the owner has not
+    approved. Sandbox targets follow the same rules (HTTPS only).
+  - No redirects. TLS is verified. At most `webhooks.delivery.max_response_bytes` (64 KiB) of the response is read,
+    then discarded; `webhooks.delivery.timeout` (10 s) bounds each attempt.
   - Tools see only an outcome enum (`delivered`, `http_status`, `connect_failed`, `tls_failed`, `timeout`), the HTTP
     status and the latency. Never error strings or receiver bodies, so webhooks cannot be used as a port scanner.
   - Webhook URLs are stored encrypted (purpose `webhook_url`), because receivers often put secrets in query strings.
@@ -676,9 +688,9 @@ first (unknown, Q14), independent logins would kick each other out continuously.
    upstream's instances equals the upstream's `max_concurrency`: in `single_holder` mode the primary holder receives
    `cap_share = cap` and standbys `0`; if credentials are split across instances, the cap is divided in proportion to
    their recent per-credential call rate (at least 1 per holder); in `per_connector` mode each instance gets
-   `cap / instances`. Every holder change sends a `cap_share` update on the control stream, the old holder's share
-   is lowered before the new holder's is raised, and the local `policy.max_concurrency` ceiling (check 8) still
-   applies, so a handover never lets the instances together exceed the cap or the owner's local ceilings.
+   `cap / instances`. Every holder change sends `cap_share` updates on the control stream as part of the handover of
+   item 2 (the old holder stops before the new holder starts), and the local `policy.max_concurrency` ceiling
+   (check 8) still applies, so the owner's local ceilings hold through any handover.
 
 In direct mode the gateway's own cluster-wide session cache with serialized login (01 §7.1) solves the same problem.
 `bawaba upstream calibrate` tests the behaviour (login twice, then check whether the first session still works) and
@@ -740,7 +752,7 @@ stateDiagram-v2
 | Reach other hosts on the Shamel LAN | **No** | Through whatever the Shamel firewall exposes | Yes |
 | Push code or config to the connector | **No** | n/a | n/a |
 | Read API tokens | No: HMACs only (256-bit, not invertible) | Same | No (tokens never reach the connector) |
-| Decrypt data at rest | As `bawaba-data`: only data-plane purposes (live snapshots, views, queues, idempotency records, webhook secrets), **not** stored audit bodies or metadata of past epochs, the CA key or the TOTP seed (§9.2). As root: yes (`master.key` on host). | Same, plus Shamel credentials and upstream config (data-plane purposes in direct mode) | No |
+| Decrypt data at rest | As `bawaba-data`: only data-plane purposes (live snapshots, views, queues, idempotency records, webhook secrets), **not** stored audit bodies or metadata of past epochs (only the shared compression dictionaries, §9.2), the CA key or the TOTP seed (§9.2). As root: yes (`master.key` on host). | Same, plus Shamel credentials and upstream config (data-plane purposes in direct mode) | No |
 | Owner actions or policy changes | No as `bawaba-data`: no control route, no `bawaba_control` DB role, no `master.key`, no CA or TOTP key. As root, yes. | Same | No |
 
 Recovery: follow the runbook in §17.
@@ -817,12 +829,12 @@ flowchart TD
     MK -- "AES-256-GCM wrap" --> KC
     MK -- "wrap (control copy)" --> KD
     DK -- "wrap (data copy)" --> KD
-    KC -- wrap --> C1["AEAD: pki_ca, totp_seed, cf_api_token, smtp_password"]
+    KC -- wrap --> C1["AEAD: pki_ca, totp_seed, cf_api_token"]
     KC -- wrap --> C2["HPKE private keys: audit_seal (monthly)"]
     KC -- wrap --> C3["MAC: admin_chain"]
     KD -- wrap --> D1["AEAD: shamel_credential, upstream_config, media_ref, upstream_session (direct mode)"]
     KD -- wrap --> D2["AEAD: snapshot, view, cursor, idempotency, queue, approval_payload, pending_secret"]
-    KD -- wrap --> D3["AEAD: webhook_secret, webhook_url, webhook_event, compiled_config, audit_spool"]
+    KD -- wrap --> D3["AEAD: webhook_secret, webhook_url, webhook_event, compiled_config, audit_spool, audit_dict"]
     KD -- wrap --> D4["MAC: token_pepper, coalesce, audit_addr, audit_index, audit_chain, webhook_ledger, media_id, media_sign"]
     E["Audit epoch DEKs (audit_body, audit_meta)<br/>random per node and epoch, memory only"]
     C2 -. "opens the sealed epoch DEKs<br/>(nodes seal to the public key)" .-> E
@@ -842,8 +854,11 @@ flowchart TD
   - `totp_seed`, `admin_chain`: owner authentication and the admin event chain (§12.5), so a compromised data plane
     can neither verify TOTP codes nor forge admin events.
   - `cf_api_token`: Cloudflare ban sync is performed by the control plane, which reads `ip_bans` (§10.3).
-  - `smtp_password`: the SMTP sender runs in the control plane and reads `alert_outbox` (05 §3.1); data-plane
-    emitters only enqueue alerts.
+  - `smtp_password` (the SMTP password; a secret file, not a DEK purpose): the SMTP sender runs in the control plane
+    and reads `alert_outbox` (05 §3.1); data-plane emitters only enqueue alerts. Like the PostgreSQL and Valkey
+    passwords it is a bootstrap secret, `alerts.smtp.password_file` in `control.yaml` (01 §15.2), delivered only to
+    the control-plane unit (`LoadCredential=` or a Docker secret, §15.4). It is never stored in PostgreSQL, so it
+    needs no `crypto_keys` row; wherever plane lists name `smtp_password` (01 §5.3, §15.3) they mean this file.
   - `audit_seal`: the HPKE private keys that open audit epoch DEKs.
 - **Write-only audit.** Each data-plane node generates a random 256-bit DEK per epoch (`security.audit_epoch`,
   default 1 h, or earlier after 64 GiB of output) for the purposes `audit_body` and `audit_meta` (which includes
@@ -855,6 +870,12 @@ flowchart TD
   can read the bodies it is processing during the current epoch (which it sees in plaintext anyway), but none stored
   in earlier epochs or by other nodes. This is what makes the write-only claim of 05 §1.10 hold even on a single host
   with a filesystem blob store. Cost: one HPKE seal per node per epoch; per object it is plain AES-GCM.
+- **Compression dictionaries.** The zstd dictionaries that audit chunks are compressed with (05 §1.4.4,
+  `audit_zstd_dicts.bytes_enc`) are encrypted under the data-plane purpose `audit_dict`, because every data node must
+  read them to compress. **Residual:** a dictionary holds frequent byte sequences of past bodies (mostly JSON keys and
+  repeated values, not whole records), so it is the one piece of past audit content a data node can read. Owners
+  who do not accept that set `audit.compression.dictionaries.enabled: false` (about 2× more stored bytes for small
+  chunks).
 - **Node-local spool.** The overflow spool holds raw events not yet processed (05 §1.5.3), so it uses the data-plane
   purpose `audit_spool`; WAL segments hold only objects and rows already sealed under the epoch DEK, and replay moves
   ciphertext without decrypting it.
@@ -901,10 +922,11 @@ offset len  field
 | `totp_seed` | `owners/<owner_id>/totp` |
 | `audit_body` | `blob/<blob_id>` |
 | `audit_meta` | `audit_event/<request_id>/<column>` |
-| `snapshot` | `snapshot/<snapshot_id>/<chunk_n>` (one shared, unfiltered snapshot per coalesced fetch, 01 §9.4) |
-| `view` | `view/<view_id>/<token_id>/<policy_version>` |
+| `audit_dict` | `audit_dict/<dict_id>` (05 §1.4.4) |
+| `snapshot` | `snapshot/<sid>/<n>` for record chunk *n* and `snapshot/<sid>/k` for the key column (one shared, unfiltered snapshot per coalesced fetch, 01 §9.4) |
+| `view` | `view/<vid>/<token_id>/<policy_version>/<suffix>`, suffix `m` (meta), `p/<n>` (positions page *n*) or `c/<n>` (materialized chunk *n*), so pages and chunks cannot be swapped within a view or across views (01 §9.5) |
 | `idempotency` | `idem/<lineage_id>/<sha256(idempotency_key)>` (the idempotency namespace is the token lineage, 04 §2.4.5) |
-| `cursor` | `cursor/<token_id>/<route_id>` (contents add `view_id`, offset, `query_hash`, `policy_version`, expiry) |
+| `cursor` | `cursor/<token_id>/<route_id>` (sealed contents `{v, vid, sid, offset, query_hash, policy_version, expires_at, chunk_hint}`, 01 §9.6) |
 | `approval_payload` | `approval/<approval_id>/<column>` (each `*_enc` column of `approval_items`: `payload_enc`, `upstream_request_enc`, `summary_enc`, `idempotency_key_enc`, `result_enc`; 04 §11.2) |
 | `pending_secret` | `access_request/<request_id>/<agent_token_id>` |
 | `pki_ca` | `pki/<ca_id>` |
@@ -1068,9 +1090,9 @@ yield `token_expired`, which helps developers and reveals almost nothing.
 
 | Value | Protection |
 |---|---|
-| Pagination cursor | `base64url(envelope)` sealed with purpose `cursor`, AAD-bound to token and route. Contents: view id, offset, `query_hash`, `policy_version`, expiry (01 §9.6). Tampering, use by another token or with another query yields `invalid_cursor`. A cursor is honored only while the token is active and its `policy_version` is unchanged (`409 cursor_invalidated`), so revocation or narrowing applies immediately even to running walks. |
-| Snapshot payload (Valkey) | Encrypted (`snapshot`, AAD `snapshot/<sid>/<chunk_n>`), TTL 60 s absolute. It holds the **unfiltered** normalized records of one coalesced upstream call, shared by every requester of that call; the coalescing key covers (tenant, upstream, environment, credential, call signature, normalizer version) through a keyed HMAC (01 §9.1), so a snapshot contains exactly what Shamel returns to that credential and is never shared across credentials or environments. It therefore contains fields some readers may not see (`purchase_price`, balances, credit limits). Controls: snapshot ids are 128-bit random and never leave the gateway; no API accepts a snapshot id; a snapshot is read only through a view; every page, including page 1 and every cursor page, runs S14 (data scope) and S15 (field mask) with the requesting token's **current** policy; S15 is fused into the generated encoder, so a hidden field is never serialized into a response buffer; Valkey ACLs limit the keys to the data-plane user (§12.4). |
-| View (Valkey) | Encrypted (`view`, AAD `view/<vid>/<token_id>/<policy_version>`), TTL = the snapshot's remaining TTL. Holds the snapshot id and the record positions that passed this token's data scope and filters (01 §9.5). A view read by another token, or after a policy change, fails AEAD or the binding check and yields `invalid_cursor` / `cursor_invalidated`. |
+| Pagination cursor | `base64url(envelope)` sealed with purpose `cursor`, AAD-bound to token and route. Contents: `{v, vid, sid, offset, query_hash, policy_version, expires_at, chunk_hint}` (01 §9.6). `sid` is checked against the view meta (a mismatch yields `cursor_invalidated`); `chunk_hint` names the snapshot chunks the next page needs, so they are read in the same pipelined batch. Both are inside the seal, so a client can neither read nor alter them, and a hint can only name chunks of the snapshot that the view meta already references. Tampering, use by another token or with another query yields `invalid_cursor`. A cursor is honored only while the token is active and its `policy_version` is unchanged (`409 cursor_invalidated`), so revocation or narrowing applies immediately even to running walks. |
+| Snapshot payload (Valkey) | Encrypted (`snapshot`; record chunks under AAD `snapshot/<sid>/<n>`, the key column of sort keys, search keys and dimension values under `snapshot/<sid>/k`), TTL 60 s absolute. It holds the **unfiltered** normalized records of one coalesced upstream call, shared by every requester of that call; the coalescing key covers (tenant, upstream, environment, credential, call signature, normalizer version) through a keyed HMAC (01 §9.1), so a snapshot contains exactly what Shamel returns to that credential and is never shared across credentials or environments. It therefore contains fields some readers may not see (`purchase_price`, balances, credit limits). Controls: snapshot ids are 128-bit random and never leave the gateway in clear (a cursor carries one only inside its seal); no API accepts a snapshot id except inside a sealed cursor, which opens only for the token and route it was issued to and must match that token's view meta; a snapshot is read only through a view; every page, including page 1 and every cursor page, runs S14 (data scope) and S15 (field mask) with the requesting token's **current** policy; S15 is fused into the generated encoder, so a hidden field is never serialized into a response buffer; Valkey ACLs limit the keys to the data-plane user (§12.4). |
+| View (Valkey) | Encrypted (`view`, AAD `view/<vid>/<token_id>/<policy_version>/<suffix>` with suffix `m`, `p/<n>` or `c/<n>`), TTL = the snapshot's remaining TTL. The meta (`m`) holds the snapshot id, token, route, policy version, query hash and page map; a `positions` view holds pages of snapshot record indexes that passed this token's data scope and filters (`p/<n>`), a `materialized` view holds those records themselves in view order (`c/<n>`), unmasked, so S15 applies the token's current mask on every page (01 §9.5). The suffix binding stops a page or chunk from being replayed at another position or in another view. A view read by another token, or after a policy change, fails AEAD or the binding check and yields `invalid_cursor` / `cursor_invalidated`. |
 | Idempotency record (Valkey) | Encrypted (`idempotency`, AAD `idem/<lineage_id>/<sha256(key)>`). Keyed by `(lineage_id, sha256(key))` (`bwb:<t>:idem:<lineage_id>:<sha256(key)>`, durable backstop row keyed the same way, 03 §15.2), so a token can never replay a record of another lineage, and a record moved to another lineage's key fails AEAD. A rotation successor shares its predecessor's `lineage_id` (04 §2.4.5): a write resent with the same `Idempotency-Key` after rotation gets the stored outcome instead of posting a second voucher. It stores a fingerprint of the canonical request and the id of the token that made it, and reusing a key with a different body is rejected (03 §15.2). |
 | Queues (webhooks, approved writes) | Payloads encrypted (`queue`). Policy is never carried in Valkey: only invalidation signals, after which nodes re-read PostgreSQL. |
 | Approval payloads (PostgreSQL) | Every `*_enc` column of `approval_items` is encrypted (`approval_payload`, AAD `approval/<approval_id>/<column>`, §9.3). At submission the gateway stores `payload_sha256` (canonical JSON of the frozen, normalized `/v1` request) and `upstream_request_sha256` (the exact prepared Shamel call). At approval the control plane records `approved_upstream_sha256` (the hash of the exact upstream bytes the owner saw) and `approved_credential_id`. Right before sending, the executor re-checks `payload_sha256` and refuses any upstream request whose hash differs from `approved_upstream_sha256`, or a different credential; a hash mismatch raises `security_invariant_violation` and freezes the item (04 §11.5, §11.6). |
@@ -1223,7 +1245,7 @@ bawaba token resume tok_...                                      # lift an auto-
 | `server.request_timeout` | 90 s | Hard per-request deadline (01 §7.7). It MUST stay below Cloudflare's 100 s origin timeout, so the client always receives a Bawaba envelope (`504 upstream_timeout`) rather than an edge 524 that Bawaba never sees. |
 | `http.write_timeout` | 95 s | Longer than `server.request_timeout`, so the deadline error can still be written; shorter than the edge's 100 s |
 | `http.idle_timeout` | 120 s | Keep-alive (01 §5.2) |
-| Upstream budget per operation | reads 30 s, reports 60 s, writes 60 s, login 15 s | `Operation.Timeout` in the registry, per-upstream override (01 §7.7). Invariant checked at startup: `queue_timeout` (15 s) + the largest operation budget ≤ `server.request_timeout`. No budget may exceed 80 s. |
+| Upstream budget per operation | single-record and master-data reads 30 s; large lists (`GetItems`, `GetCustomers`, `GetItemsStores`, price rows, catalog) 75 s; voucher date-range slices (`GetVouchers`, `GetExtraVouchers`) 30 s per slice, the whole slice plan within the remaining request deadline; reports 60 s; writes 60 s; login 15 s | `Operation.Timeout` in the registry, per-upstream override (01 §7.7, §7.11). Each call's effective budget is `min(Operation.Timeout, remaining request deadline)`. Invariant checked at startup: `queue_timeout` (15 s) + the largest operation budget ≤ `server.request_timeout` (15 s + 75 s = 90 s). No budget may exceed 80 s. A slice plan that cannot finish within the page-1 deadline fails with `504 upstream_timeout` and keeps no partial snapshot. |
 | `http.max_conns` | 10000 per node | `netutil.LimitListener` |
 | `firewall.max_conns_per_ip` | 100 | – |
 | `http2.max_concurrent_streams` | 250 | 01 §5.2. A patched Go is required for HTTP/2 Rapid Reset and CONTINUATION flood fixes; govulncheck enforces this in CI. |
@@ -1460,12 +1482,13 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
 | Component | OS user | Listener | DB role | Valkey user | Keys loaded |
 |---|---|---|---|---|---|
 | Data plane (`bawaba-gateway`) | `bawaba-data` | `tunnel`: `/run/bawaba/data.sock` (0660 `bawaba-data:cloudflared`). `aop`: `:443`. Ops: `listeners.ops.addr` (`127.0.0.1:9090`). | `bawaba_data` | `data` | `data.key` (DK) → KEK_data → data-plane purposes only (§9.2). Never MK, `pki_ca`, `totp_seed`, `admin_chain`, `cf_api_token`, `smtp_password` or an `audit_seal` private key. |
-| Control plane (separate process; packaging such as `bawaba-gateway serve --plane=control` is the architecture document's choice) | `bawaba-control` | `listeners.control.addr` (`127.0.0.1:7443`, dashboard and admin API) and `listeners.control.socket` (`/run/bawaba/control.sock`, CLI) | `bawaba_control` | `control` | `master.key` (MK) → KEK_control and KEK_data: all purposes |
+| Control plane (separate process; packaging such as `bawaba-gateway serve --plane=control` is the architecture document's choice) | `bawaba-control` | `listeners.control.addr` (`127.0.0.1:7443`, dashboard and admin API) and `listeners.control.socket` (`/run/bawaba/control.sock`, CLI). Ops: `listeners.ops.addr` (`127.0.0.1:9091`, `/healthz`, `/readyz`, `/metrics`; 01 §5.2). | `bawaba_control` | `control` | `master.key` (MK) → KEK_control and KEK_data: all purposes |
 | Migrations | root, one-shot | none | `bawaba_migrate` (schema owner) | – | none |
 | `cloudflared` | `cloudflared` | none | – | – | – |
 
 - **Bind check:** `listeners.control.addr` must be an IP literal in `127.0.0.0/8` or `::1`, or a unix socket path. Anything
-  else makes startup fail. There is no override flag. In Docker, the control-plane service uses
+  else makes startup fail. There is no override flag. The control plane's own ops listener (`listeners.ops.addr`,
+  default `127.0.0.1:9091`) gets the same check. In Docker, the control-plane service uses
   `network_mode: host` so that this check still means host loopback.
 - **No route from the data plane:**
   - The owner handlers are in `internal/control/...`, which the data-plane binary entry point does not link. A test
@@ -1476,7 +1499,7 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
     table inet bawaba {
       chain output {
         type filter hook output priority 0; policy accept;
-        oifname "lo" meta skuid "bawaba-data" tcp dport 7443 reject
+        oifname "lo" meta skuid "bawaba-data" tcp dport { 7443, 9091 } reject
       }
     }
     ```
@@ -1824,8 +1847,10 @@ ReadWritePaths=/var/lib/bawaba /run/bawaba
 - In `aop` mode, if binding to 443 directly, use `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and
   `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
 - The control-plane unit is the same with `User=bawaba-control` and `LoadCredential=master.key:/etc/bawaba/master.key`
-  (it is the only unit that loads MK), plus `IPAddressDeny=any` and `IPAddressAllow=localhost`, the SMTP relay's
-  address (alerts) and, when `firewall.cloudflare_sync.enabled`, Cloudflare's API addresses (or an egress proxy).
+  (it is the only unit that loads MK) and `LoadCredential=smtp_password:/etc/bawaba/smtp_password` (read through
+  `alerts.smtp.password_file`, §9.2; the data-plane unit never receives it), plus `IPAddressDeny=any` and
+  `IPAddressAllow=localhost`, the SMTP relay's address (alerts) and, when `firewall.cloudflare_sync.enabled`,
+  Cloudflare's API addresses (or an egress proxy).
 - The connector's Linux unit follows the same pattern.
 
 ### 15.5 Remote access to the host
@@ -2067,9 +2092,12 @@ low-privilege live token, an agent token, and a connector deployment.
 
 ## 19. Security configuration reference
 
-Defaults are shown. Every key lives in `bawaba.yaml` (no secrets there). Key names follow the architecture
-document's configuration model (01 §15.2), which rejects unknown keys; keys introduced here are listed for 01 to
-accept (§20.1). The connector's keys are in its own local config.
+Defaults are shown. Bootstrap keys live in `bawaba.yaml` (data plane) or `control.yaml` (control plane), each
+accepting only its own plane's keys; secrets appear there only as `*_file` paths, never as values. Runtime keys
+(`upstreams[].…`, `webhooks.*` and the other kinds 01 §15.1 lists as runtime) are compiled config, set through the
+control plane. Key names follow the architecture document's configuration model (01 §15.1–§15.2), which rejects
+unknown keys; keys introduced here are listed for 01 to accept (§20.1). The connector's keys are in its own local
+config.
 
 | Key | Default | Section |
 |---|---|---|
@@ -2078,7 +2106,7 @@ accept (§20.1). The connector's keys are in its own local config.
 | `listeners.tunnel.addr` | as 01 §15.2; never publicly reachable except through Cloudflare | §7.4 |
 | `listeners.control.addr` | `127.0.0.1:7443` (loopback only; startup fails otherwise) | §12.1 |
 | `listeners.control.socket` | `/run/bawaba/control.sock` | §12.3 |
-| `listeners.ops.addr` | `127.0.0.1:9090` | LV-17 |
+| `listeners.ops.addr` | data plane `127.0.0.1:9090` (private IP in topology C); control plane `127.0.0.1:9091` (loopback only) | LV-17, §12.1 |
 | `control.session_idle` / `control.session_max` | `30m` / `12h` | §12.2 |
 | `control.stepup_window` | `5m` | §12.5 |
 | `security.master_key_file` | `$CREDENTIALS_DIRECTORY/master.key`, else `/etc/bawaba/master.key` (control plane only) | §9.4 |
@@ -2112,7 +2140,7 @@ accept (§20.1). The connector's keys are in its own local config.
 | `docs.public` / `docs.backend_display_name` | `true` / `"accounting system"` | LV-13 |
 | `media.enabled` / `media.url_ttl` / `media.max_bytes` | `false` / `15m` / `5MiB` | §5.4 |
 | `webhooks.allowed_ports` / `webhooks.egress_proxy_url` | `[443]` / unset | §5.5 |
-| `webhooks.max_response_read` / `webhooks.timeout` | `64KiB` / `10s` | §5.5 |
+| `webhooks.delivery.max_response_bytes` / `webhooks.delivery.timeout` | `64KiB` / `10s` (05 §2.9) | §5.5 |
 | `connector.enrollment_ttl` | `1h` | §7.3 |
 | `connector.require_sas_confirmation` | `true` | §7.3 |
 | `connector.cert_ttl` | `720h` | §7.7 |
@@ -2121,6 +2149,7 @@ accept (§20.1). The connector's keys are in its own local config.
 | `agents.secret_pickup_window` / `agents.secret_claim_replay_window` | `72h` / `10m` | §13.3 |
 | `audit.spool_max_bytes` | `10GiB` (WAL and spool together, 01 §15.2, 05 §1.11) | §16 |
 | `alerts.batch_window` / `alerts.connector_down_after` | `15m` / `2m` | §10.3, §16 |
+| `alerts.smtp.password_file` | `/run/secrets/smtp_password` (control plane only; `control.yaml`) | §9.2, §15.4 |
 | *(connector)* `gateway_url` | from the bundle | §7.1 |
 | *(connector)* `shamel.base_url`, `shamel.tls_pin_spki_sha256`, `shamel.host_header` | local only | §7.4 |
 | *(connector)* `policy.writes` | `deny` | §7.4 |
@@ -2140,10 +2169,10 @@ accept (§20.1). The connector's keys are in its own local config.
 | To | Requirement |
 |---|---|
 | Architecture | In connector mode, **the connector performs the Shamel login and holds the Shamel session**. Credentials arrive sealed (§7.5). With several connectors per upstream, the session holder protocol (`SessionRole`, `credential_session_mode`) decides which connector may log in for each credential (§7.5). The tunnel is end-to-end inner TLS 1.3 inside WSS through Cloudflare, with an explicitly framed protocol (§7.4). CA signing happens only in the control plane, through a PostgreSQL work queue (§7.2). The data plane and control plane are separate processes and users with no network path from data to control (§12.1). |
-| Architecture | **Key split (§9.2):** the data-plane role receives `data.key` (`security.data_key_file`), never `master.key`; 01 §15.3's single-file delivery and direct HKDF derivation of every purpose from the master key are replaced by the two-KEK hierarchy, and the control plane is the only process that loads MK. The SMTP sender and Cloudflare ban sync run in the control plane. Audit bodies and audit metadata are written under per-node epoch DEKs sealed to the control plane (§9.2). |
+| Architecture | **Key split (§9.2), adopted in 01 v2 (§5.1, §15.3):** the data-plane role receives `data.key` (`security.data_key_file`), never `master.key`; the two-KEK hierarchy replaces single-file delivery and direct HKDF derivation of every purpose from the master key, and the control plane is the only process that loads MK. The SMTP sender and Cloudflare ban sync run in the control plane. Audit bodies and audit metadata are written under per-node epoch DEKs sealed to the control plane (§9.2). |
 | Architecture | The **coalescing key** MUST include `upstream_id`, `cred_id` (the Shamel user), env, endpoint id and canonical upstream parameters. Requests made as different Shamel users are never coalesced (salesman scoping, Q17). Policy is applied per requesting token after the shared fetch. |
-| Architecture | **Snapshots** follow 01 §9: one unfiltered, encrypted snapshot per coalesced fetch (AAD `snapshot/<sid>/<chunk_n>`), never exposed directly; token-bound views (AAD `view/<vid>/<token_id>/<policy_version>`) and cursors; S14/S15 applied with the token's current policy on every page; cursors honored only while the token is active and its policy is unchanged (§9.10, 01 §9.7). |
-| Architecture | **Idempotency records** are keyed by token lineage: Valkey `bwb:<t>:idem:<lineage_id>:<sha256(key)>`, AAD `idem/<lineage_id>/<sha256(key)>` (§9.3, §9.10; 03 §15.2; 04 §2.4.5). 01 §6.4 still shows `bwb:<t>:idem:<token>:<key>`; it should use the lineage and the hashed key (`LineageID` is in the compiled policy, 04 §9.1). Views and cursors stay token-bound. |
+| Architecture | **Snapshots** follow 01 §9: one unfiltered, encrypted snapshot per coalesced fetch (AAD `snapshot/<sid>/<n>` and `snapshot/<sid>/k`), never exposed directly; token-bound views (AAD `view/<vid>/<token_id>/<policy_version>/<suffix>`, suffix `m`, `p/<n>` or `c/<n>`) and cursors carrying `sid` and `chunk_hint` inside the seal (01 §9.4–§9.6); S14/S15 applied with the token's current policy on every page; cursors honored only while the token is active and its policy is unchanged (§9.10, 01 §9.7). |
+| Architecture | **Idempotency records** are keyed by token lineage: Valkey `bwb:<t>:idem:<lineage_id>:<sha256(key)>`, AAD `idem/<lineage_id>/<sha256(key)>` (§9.3, §9.10; 03 §15.2; 04 §2.4.5). **Adopted in 01 v2** (§6.4 step 3, with the PostgreSQL backstop keyed `(tenant_id, lineage_id, key_hash)`; `LineageID` is in the compiled policy, 04 §9.1). Views and cursors stay token-bound. |
 | Architecture | **Registry and limits:** `Operation.MaxResponseBytes` by class (§10.6); per-operation upstream budgets of at most 80 s under `server.request_timeout` 90 s; legacy response assembly with spill-to-disk (§10.8). Configuration keys to accept: `security.data_key_file`, `security.audit_epoch`, `security.rotation.*`, `config.blind_staleness`, `http.*` limits of §10.6, `upstreams[].credential_session_mode`. Valkey key `bwb:<t>:credrole:<upstream>:<cred_id>` and the `credrole_changed` event (§7.5). The connector's `hello` advertises its endpoint table; `welcome` carries its credential roles. |
 | API | **Resolved in 03, nothing open.** Error catalog entries (English and Arabic messages, `docs_url`) for every code in §10.9 with the same statuses, including the approval and secret-delivery `409`s, `429 approval_limit_reached` and `duplicate_code` as `422` (03 §22.2, §27.1 item 9). Codes for expired and invalidated cursors (`snapshot_expired`, `cursor_invalidated`, `cursor_expired`). The public paths list for WAF rule R2 (03 §6.5). The webhook signature format of §9.9 documented for receivers (03 §17.4). The `/v1/media/{id}` presigned contract (§5.4; 03 §10.6). Public docs do not name the upstream product or version (LV-13; 03 §24.5). The legacy reference only at the authenticated `GET /v1/docs/legacy`, never under `/docs` (03 §20.5), asserted by §18.3. `scope_probe` surfaces to the tool as `Bawaba-Warning: repeated_error` (03 §23.4). Late secret claims return `409 secret_delivery_expired` (03 §18.3). Idempotency keyed by `lineage_id` (03 §15.2), as in §9.3 and §9.10. |
 | Permissions | **Resolved in 04, nothing open.** Atomic expansion of scopes and voucher types into a bitset so the subset rule can be evaluated (04 §3.1, §3.3, §9.1). 04 §10.3 is the authoritative subset rule; its conformance table maps every property of §13.2, including `public_fields_exposed`, the `public_exposure` approval gate (04 §10.5) and agent requests never setting `writes_require_approval=false`. Publishable tokens limited to the 7 business read atoms (04 §13). `access_requests:write` agent-only and never grantable (04 §3.1, §10.3). Per-token IP rules in the policy spec (04 §7; §10.2 here). Auto-suspension per §10.3: never publishable, secret tokens only for probes from inside their allowlist unless opted in (04 §2.4.6). Data-role privileges through `SECURITY DEFINER` functions (04 §10.4, §11.6; §12.4 here). Idempotency namespace by `lineage_id` (04 §2.4.5), adopted in the §9.3 binding and §9.10. `approval_items` encrypted columns and hash names (`payload_sha256`, `upstream_request_sha256`, `approved_upstream_sha256`; 04 §11.2), adopted in §9.3 and §9.10. **Standing:** any change to 04 §10.3 must keep every property of §13.2. |
