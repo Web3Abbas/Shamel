@@ -84,7 +84,7 @@ CREATE TABLE audit_events (
   flags           integer     NOT NULL,  -- bit set: coalesce_leader/follower/local, cursor_read, client_abort,
                                          -- approval_hold, idempotent_replay, bodies_dropped, body_not_read,
                                          -- blocked_aggregate, slow, legacy
-  warnings        integer,               -- bit set of Bawaba-Warning codes emitted (§4.2; 15 codes today)
+  warnings        integer,               -- bit set of Bawaba-Warning codes emitted (§4.2; 16 codes today)
   dur_total_us    integer     NOT NULL,
   dur_gateway_us  integer,               -- overhead (01 §10.1)
   dur_queue_us    integer,               -- upstream limiter wait
@@ -760,7 +760,7 @@ Subscriptions may narrow events with filters evaluated at fan-out: `voucher_type
 ### 2.3 Poll streams, scheduling, leadership
 
 ```
-webhook_streams(id, tenant_id, upstream_id, identity_id, variant_flags, detector,
+webhook_streams(id, tenant_id, upstream_id, identity_id NULL, variant_flags, detector,
                 state, epoch, leader_node, watermark_at, last_cycle_started_at, last_success_at,
                 last_reconcile_at, consecutive_failures, cursor_enc)
 ```
@@ -769,6 +769,18 @@ webhook_streams(id, tenant_id, upstream_id, identity_id, variant_flags, detector
   the set of required streams: for each active subscription → its token's (upstream, Shamel credential per 01 S10, variant
   such as `getAll` permission) × detectors of its event types. New streams start in `baselining`; streams with no
   subscribers go to `idle` and are retired after 7 days (ledger deleted).
+- **Identity sharing** (`identity_sensitive`): each Shamel endpoint in the operation registry carries
+  `identity_sensitive`, default `true`. Per upstream it can become `false` only through
+  `bawaba upstream calibrate <id> --scoping`, which fetches the endpoint (e.g. `GetItemsStores`,
+  `GetCustomerBalances`) once with the default service account and once with each pinned salesman credential and
+  finds identical record hashes; the result is stored in `upstream_endpoint_scoping(upstream_id, shamel_op,
+  identity_sensitive, verified_at, verified_with)` and re-verified automatically every 7 days. For endpoints with
+  `false` the identity is dropped from the stream key and the stream polls with the upstream's default service
+  account, so N salesman-pinned subscribers cost one diff instead of N; each token's data scope (including the
+  effective salesman set of a pinned credential, 04 §4) is still applied at fan-out (§2.6). A re-verification that
+  finds a difference sets the flag back to `true`, re-baselines the affected streams per identity and raises
+  `upstream_scoping_changed`. Calls Shamel documents as salesman-scoped (`GetCustomers` without `getAll=true`) are
+  never calibrated to `false`.
 - **Scheduling**: every node runs a scheduler that tries to acquire leases for streams that are due. Each stream has a
   fixed phase `offset = hash(stream_id) mod poll_interval`, so streams spread over the interval instead of hitting
   Shamel together. Different streams can be led by different nodes.
@@ -811,9 +823,10 @@ field_hashes = per top-level field, 8-byte truncated HMAC, in field-catalogue or
 state_enc    = webhook_event envelope (02 §9.3) of zstd(compact normalized record)   -- enables `previous` values
 ```
 
-and compare against the **ledger** `webhook_ledger(stream_id, key_hash, record_hash, field_hashes, state_enc,
-first_seen_at, last_changed_at, last_seen_cycle, missing_count)` with `key_hash = HMAC(webhook_ledger, key)[0:16]`
-(the key itself is only inside `state_enc`). Ledger size is small (2,000 customers ≈ 1.5 MB, 50,000 stock rows
+and compare against the **ledger** `webhook_ledger(stream_id, key_hash, record_hash, field_hashes, light_hash NULL,
+state_enc, first_seen_at, last_changed_at, last_seen_cycle, missing_count)` with
+`key_hash = HMAC(webhook_ledger, key)[0:16]` (the key itself is only inside `state_enc`; `light_hash` is used only by
+the voucher back-date sweep, §2.4.4). Ledger size is small (2,000 customers ≈ 1.5 MB, 50,000 stock rows
 ≈ 4 MB) and holds no plaintext business data — not even codes.
 
 | Comparison | Outcome |
@@ -840,8 +853,10 @@ diff every returned record against the ledger; commit; watermark_at = this cycle
 - `− 1 day` covers exclusive "after" semantics; `overlap` (default 6 h) covers an unknown Shamel timezone (it may run
   in UTC while the business is in `Asia/Hebron`) and clock skew between Shamel and Bawaba. Each incremental call
   therefore returns roughly the last 30–54 hours of changes; re-seen records hash identical and emit nothing.
-- Volatile fields excluded from hashes: customer `balance`, `not_payed_cheqs_balance`, `returned_cheqs_balance` (they
-  are covered by `customer.balance_changed`).
+- Volatile fields excluded from hashes: the customer `balance` object (`balance.current`, `balance.unpaid_cheques`,
+  `balance.returned_cheques` in `/v1` names). The detector does not request them (`getBalance` not sent), customer
+  events carry the resource without `balance` (03 §17.2), and balance movements are covered by
+  `customer.balance_changed`.
 - **Reconciliation**: full fetch without `lastupdatedate` daily (`reconcile: "17 3 * * *"` for customers,
   `"47 3 * * *"` for items) and whenever the stream was paused > 24 h. It catches changes Shamel did not date-stamp
   and detects removals.
@@ -853,7 +868,9 @@ Whether quantity movements update `lastupdatedate` is unknown, so the default is
 `GetItemsStores` without parameters, key `item_code‖store`, state `{quantity, shelf, main_unit}`. Rows that appear
 are changes from `null`; rows that disappear emit `quantity: "0"`, `row_removed: true`. `delta` is computed in exact
 decimal. If a cycle yields more than `max_events_per_cycle` (default 5,000, e.g. after a stock-take), one
-`stock.bulk_changed` event is emitted instead, telling receivers to re-read `/v1/stock`. Cost: one ≈ 3–4 MB call per
+`stock.bulk_changed` event is stored instead, telling receivers to re-read `/v1/stock`; its encrypted payload holds
+the changed row keys (`item_code`, `store_id`, zstd-compressed) so that `changed_rows` and `store_ids` are computed
+per subscription over the rows visible to its token (§2.6). Cost: one ≈ 3–4 MB call per
 5 min. `detectors.stock.mode: incremental` (incremental each cycle + hourly full diff) can be enabled once ISCO
 confirms `lastupdatedate` semantics for stock.
 
@@ -870,12 +887,21 @@ upstream business timezone, all with `getCustomerBalance` unset (so the volatile
 | Tier | Call | Window | Schedule | Purpose |
 |---|---|---|---|---|
 | Fast | `GetVouchers` `{fromDate: today−window_days, toDate: today+1}` | `window_days` = 3 | every cycle | new and edited recent vouchers (full objects) |
-| Back-date sweep | `GetExtraVouchers` (light rows: type, code, date, customer, amount) | `extra_scan_days` = 35 | hourly | unknown codes or changed amounts → `GetVoucher` per code (max 200 per sweep) → created/updated |
+| Back-date sweep | `GetExtraVouchers` (light rows: type, code, date, customer, amount, currency, rate, direction) | `extra_scan_days` = 35 | hourly | key missing from the ledger, or `light_hash` different from the value stored by the previous sweep → `GetVoucher` per code (max 200 per sweep) → created/updated |
 | Deep scan | `GetVouchers` in 7-day slices | `deep_scan_days` = 35 | nightly `13 2 * * *` | full diff of the window incl. edits not visible in light rows, and removals |
 
 - `toDate = today+1` absorbs timezone skew. Key = `type‖code` (codes carry a type prefix, upstream §6.2).
-- `record_hash` covers header + items + cheqs + accounts; `changed_fields` lists header fields and the collection
-  markers `items`, `cheqs`, `accounts`.
+- `record_hash` covers header + `lines` + `cheques` + `accounts` of the normalized voucher; `changed_fields` lists
+  header fields and the collection markers `lines`, `cheques`, `accounts`.
+- **Light hash for the sweep.** The light row has no reliable counterpart in the full voucher (its `amount` is not
+  confirmed to equal any full-voucher total, Q41), so the sweep never compares light rows with full records.
+  Instead it keeps its own fingerprint: `light_hash = HMAC-SHA256(webhook_ledger, canonical{type, code, date,
+  customer_code, amount, currency, rate, cr_dr})[0:16]` (the volatile `customer_balance_at_voucher_date` is
+  excluded), written to the ledger row every time the sweep sees the voucher. A sweep change is a missing key or a
+  `light_hash` that differs from the stored one. A ledger row created by the fast tier or the deep scan has
+  `light_hash = NULL`; the next sweep fills it **without** emitting an event or fetching the voucher (those tiers
+  already diffed the full record). Baselining runs one sweep to fill all light hashes. So the 200-fetch budget is
+  spent only on real changes, and `webhook_detection_lagging` reflects real backlog.
 - Ledger entries with voucher date older than `deep_scan_days + 7` are pruned: changes to vouchers older than the deep
   window are out of scope (documented limit; configurable).
 - Whether `GetExtraVouchers` covers stock-only voucher types (stockout, internal delivery) is unknown (upstream Q23);
@@ -914,8 +940,16 @@ webhook_delivery_attempts(delivery_id, attempt, started_at, duration_ms, http_st
 ```
 
 `payload_enc` (purpose `webhook_event`) holds the **unfiltered** normalized record, `previous` values and
-`changed_fields`; per-token filtering
-happens when rendering (§2.6). `sequence` is monotonic per stream.
+`changed_fields` (for `stock.bulk_changed`: the changed row keys); per-token filtering happens when rendering (§2.6).
+`sequence` is monotonic per stream.
+
+**Bawaba-generated events.** `approval.resolved` is not detected by polling: the approved-write executor (data
+plane) and the owner's reject/expire actions (control plane) insert the event and its delivery rows into
+`webhook_events` / `webhook_deliveries` **in the same transaction** that moves the approval to its final state
+(04 §11.6, §11.8). Its `stream_id` is the tenant's synthetic `approvals` stream (`detector = approvals`,
+`identity_id` NULL, always `active`, never polled, no lease, no ledger), which gives it a per-tenant `sequence`.
+Fan-out matches push subscriptions of the approval's lineage that include `approval.resolved`; pull subscriptions
+of that lineage read it like any other event.
 
 ```mermaid
 sequenceDiagram
@@ -950,17 +984,38 @@ by the same reconciler.
 
 - **Fan-out** (at commit): one delivery row per active push subscription bound to the stream whose `event_types`
   and filters match. Pull subscriptions get no rows; they read the event store directly (§2.7.5).
-- **At send time** the worker loads the subscribing token from the *current* compiled config and:
+- **At send time** (push) or read time (pull) the worker loads the subscribing token from the *current* compiled
+  config and renders the event **from that token's view**:
   1. token must be `active` (revoked/expired/suspended → subscription `suspended`, pending deliveries `cancelled`);
+     for `approval.resolved`, the approval must belong to the token's lineage;
   2. scope check: the event type's required read scope (§2.2) ⊆ token scopes;
-  3. **data scope**: the S14 row filter of that token is applied to the event record (stores, salesmen, customers,
-     currencies, price classes); sub-collections are filtered the same way (e.g. voucher items in disallowed stores);
-     not visible → delivery `suppressed` (reason recorded, not retried);
+  3. **data scope, both states**: the S14 row predicate of the corresponding read operation (stores, salesmen,
+     customers, currencies, price classes, voucher types) is evaluated on the **current** state (`object`) and on the
+     **previous** state (`object` overlaid with `previous`; absent for `*.created`, the tombstone for `*.removed`).
+     Vouchers are atomic (03 DS-5): a voucher with any line, cheque or header value outside the scope is not visible
+     as a whole, never shown with lines removed; element-wise filtering applies only to the sub-collections of
+     04 §4 (DS-4: item prices, stock rows inside items, customer balances). Then:
+
+     | Previous visible | Current visible | Rendered as |
+     |---|---|---|
+     | no | yes | `*.created` with the current object, no `previous`, no `changed_fields` (record entered the scope) |
+     | yes | no | `*.removed` with the last visible state, `reason: "no_longer_visible"` (record left the scope) |
+     | yes | yes | the stored type (`*.updated`, or `*.removed` for an upstream deletion, also with `no_longer_visible`) |
+     | no | no | delivery `suppressed` (`outside_data_scope`), not retried |
+
+     For row events the same rule gives: `stock.changed` entering → `previous_quantity: null`, leaving →
+     `row_removed: true` with `quantity: "0"` (exactly what a deleted row looks like); `customer.balance_changed`
+     entering → `previous_balance: null`, leaving → suppressed (subscribers of `customer.*` receive the
+     `customer.removed`). `stock.bulk_changed` is rendered per subscription: `changed_rows` and `store_ids` count only
+     the stored row keys visible to the token; zero → `suppressed`. A receiver therefore cannot distinguish "deleted
+     upstream" from "reassigned outside my scope" (04 §4.7);
   4. **field hiding**: the S15 mask for the corresponding read operation is applied to `object` and `previous`;
      hidden fields are removed from `changed_fields`; if no visible field changed → `suppressed`
      (`hidden_fields_only`) so a token cannot infer that a hidden field (e.g. `purchase_price`) changed;
   5. render with the generated `/v1` encoder, sign, send.
-- Evaluating at send time means a scope reduction or revocation also applies to retries already queued.
+- Evaluating at send time means a scope reduction or revocation also applies to retries already queued. A policy
+  change itself emits no events (records that become visible through a wider policy arrive with their next change;
+  tools resynchronise with a paged read after a policy change).
 
 ### 2.7 Delivery
 
@@ -979,8 +1034,8 @@ Bawaba-Signature: t=1762165200,v1=<hex HMAC-SHA256>
 
 {"id":"evt_01JBX3V5M6S9QK2T7D8R4F1HZW","type":"customer.updated","sequence":18342,
  "created_at":"2026-11-03T12:20:00+02:00","environment":"live","api_version":"v1",
- "data":{"object":{"code":"C-1001","name":"…","credit_limit":"5000.00"},
-         "changed_fields":["credit_limit"],"previous":{"credit_limit":"3000.00"}}}
+ "data":{"object":{"code":"C1001","name":"…","credit_limit":"5000"},
+         "changed_fields":["credit_limit"],"previous":{"credit_limit":"3000"}}}
 ```
 
 - **Signature**: `v1 = hex(HMAC-SHA256(secret, t ‖ "." ‖ raw_body))`, `t` = Unix seconds at signing (per attempt).
@@ -1006,14 +1061,19 @@ max_attempts = 16 (≈ 38 h nominal) · max_age = 72 h · whichever first → st
 | 429 / 503 with `Retry-After` | next attempt at `max(d_n, Retry-After)`, capped at 6 h |
 | 3xx | failure (redirects are never followed) |
 | other 4xx/5xx, timeout (connect 5 s, total 10 s), TLS or DNS error, blocked target | retry per schedule |
-| response body | read up to 64 KiB (then closed); first 1 KiB stored encrypted in the attempt log, **visible only to the owner**. Tools see only the outcome enum (`delivered`, `http_status`, `connect_failed`, `tls_failed`, `timeout`), the HTTP status and the latency (02 §5.5), so webhooks cannot be used as a port scanner |
+| response body | read up to 64 KiB (then closed); first 1 KiB stored encrypted in the attempt log, **visible only to the owner**. Tools see only the outcome enum (`delivered`, `http_status`, `connect_failed`, `tls_failed`, `timeout`, `blocked_target`), the HTTP status and the latency (02 §5.5, 03 §17.5), so webhooks cannot be used as a port scanner |
 
 - **Failing subscriptions**: after ≥ 10 consecutive failures the subscription is marked `failing` (alert
   `webhook_endpoint_failing`, warning); after failing continuously for `disable_after` (24 h) it becomes
   `disabled_failing` (alert high). Its pending deliveries stay in the dead-letter state for replay.
 - **Dead-letter queue** = deliveries in state `dead`, kept for `delivery_log_retention` (30 d). Replay: API
-  `POST /v1/webhooks/{id}/deliveries/{delivery_id}/retry`, CLI `bawaba webhook deliveries replay --subscription whs_…
-  --since …`. Replays create new attempts with fresh signatures.
+  `POST /v1/webhooks/{id}/deliveries/{delivery_id}/retry` (a `dead` delivery within the 30 d retention, or a
+  `delivered` one less than `replay_delivered_max_age` = 72 h ago, the receivers' de-duplication window; anything
+  else → `409 delivery_not_retryable`, 03 §17.5), owner CLI `bawaba webhook deliveries replay --subscription whs_…
+  --since …` (any retained delivery). Replays create new attempts with fresh signatures and are **always marked as
+  re-sends**: header `Bawaba-Delivery-Replay: true` and the envelope field `"replayed_at": "<RFC 3339>"`, which is
+  inside the signed body (03 §17.4); automatic retries carry neither. The 72 h limit stops a stolen
+  `webhooks:write` token from re-signing old, already-processed events after receivers have forgotten their ids.
 - **Concurrency**: at most `concurrency_per_subscription` (4) in-flight deliveries per subscription; a global worker
   pool (`webhooks.delivery.workers`, 32 per node).
 - **Ordering**: not guaranteed (head-of-line blocking would let one slow receiver stall everything). Every event
@@ -1031,7 +1091,8 @@ stateDiagram-v2
   in_flight --> suppressed: token lost access / record or fields not visible
   pending --> cancelled: subscription deleted or token revoked
   retry_scheduled --> cancelled: subscription deleted or token revoked
-  dead --> pending: replay
+  dead --> pending: replay (marked re-send)
+  delivered --> pending: re-send within 72 h (marked)
   delivered --> [*]
   suppressed --> [*]
   cancelled --> [*]
@@ -1046,18 +1107,42 @@ upstream addresses and the gateway's own addresses, no redirects, TLS verified, 
 most 64 KiB of the response read. Operations adds `webhooks.deny_cidrs` (extra ranges, e.g. office networks) and
 re-runs the check on every attempt, so a DNS change cannot turn an approved subscription into an internal probe.
 
-#### 2.7.4 Origin hiding for webhooks
+**The gateway always resolves and validates the target itself**, also behind an egress proxy: it resolves the
+host, applies the checks above to every returned address and picks a validated address. Directly, it dials that
+address. Through the proxy it sends `CONNECT <validated-IP>:<port>` (never `CONNECT <hostname>`, which would let
+the proxy resolve private, metadata or rebinding targets that the gateway never saw) and then runs TLS through the
+tunnel with SNI and `Host` set to the hostname and the certificate verified against the hostname. A proxy that
+refuses IP-literal `CONNECT` is a configuration error reported by `bawaba doctor`.
 
-A delivery is an outbound connection from Bawaba: whoever controls the target learns the egress IP, which in most
-topologies is the gateway's own IP that Cloudflare is meant to hide (00 §4). Therefore:
+#### 2.7.4 Target approval and origin hiding
+
+A delivery is an outbound connection from Bawaba that carries business data, so two questions are separate: **who
+may open a new destination** and **which IP the destination sees**.
+
+**Target approval (every egress mode).** A push target's host must match either a global entry in
+`webhooks.allowed_target_hosts` (owner-managed, exact hosts or `*.example.com`) or a per-token entry in
+`webhook_target_approvals(tenant_id, token_lineage_id, host, approved_at, approved_by)`. A subscription (create or
+`PATCH` of `url`) to any other host is refused with `422 webhook_target_not_allowed` and files a **target request**
+(`webhook_target_requests(id, tenant_id, token_id, host, description, status pending|approved|rejected,
+created_at)`, at most one pending per token and host, 10 pending per token), shown on the dashboard's Webhooks page
+and raised as
+`webhook_target_requested` (high, owner action needed). The owner approves with
+`sudo bawaba webhook targets approve <host> --token <id>` or in the dashboard (step-up, `admin_events`); the tool then
+retries. So a `webhooks:write` token, including a live agent token, can never start pushing customer or voucher data
+to a host the owner has not approved, which keeps webhooks inside the "request, you approve" model (00 §6). Pull mode
+needs no target. Deliveries are counted per token in the usage rollups as the pseudo-operation `webhooks.deliver`
+(count, bytes out, failures, §5.6), visible in usage analytics and `/v1/me`, so webhook egress volume is as visible
+as request volume.
+
+**Origin hiding (egress mode).** Whoever controls the target learns the egress IP, which in most topologies is the
+gateway's own IP that Cloudflare is meant to hide (00 §4):
 
 | Egress | Rule |
 |---|---|
-| `webhooks.egress_proxy_url` unset (default) | Push targets must match `webhooks.allowed_target_hosts` (owner-managed list, exact hosts or `*.example.com`). With an empty list push subscriptions are refused (`422 webhook_target_not_allowed`); pull mode still works. Only the owner can thus point Bawaba at a server. |
-| `webhooks.egress_proxy_url` set (02 §5.5) | All deliveries go through that HTTP CONNECT proxy on a separate host/IP (e.g. a small egress VPS or NAT gateway). Any public HTTPS host passing §2.7.3 is allowed; only the proxy's IP is ever revealed. |
+| `webhooks.egress_proxy_url` unset (default) | Deliveries leave from the gateway (or its NAT gateway). Approved targets are the owner's own tools, so revealing that IP to them is accepted. |
+| `webhooks.egress_proxy_url` set (02 §5.5) | All deliveries go through that HTTP CONNECT proxy on a separate host/IP (e.g. a small egress VPS or NAT gateway), with the target validated and pinned by the gateway as in §2.7.3; only the proxy's IP is ever revealed. Target approval still applies. |
 
-The owner's own tools are the expected receivers, so the allowlist is the safe default; 02 §5.5 recommends egress
-separation in any case.
+02 §5.5 recommends egress separation in any case.
 
 #### 2.7.5 Pull mode
 
@@ -1082,8 +1167,8 @@ Test-token subscriptions bind to streams on the sandbox upstream (`bawaba-mock`)
 progressions) are a pure function of `(sandbox.seed, dataset_version, 5-minute time bucket)`, so all embedded mocks
 on all nodes agree without shared storage, and `sandbox.activity.changes_per_hour` (default 30) controls the rate.
 Agents can therefore build and test webhook receivers end to end; `POST /v1/webhooks/{id}/test` sends an immediate
-`webhook.test`. Sandbox subscriptions follow the same target rules as live ones (HTTPS, allowlist or egress proxy);
-agents without a public receiver use pull mode.
+`webhook.test`. Sandbox subscriptions follow the same target rules as live ones (HTTPS, owner-approved host, egress
+mode); agents without a public receiver use pull mode.
 
 ### 2.9 Webhooks configuration (runtime)
 
@@ -1108,9 +1193,11 @@ webhooks:
     concurrency_per_subscription: 4
     failing_after_failures: 10
     disable_after: 24h
-    max_response_bytes: 64KiB
-  egress_proxy_url: ""              # set → proxy egress, any public HTTPS host allowed
-  allowed_target_hosts: []
+    max_response_bytes: 64KiB       # 02 §19 calls it webhooks.max_response_read
+    replay_delivered_max_age: 72h   # API re-send of delivered events (03 §17.5); owner CLI is not limited
+  egress_proxy_url: ""              # set → deliveries via CONNECT <validated-IP> through this proxy (§2.7.3)
+  allowed_target_hosts: []          # global owner-approved hosts; per-token approvals in webhook_target_approvals
+  max_pending_target_requests_per_token: 10
   allowed_ports: [443]
   deny_cidrs: []                    # added to the 02 §5.5 built-in list
   max_subscriptions_per_token: 20
@@ -1126,20 +1213,27 @@ webhooks:
 
 ```mermaid
 flowchart LR
-  ev["event-driven emitters<br/>(ban created, approval queued,<br/>breaker opened, invariant violated…)"] --> q["bwb:q:alerts<br/>(Valkey stream)"]
-  ev2["alert evaluator (singleton, every 30 s)<br/>threshold rules over live counters"] --> q
-  q --> m["alert manager<br/>dedupe · throttle · escalate · route"]
+  ev["event-driven emitters, any plane<br/>(ban created, approval queued,<br/>breaker opened, invariant violated…)"] --> q["bwb:q:alerts<br/>(Valkey stream)"]
+  ev -.->|"Valkey down"| raw["alert_outbox rows<br/>state raw"]
+  raw --> m
+  ev2["alert evaluator (control plane, every 30 s)<br/>threshold rules over live counters"] --> q
+  q --> m["alert manager (control plane)<br/>dedupe · throttle · escalate · route"]
   m -->|"immediate"| ob["alert_outbox (PostgreSQL)"]
   m -->|"digest"| dg["alert_digest_items"]
   dg -->|"digest job"| ob
-  ob --> smtp["SMTP sender (retry 1 m → 30 m, 24 h)"]
+  ob --> smtp["SMTP sender (control plane)<br/>retry 1 m → 30 m, 24 h"]
   m --> inst["alert_instances (state, history)"]
   inst --> dash["dashboard / CLI / /readyz-independent banner"]
 ```
 
+- **Placement.** The alert manager, evaluator, digest job and SMTP sender run in the **control plane**, the only
+  process that holds `smtp_password` (control-only purpose, 02 §9.2) and the SMTP egress allowance (02 §15.4).
+  Data-plane code only emits. While the control plane is down, alerts queue in `bwb:q:alerts` / `alert_outbox` and
+  are sent when it returns; owners who need alerting for that case use the Prometheus rules (§5.5).
 - **Event-driven alerts** are emitted by the code path that observes the condition (`alerts.Emit(id, subject,
   fields)`), e.g. S4 auto-ban, approval creation, `write_outcome_unknown`. Emission is a non-blocking `XADD`; when
-  Valkey is down the emitter writes `alert_outbox` directly (PostgreSQL is the source of truth, 01 §13.2).
+  Valkey is down the emitter inserts an `alert_outbox` row in state `raw`, which the manager deduplicates and routes
+  like a stream entry (PostgreSQL is the source of truth, 01 §13.2).
 - **Threshold alerts** are evaluated by a singleton evaluator over cluster-wide counters that nodes already flush
   every 10 s (usage aggregator → Valkey minute buckets `bwb:<t>:m:<metric>:<minute>`, 2 h TTL) and over component
   state (tunnel registry, breaker events, storage sampling). Bawaba does not depend on Prometheus for alerting;
@@ -1166,7 +1260,7 @@ stateDiagram-v2
 | `critical` | immediate | every 1 h | yes |
 | `high` | immediate | every 6 h | yes |
 | `warning` | hourly digest (`digest.warning_interval`) | in next digests while firing | no (shown in digest) |
-| `info` | **daily security digest** at `digest.info_at` (08:07 business time; also carries the audit anchors of 02 §12.5, §1.9) | no | no |
+| `info` | **daily security digest** at `digest.info_at` (08:07 business time; also carries the audit anchors of 02 §12.5, §1.9, and the count of pending sandbox write approvals, 04 §11.9) | no | no |
 
 - **Dedup**: first occurrence of an instance notifies (per its severity); further occurrences only increment
   `occurrences` until the repeat interval elapses. Instance state lives in `alert_instances` (PostgreSQL) with a
@@ -1191,8 +1285,9 @@ Thresholds are runtime-configurable per rule (`enabled`, thresholds, window, `fo
 |---|---|---|---|
 | `auth_failure_burst` | ≥ 50 invalid-token requests/5 min globally, or ≥ 20/5 min from one IP or /24 (/48 for IPv6); ≥ 500/5 min → critical | warning → critical | IP prefix or `global` |
 | `ip_auto_banned` | auto-ban created by any 02 §10.3 signal (`auth_failure`, `token_spray`, `scanner_paths`, `injection_probe`, `rate_abuse`, `enroll_failure`); batched per `batch_window` | warning | IP |
-| `token_auto_suspended` | token suspended by `injection_probe` (02 §10.3) | high | token |
-| `scope_probe` / `enumeration` | ≥ 50 `insufficient_scope` / ≥ 200 single-resource `not_found` per token in 10 min (02 §10.3) | warning | token |
+| `token_auto_suspended` | a secret token was actually suspended under the containment rule of 02 §10.3 / 04 §2.4.6: `injection_probe` from an IP **inside** its non-empty IP allowlist (`firewall.autosuspend.injection_probe = allowlisted_source`), or from any IP for a kind the owner listed in `firewall.autosuspend.any_source_kinds`. Publishable tokens are never auto-suspended. | high | token |
+| `token_probe_suspected` | `injection_probe` carrying a valid secret token that was **not** suspended (probing IP outside its allowlist, or the token has no allowlist): the IP is banned and the token may be stolen; rotate it or add an IP allowlist (02 §10.3). Probes through publishable tokens only ban the IP (`ip_auto_banned`). | warning | token |
+| `scope_probe` / `enumeration` | ≥ 50 `insufficient_scope` per token / ≥ 200 single-resource `not_found` per (token, IP) in 10 min; enumeration throttles only that (token, IP) pair to 1 req/s for 10 min, never the whole token (02 §10.3) | warning | token |
 | `origin_leak_guard` | security event `origin_leak_blocked` (exact-marker hit, 02 §5.2 step 9), docs runtime guard hit (§8.4), or header-guard violation (01 §7.2) → critical, never digested or silenced; heuristic-pattern finding in `report` mode → high | critical / high | operation |
 | `security_invariant_violation` | S9 environment invariant broken, sealed cursor/approval forgery detected, control socket peer rejected | critical | kind |
 | `control_plane_tripwire` | control listener received a request with Cloudflare headers (02 §12.1) | critical | — |
@@ -1210,26 +1305,30 @@ Thresholds are runtime-configurable per rule (`enabled`, thresholds, window, `fo
 | `plaintext_upstream_in_use` | direct-URL mode running with `allow_plaintext` (02 DU-3) | warning (daily) | upstream |
 | `edge_ranges_stale` | Cloudflare IP list refresh failing for 7 days (02 §16) | warning | — |
 | `abusive_tool` | behaviour score ≥ 100 for 15 min (§4.3) | warning (escalates to high after 2 h) | token |
-| `rate_limited_sustained` | a token received ≥ 100 `429` in 10 min | warning | token |
-| `access_request_pending` | new agent access request; reminder after 24 h | high (owner action needed) | request |
-| `write_approval_pending` | new write waiting for approval; reminder hourly until it expires | high | approval |
+| `rate_limited_sustained` | a token received ≥ 100 `429` in 10 min from any bucket (reads, writes or upstream units, 03 §23.3); the e-mail names the bucket | warning | token |
+| `access_request_pending` | new agent access request; reminder after 24 h. Requests flagged `public_exposure` (publishable token with `customers:read`, `vouchers:read` or `reports:read`, 04 §10.5) get a subject starting with `PUBLIC:` | high (owner action needed) | request |
+| `write_approval_pending` | new **live** write waiting for approval; reminder hourly until it expires. Sandbox approvals never raise it; they appear only as a count in the daily digest (04 §11.9) | high | approval |
+| `approval_queue_full` | a live lineage reached `approvals.max_pending_per_lineage` (50); further held writes get `429 approval_limit_reached` (04 §11.1) | warning | lineage |
+| `webhook_target_requested` | a token tried to subscribe a push target whose host is not owner-approved (§2.7.4); reminder after 24 h | high (owner action needed) | token + host |
 | `write_outcome_unknown` | write timed out after being sent (01 §6.4) — needs manual reconciliation in Shamel | critical | request |
 | `token_near_expiry` | token with `expires_at` within 7 days | info (daily) | token |
 | `token_unused` | token unused for 90 days (00 §5) | info (weekly) | token |
 | `audit_storage_near_cap` | 70 / 85 / 95 % of `audit_caps` | warning / high / critical | store |
 | `audit_spool_filling` | WAL + spool ≥ 50 % / 80 % of `spool_max_bytes` | warning / critical | node |
 | `audit_unavailable` | requests rejected with `503 audit_unavailable` or `metadata_only` engaged | critical | node |
-| `audit_gap_detected` | unclean-shutdown gap, cap trimming, blob loss | high | node / day |
+| `audit_gap_detected` | unclean-shutdown gap, cap trimming, blob loss → high; blocked-request aggregation window (§1.2) → warning | high / warning | node / day / IP |
+| `audit_ingest_near_capacity` | `postgres` metadata mode: 1-h average audit rows/s > 70 % of `audit.capacity.pg_rows_per_second` (90 % → high), `bawaba_audit_lag_seconds` p95 > 30 s for 15 min, or `pg_bytes` projected full within 30 days (§1.12) | warning / high | — |
 | `webhook_endpoint_failing` | ≥ 10 consecutive delivery failures → warning; `disabled_failing` → high | warning / high | subscription |
 | `webhook_detection_stalled` | stream has not completed a cycle for 3 intervals; `webhook_detection_lagging` for budget backlog | warning | stream |
 | `node_down` | node left the registry without draining | warning | node |
-| `dependency_unavailable` | PostgreSQL / Valkey / blob store errors > 60 s | critical (PostgreSQL) / high | dependency |
-| `config_stale` | node config age > 50 % of `config.max_staleness` | critical | node |
+| `dependency_unavailable` | PostgreSQL / Valkey / blob store errors > 60 s; a node that reaches neither PostgreSQL nor Valkey is "blind" and stops authenticated reads after `config.blind_staleness` (5 min, 02 §16) | critical (PostgreSQL, or blind node) / high | dependency |
+| `config_stale` | node config age > 50 % of `config.max_staleness` (6 h, 02 §16) | critical | node |
+| `upstream_scoping_changed` | the weekly re-verification found an endpoint calibrated as not identity-scoped returning different data per credential (§2.3); affected streams re-baselined | warning | upstream + endpoint |
 | `cert_expiry` | internal CA, node or connector certificate < 7 days; origin TLS cert < 14 days | high | certificate |
 | `clock_skew` | node vs Valkey `TIME` > 2 s (01 §13.3) → warning; > 2 min (TOTP and certificates affected, 02 §16) → high | warning / high | node |
 | `backup_failed` / `backup_stale` | backup run failed, or no successful backup in 26 h | high | target |
 | `restore_drill_overdue` | no successful drill in 35 days | warning | — |
-| `key_backup_unverified` | master key created/rotated and no `key verify --file … --record` within 7 days (§9.2) | high | key id |
+| `key_backup_unverified` | `master.key` created/rotated and no `key verify --file … --record` within 7 days (§9.2; `data.key` needs no backup) | high | key id |
 | `schema_drift` | first occurrence of an unknown upstream field (01 §13.1) | info | op/field |
 
 ### 3.4 E-mail format
@@ -1256,7 +1355,8 @@ alerts:
     port: 587
     tls: starttls                   # starttls | implicit; plaintext transport is refused
     username: bawaba-alerts
-    password_file: /run/secrets/smtp_password
+    password_file: /run/secrets/smtp_password   # mounted into the control plane only; or stored encrypted
+                                                # under the control-only purpose smtp_password (02 §9.2)
     from: "Bawaba <alerts@example.com>"
     timeout: 15s
 # runtime
@@ -1273,11 +1373,12 @@ alerts:
     auth_failure_burst: { enabled: true, global_threshold: 50, per_prefix_threshold: 20, window: 5m, critical_threshold: 500 }
     shamel_slow:        { enabled: true, p95: 5s, for: 10m }
     abusive_tool:       { enabled: true, score: 100, for: 15m, escalate_after: 2h }
+    write_approval_pending: { enabled: true }   # live items only; sandbox items: daily digest count (04 §11.9)
     # … one entry per catalogue id
 ```
 
-Mail is queued in `alert_outbox` and sent by the alert mailer (01 §5.6) with retries (1 min doubling to 30 min, for
-24 h). Failed delivery is shown as a dashboard banner and by `bawaba doctor`, since it cannot be e-mailed.
+Mail is queued in `alert_outbox` and sent by the alert mailer, a control-plane singleton (§3.1; 01 §5.6 lists it
+among the workers), with retries (1 min doubling to 30 min, for 24 h). Failed delivery is shown as a dashboard banner and by `bawaba doctor`, since it cannot be e-mailed.
 `bawaba alerts test [--severity critical]` sends a test message. The relay should be the owner's mail provider:
 the SMTP server sees the sending host's IP, so it must be a trusted relay (02 LV-26).
 
@@ -1300,8 +1401,12 @@ The owner prefers teaching AI agents to build well-behaved tools over hard limit
 
 ### 4.2 Response headers
 
-**`RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset`** on every authenticated response (01 S6): limit
-per window, remaining requests, seconds until the budget is fully restored (GCRA). `429` adds `Retry-After`.
+**`RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset`** on every authenticated response (01 S6). A token
+has three GCRA buckets (03 §23.3): **reads** (requests), **writes** (Shamel writes) and **upstream units** (the
+cost classes of the upstream calls a read's plan makes: `none` 0, `small` 1, `report` 5, `list` 10, published as
+`x-bawaba-cost`). The headers describe the most constrained bucket the request consumed: units per 60 s window,
+units available now, seconds until that bucket is full again. `429` adds `Retry-After` and names the exhausted
+bucket in `details`; `/v1/me` shows all three.
 
 **`Bawaba-Warning`** carries advisory codes. Syntax: an RFC 9651 structured-field **List** of tokens with
 parameters; at most `advice.max_warnings_per_response` (3) per response, most important first; documentation for
@@ -1317,16 +1422,21 @@ Bawaba-Warning: polling_too_frequent;observed=8;recommended=60, use_webhooks;eve
 | `use_webhooks` | together with `polling_too_frequent` or full-list loops on a resource that has events | `events` |
 | `use_updated_since` | full customer/item list fetched repeatedly where an incremental filter exists | `param` |
 | `use_cursor_snapshot` | page 1 of the same query requested again within the snapshot TTL while the previous response's `next_cursor` was never used (re-fetching instead of paging) | `ttl` |
-| `large_unfiltered_request` | a list snapshot exceeds `advice.large_list_records` (5,000) records and the request had no filter | `records` |
+| `large_unfiltered_request` | the token's **view** (the records visible to it after S14, 01 §9.5) exceeds `advice.large_list_records` (5,000) records and the request had no filter | `records` = visible count, never the raw snapshot count (04 §4.7) |
+| `expensive_lookup` | a single lookup had to fetch a whole list (non-ASCII code, 03 §4.2) and was charged the `list` class in the upstream-units bucket | `reason` (`non_ascii_code`) |
+| `rate_limit_approaching` | a bucket (reads, writes or upstream units) fell below `limits.warn_ratio` (20 %) of its limit (04 §14.2) | `bucket`, `remaining`, `reset` |
 | `duplicate_request` | ≥ 3 identical requests within 2 s (double-firing UI code, retry loops) | `count`, `window` |
 | `retry_too_fast` | a request arrives before the `Retry-After` of a previous `429`/`503` for the same token elapsed | `retry_after` |
-| `repeated_error` | the same request produced the same 4xx ≥ 20 times in 1 min (added to the error response) | `count` |
+| `repeated_error` | the same request produced the same 4xx ≥ 20 times in 1 min, or the token received ≥ 50 `403 insufficient_scope` in 10 min (02 §10.3 `scope_probe`); added to the error response | `count` |
 | `upstream_saturated` | the upstream queue is saturated (01 §7.6) | — |
 | `partial_result` | an optional sub-call of a combined endpoint failed (01 §7.11) | `missing` |
 | `deprecated` | operation or parameter is deprecated | `sunset` (date) |
 | `token_expiring` | token expires within 7 days | `expires_at` |
+| `fields_hidden` | `fields=` or `include=` asked for fields hidden by policy (03 §23.4) | `fields` |
+| `parameter_ignored` | a legacy parameter was not forwarded by policy (03 §20.3) | `name` |
 
-01 S6 shows the polling warning as `polling_too_fast`; the canonical code is **`polling_too_frequent`** (see §11).
+The list matches 03 §23.4, which owns the header grammar; this section owns detection (§4.3). 01 S6 shows the
+polling warning as `polling_too_fast`; the canonical code is **`polling_too_frequent`** (see §11).
 
 **Recommended polling intervals** (`Operation.PollInterval`, published as `x-bawaba-poll-interval` in OpenAPI):
 
@@ -1354,34 +1464,41 @@ retry_not_before}`, TTL `max(2 × PollInterval, 120 s)`, clock = Valkey `TIME`.
 |---|---|---|---|
 | H1 | duplicate burst | `burst_count ≥ 3` within 2 s | `duplicate_request` |
 | H2 | tight polling | interval < `PollInterval` → `streak++` (else reset); `streak ≥ 5` | `polling_too_frequent` (+ `use_webhooks` / `use_updated_since`) |
-| H3 | unbounded full-list loop | S14 marks a walk complete when the last page of a snapshot with > 1,000 records is served; `walks_hour ≥ 10` for the same query | `use_webhooks` + `large_unfiltered_request` |
+| H3 | unbounded full-list loop | S14 marks a walk complete when the last page of a view with > 1,000 visible records is served; `walks_hour ≥ 10` for the same query | `use_webhooks` + `large_unfiltered_request` (visible count) |
 | H4 | cursor ignored | page 1 sets `cursor_pending=1` when it returns `next_cursor`; a cursor read clears it; another page 1 within the snapshot TTL with `cursor_pending=1` | `use_cursor_snapshot` |
 | H5 | retry storm | request before `retry_not_before` (set from `Retry-After` on 429/503) ≥ 3 times/min | `retry_too_fast` |
 | H6 | error loop | same request + same 4xx ≥ 20 times/min | `repeated_error` |
 | H7 | slow paging | ≥ 3 `409 snapshot_expired` per hour for a token | `/v1/me` hint (page faster or use smaller filters) |
-| H8 | living at the limit | `RateLimit-Remaining` < 10 % for > 10 min | `/v1/me` hint; `rate_limited_sustained` alert if 429s follow |
+| H8 | living at the limit | any bucket's remaining < 10 % for > 10 min (`rate_limit_approaching` is emitted from 20 %) | `/v1/me` hint naming the bucket; `rate_limited_sustained` alert if 429s follow |
+| H9 | upstream-heavy | the upstream-units bucket is the most constrained one for > 10 min, or ≥ 30 `list`-class charges per hour for one operation, or ≥ 30 `expensive_lookup` per hour | `/v1/me` hint (use keyed lookups with ASCII codes, filters, cursors, webhooks); `expensive_lookup` per request |
 
-- **Behaviour score** per token: each emitted warning adds points (H1 1, H2 1, H4 2, H3 2, H5 3, H6 1) in the node
+- **Behaviour score** per token: each emitted warning adds points (H1 1, H2 1, H4 2, H3 2, H5 3, H6 1, H9 2) in the node
   usage aggregator; the evaluator maintains an exponentially decayed score (half-life 30 min) in
   `bwb:<t>:behav:<token>`. Score ≥ 50 → dashboard flag `buggy_pattern`; ≥ 100 for 15 min → `abusive_tool` e-mail (once
   per 6 h per token). Flags persist in `token_flags(token_id, flag, first_seen, last_seen, score, evidence_enc)` with
   sample request ids so the owner can open the exact requests in the audit explorer.
 - **Degradation**: Valkey unavailable → no warnings (01 §13.2); detection is advisory and never blocks.
-- **Never a hard block by itself.** Only the rate limit (generous defaults, owner-adjustable per token) and the
-  global upstream cap reject requests; the owner can suspend a flagged token from the dashboard.
+- **Never a hard block by itself.** Only the rate-limit buckets (reads, writes, upstream units; generous defaults,
+  owner-adjustable per token) and the global upstream cap reject requests; the owner can suspend a flagged token
+  from the dashboard.
 
 ### 4.4 `/v1/me` usage hints
 
-`GET /v1/me` (any token kind) returns identity, scopes, limits, usage and advice; the exact schema is in the API
-design, the content contract is:
+`GET /v1/me` (any token kind) returns identity, scopes, limits, usage and advice; the exact schema is 03 §18.1
+(publishable tokens get its reduced view), the content contract is (excerpt):
 
 ```json
 {
   "token": {"id": "tok_01JB…", "name": "sales-dashboard", "kind": "tool", "environment": "live",
             "scopes": ["customers:read", "items:read"], "expires_at": null},
-  "rate_limit": {"limit": 1200, "window_seconds": 60, "remaining": 1187, "reset_seconds": 3},
-  "usage": {"window": "24h", "requests": 18234, "errors": {"rate_limited": 12, "snapshot_expired": 3},
-            "p95_ms": 420, "top_operations": [{"operation": "customers.list", "requests": 9120}]},
+  "rate_limit": {"limit": 1200, "window_seconds": 60, "remaining": 1187, "reset_seconds": 3,
+                 "writes": {"limit": 60, "window_seconds": 60, "remaining": 60, "reset_seconds": 0},
+                 "upstream": {"limit": 600, "window_seconds": 60, "remaining": 571, "reset_seconds": 6,
+                              "costs": {"small": 1, "report": 5, "list": 10}}},
+  "usage": {"window": "24h", "requests": 18234, "upstream_units": 41210,
+            "errors": {"rate_limited": 12, "snapshot_expired": 3},
+            "p95_ms": 420, "top_operations": [{"operation": "customers.list", "requests": 9120, "upstream_units": 6300}],
+            "webhook_deliveries": {"count": 512, "bytes_out": 1830400}},
   "advice": {
     "score": 64, "flags": ["buggy_pattern"],
     "hints": [{
