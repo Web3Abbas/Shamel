@@ -19,7 +19,7 @@
 | IDs | `req_` request (`req_` + 26-character Crockford base32 UUIDv7, 01 S2, 02 LV-24), `tok_` token, `up_` upstream, `conn_` connector, `areq_` access request, `apr_` write approval, `whs_` webhook subscription, `evt_` event, `whd_` delivery, `alr_` alert instance, `exp_` audit export, `bkp_` backup run. Audit object ids are shown as `b_` + 26-char base32. New ids are UUIDv7 unless stated. |
 | Valkey keys | As 01: `bwb:<t>:…` tenant-scoped, `{…}` hash tag, `bwb:lease:<job>` worker leases, `bwb:q:<name>` queues. |
 | Time | Timestamps RFC 3339; business dates `YYYY-MM-DD` in the upstream's business timezone (default `Asia/Hebron`). Schedules are 5-field cron strings evaluated in the business timezone. |
-| Config | **Bootstrap** keys live in `/etc/bawaba/bawaba.yaml` (restart/SIGHUP); **runtime** keys live in PostgreSQL and propagate through compiled config (01 §5.4, §15). Each config block below says which. Listener addresses and ports are defined in 01 §5.2 / 02 §12.1 and are referred to here by name (`control`, `ops`). |
+| Config | **Bootstrap** keys live in `/etc/bawaba/bawaba.yaml` for the data plane or `/etc/bawaba/control.yaml` for the control plane (`bawaba-gateway serve --plane=data\|control`, two processes even on one host, 01 §5.1, §15.2; restart/SIGHUP); **runtime** keys live in PostgreSQL and propagate through compiled config (01 §5.4, §15). Each config block below says which. Listeners (01 §5.2): `control` `127.0.0.1:7443` + `/run/bawaba/control.sock`; `ops` per process, data `127.0.0.1:9090` (private IP in topology C), control `127.0.0.1:9091`. Edge modes: `edge.mode: tunnel \| aop \| none`. |
 | Keys | The key hierarchy is owned by [`02-security.md`](02-security.md) §9.2: two root files, `master.key` (MK, loaded only by the control plane) and `data.key` (DK, loaded only by the data plane), wrap KEK_control and KEK_data, which wrap the per-purpose keys in `crypto_keys` (record envelope 02 §9.3). Data-plane purposes used here: `audit_addr` (keyed object ids; 01 calls it `blobid`), `audit_index` (blind indexes), `audit_chain` (integrity chain), `audit_spool` (overflow spool and WAL framing), `webhook_secret`, `webhook_url`, `webhook_event` (ledger state, event payloads), `webhook_ledger` (ledger keys and hashes), `queue`. Control-only purposes: `audit_seal` (HPKE key pair that opens audit epoch keys), `admin_chain`, `smtp_password`. **Audit bodies (`audit_body`) and audit metadata (`audit_meta`) are encrypted under per-node, per-epoch DEKs sealed to `audit_seal`** (§1.4.5), so the data plane can write audit content but cannot read stored content. One addition is requested from 02: the data-plane AEAD purpose `audit_dict` (compression dictionaries, §1.4.4). Backup archives use a random archive key wrapped directly by MK (§9.1). |
 | Severity words | `critical` > `high` > `warning` > `info` (alerts, §3). |
 
@@ -113,7 +113,9 @@ CREATE TABLE audit_events (
   concrete path, which may contain customer codes, is only inside `params_enc`.
 - Lookup by request id needs no global index: request ids are UUIDv7 (01 S2, 02 LV-24), so the embedded timestamp
   selects the partition (or cold segment) and a ±2 s `ts` range, and the unique index answers in one probe.
-- Partitions are created 7 days ahead by the retention/partition singleton (01 §5.6) and are append-only.
+- Partitions are created 7 days ahead by the retention/partition singleton (01 §5.6) through the `SECURITY DEFINER`
+  function `audit_ensure_partitions(days)` owned by `bawaba_migrate` (neither runtime role has DDL, 02 §12.4), and
+  are append-only.
 
 #### 1.3.2 `audit_upstream_calls` (one row per upstream call)
 
@@ -630,7 +632,8 @@ with the SHA-256 of the output. Exports never leave the server by themselves.
 ### 1.11 Audit configuration
 
 ```yaml
-# bootstrap (/etc/bawaba/bawaba.yaml)
+# bootstrap (/etc/bawaba/bawaba.yaml, data plane; the keys used only by control-node jobs, i.e. compression
+# dictionaries, packs consolidation/compaction, blob_gc and deep_search, are read from /etc/bawaba/control.yaml)
 audit:
   durability: standard              # standard | strict
   metadata_mode: postgres           # postgres | segment_first (§1.12)
@@ -790,7 +793,10 @@ webhook_streams(id, tenant_id, upstream_id, identity_id NULL, variant_flags, det
   leader_node = $node WHERE id = $id RETURNING epoch`. Every cycle commit includes `WHERE id = $id AND epoch = $mine`;
   zero rows → leadership was lost → the cycle's results are discarded (no events). Double polling of Shamel during a
   lease handover is possible for one cycle; duplicate events are not.
-- **Priority**: detector calls use the `background` class of the upstream limiter (≤ 25 % of the share, 01 §7.6) and
+- **Priority**: detector calls use the `background` class of the upstream limiter (01 §7.6): the stream leader first
+  acquires one of the cluster-wide `background_slots` (`max(1, round(cap × background_max_share))`, default 25 % →
+  2 of 8) from `bwb:<t>:sem:<upstream>:bg`, then a node slot at the lowest priority; a background call that has
+  waited 30 s is promoted to `interactive` priority, so detection is throttled, never starved. Detector calls
   never retry beyond the normal read retry; when the breaker is open or no connector is online, the cycle is skipped
   without moving the watermark.
 - **Valkey unavailable**: no leases → detection pauses (queues pause too, 01 §13.2). The overlap windows and the
@@ -840,7 +846,7 @@ the voucher back-date sweep, §2.4.4). Ledger size is small (2,000 customers ≈
 #### 2.4.1 Customers and items (`lastupdatedate` + overlap + hashing)
 
 Shamel's `lastupdatedate` is date-only, possibly exclusive ("updated after"), in an undocumented timezone, and does
-not signal deletions or (probably) balance changes (upstream Q18). The detector therefore treats it as a coarse
+not signal deletions or (probably) balance changes (upstream Q18, 08 ISCO-22). The detector therefore treats it as a coarse
 pre-filter, never as truth:
 
 ```
@@ -895,7 +901,7 @@ upstream business timezone, all with `getCustomerBalance` unset (so the volatile
 - `record_hash` covers header + `lines` + `cheques` + `accounts` of the normalized voucher; `changed_fields` lists
   header fields and the collection markers `lines`, `cheques`, `accounts`.
 - **Light hash for the sweep.** The light row has no reliable counterpart in the full voucher (its `amount` is not
-  confirmed to equal any full-voucher total, Q41), so the sweep never compares light rows with full records.
+  confirmed to equal any full-voucher total, Q41, 08 ISCO-46), so the sweep never compares light rows with full records.
   Instead it keeps its own fingerprint: `light_hash = HMAC-SHA256(webhook_ledger, canonical{type, code, date,
   customer_code, amount, currency, rate, cr_dr})[0:16]` (the volatile `customer_balance_at_voucher_date` is
   excluded), written to the ledger row every time the sweep sees the voucher. A sweep change is a missing key or a
@@ -905,7 +911,7 @@ upstream business timezone, all with `getCustomerBalance` unset (so the volatile
   spent only on real changes, and `webhook_detection_lagging` reflects real backlog.
 - Ledger entries with voucher date older than `deep_scan_days + 7` are pruned: changes to vouchers older than the deep
   window are out of scope (documented limit; configurable).
-- Whether `GetExtraVouchers` covers stock-only voucher types (stockout, internal delivery) is unknown (upstream Q23);
+- Whether `GetExtraVouchers` covers stock-only voucher types (stockout, internal delivery) is unknown (upstream Q23, 08 ISCO-40);
   the deep scan covers them regardless.
 
 #### 2.4.5 Order status (`GetStatus` for tracked orders)
@@ -918,7 +924,7 @@ webhook_tracked_orders(stream_id, manual_code, order_code, customer_code, create
 - **Tracked set**: orders created through Bawaba writes (milestone 2) and type `order` (0) vouchers seen by a
   voucher scan (the order-status detector runs the fast-window `GetVouchers` itself when no voucher subscription
   exists; when both run, local single-flight makes it one upstream call). Orders without `manual_code` cannot be
-  queried (`GetStatus` takes the `manual` header) and are skipped (ISCO question).
+  queried (`GetStatus` takes the `manual` header) and are skipped (08 ISCO-42 (e)).
 - **Schedule by age**: < 24 h → every cycle; 1–7 d → every 30 min; 7–30 d → every 3 h; older than `max_age` (30 d)
   → dropped. Terminal statuses `closed` and `sent` stop tracking after the event.
 - **Budget**: at most `max_calls_per_cycle` (200) `GetStatus` calls per cycle, most overdue first; a persistent
@@ -1214,28 +1220,33 @@ webhooks:
 
 ```mermaid
 flowchart LR
-  ev["event-driven emitters, any plane<br/>(ban created, approval queued,<br/>breaker opened, invariant violated…)"] --> q["bwb:q:alerts<br/>(Valkey stream)"]
-  ev -.->|"Valkey down"| raw["alert_outbox rows<br/>state raw"]
-  raw --> m
-  ev2["alert evaluator (control plane, every 30 s)<br/>threshold rules over live counters"] --> q
-  q --> m["alert manager (control plane)<br/>dedupe · throttle · escalate · route"]
-  m -->|"immediate"| ob["alert_outbox (PostgreSQL)"]
+  ev["event-driven emitters, both planes<br/>(ban created, approval queued,<br/>breaker opened, invariant violated…)"] --> ob["alert_outbox (PostgreSQL)<br/>raw alerts"]
+  ev2["alert evaluator (data-plane worker singleton,<br/>every 30 s): threshold rules over live counters"] --> ob
+  ev -.->|"PostgreSQL down"| q["bwb:q:alerts<br/>(Valkey stream)"]
+  ev2 -.->|"PostgreSQL down"| q
+  ob --> m["alert manager (control plane)<br/>dedupe · throttle · escalate · route"]
+  q --> m
+  m -->|"immediate"| mail["mail queue rows<br/>(alert_outbox, state ready)"]
   m -->|"digest"| dg["alert_digest_items"]
-  dg -->|"digest job"| ob
-  ob --> smtp["SMTP sender (control plane)<br/>retry 1 m → 30 m, 24 h"]
+  dg -->|"digest job"| mail
+  mail --> smtp["SMTP sender (control plane)<br/>retry 1 m → 30 m, 24 h"]
   m --> inst["alert_instances (state, history)"]
   inst --> dash["dashboard / CLI / /readyz-independent banner"]
 ```
 
-- **Placement.** The alert manager, evaluator, digest job and SMTP sender run in the **control plane**, the only
-  process that holds `smtp_password` (control-only purpose, 02 §9.2) and the SMTP egress allowance (02 §15.4).
-  Data-plane code only emits. While the control plane is down, alerts queue in `bwb:q:alerts` / `alert_outbox` and
-  are sent when it returns; owners who need alerting for that case use the Prometheus rules (§5.5).
+- **Placement** (01 §5.6). Detection runs in the data plane: event-driven emitters in every process and the
+  threshold evaluator as a data-plane `worker` singleton (lease `bwb:lease:alert_eval`) write raw alerts and never
+  send mail. The alert manager, digest job and SMTP sender ("alert mailer") run in the **control plane**, the only
+  process that holds the SMTP password (`alerts.smtp.password_file`, control plane only, 01 §15.2) and the SMTP
+  egress allowance (02 §15.4). While the control plane is down, raw alerts accumulate and are sent when it returns;
+  owners who need alerting for that case use the Prometheus rules (§5.5).
 - **Event-driven alerts** are emitted by the code path that observes the condition (`alerts.Emit(id, subject,
-  fields)`), e.g. S4 auto-ban, approval creation, `write_outcome_unknown`. Emission is a non-blocking `XADD`; when
-  Valkey is down the emitter inserts an `alert_outbox` row in state `raw`, which the manager deduplicates and routes
-  like a stream entry (PostgreSQL is the source of truth, 01 §13.2).
-- **Threshold alerts** are evaluated by a singleton evaluator over cluster-wide counters that nodes already flush
+  fields)`), e.g. S4 auto-ban, approval creation, `write_outcome_unknown`. Emission is a non-blocking enqueue into a
+  per-node buffer flushed every second as one batched insert into `alert_outbox` (state `raw`); while PostgreSQL is
+  unavailable the buffer spills to `bwb:q:alerts`, which the manager also consumes, so `dependency_unavailable`
+  (PostgreSQL) can still be mailed. A Valkey hot copy of firing instances (`bwb:<t>:alert:<hash>`) lets emitters drop
+  duplicates cheaply.
+- **Threshold alerts** are evaluated by the singleton evaluator over cluster-wide counters that nodes already flush
   every 10 s (usage aggregator → Valkey minute buckets `bwb:<t>:m:<metric>:<minute>`, 2 h TTL) and over component
   state (tunnel registry, breaker events, storage sampling). Bawaba does not depend on Prometheus for alerting;
   equivalent Prometheus rules ship for owners who run Alertmanager (§5.5).
@@ -1349,15 +1360,14 @@ Thresholds are runtime-configurable per rule (`enabled`, thresholds, window, `fo
 ### 3.5 SMTP and alert configuration
 
 ```yaml
-# bootstrap (02 uses the alerts.smtp.* prefix; 01 §15.2's smtp.password_file means the same key)
+# bootstrap, control plane (/etc/bawaba/control.yaml, 01 §15.2)
 alerts:
   smtp:
     host: smtp.example.com
     port: 587
     tls: starttls                   # starttls | implicit; plaintext transport is refused
     username: bawaba-alerts
-    password_file: /run/secrets/smtp_password   # mounted into the control plane only; or stored encrypted
-                                                # under the control-only purpose smtp_password (02 §9.2)
+    password_file: /run/secrets/smtp_password   # alerts.smtp.password_file: control plane only (01 §15.2)
     from: "Bawaba <alerts@example.com>"
     timeout: 15s
 # runtime
@@ -1456,10 +1466,14 @@ These values drive warnings only; they are not limits.
 
 ### 4.3 Detection heuristics
 
-Evaluated in S6 inside the **same pipelined Valkey round trip** that already performs GCRA and the poll counter
-(01 S6), by one Lua script (`advice.lua`) over a small hash per (token, normalized query):
-`bwb:<t>:adv:<token>:<qhash>` = `{last_ts, streak, burst_count, burst_start, cursor_pending, walks_hour,
-retry_not_before}`, TTL `max(2 × PollInterval, 120 s)`, clock = Valkey `TIME`.
+Evaluated in S6 on **node-local state**, with no Valkey call on the request path (01 S6, §10.2): each node keeps a
+small record per active (token, normalized query) `{last_ts, streak, burst_count, burst_start, cursor_pending,
+walks_hour, retry_not_before}` and decides the warnings for the current request from it. Every 1 s the node merges
+its changed records with one pipelined call of the script `advice_merge.lua` into `bwb:<t>:adv:<token>:<qhash>`
+(TTL `max(2 × PollInterval, 120 s)`) and receives the merged cluster-wide state back, so a tool spread over several
+nodes is judged as a whole. Merging takes counters as sums, timestamps as maxima and `cursor_pending` from the latest
+writer; local timestamps are corrected by the node's offset to Valkey `TIME` measured at each merge. Warnings may
+therefore lag by ≤ 1 s, which is acceptable for advice.
 
 | # | Pattern | Detection | Warning / effect |
 |---|---|---|---|
@@ -1478,7 +1492,8 @@ retry_not_before}`, TTL `max(2 × PollInterval, 120 s)`, clock = Valkey `TIME`.
   `bwb:<t>:behav:<token>`. Score ≥ 50 → dashboard flag `buggy_pattern`; ≥ 100 for 15 min → `abusive_tool` e-mail (once
   per 6 h per token). Flags persist in `token_flags(token_id, flag, first_seen, last_seen, score, evidence_enc)` with
   sample request ids so the owner can open the exact requests in the audit explorer.
-- **Degradation**: Valkey unavailable → no warnings (01 §13.2); detection is advisory and never blocks.
+- **Degradation**: Valkey unavailable → advice from node-local state only (01 S6); the behaviour score is not
+  updated until Valkey returns. Detection is advisory and never blocks.
 - **Never a hard block by itself.** Only the rate-limit buckets (reads, writes, upstream units; generous defaults,
   owner-adjustable per token) and the global upstream cap reject requests; the owner can suspend a flagged token
   from the dashboard.
@@ -1575,7 +1590,8 @@ integration guide to the agent building it.
 
 ### 5.1 Prometheus metrics
 
-Exposed on the loopback/private `ops` listener (01 §5.2, 02 §12.1) at `/metrics`; native histograms enabled with
+Exposed on each process's `ops` listener (01 §5.2: data `127.0.0.1:9090` or a private IP in topology C, control
+`127.0.0.1:9091`) at `/metrics`; native histograms enabled with
 classic-bucket fallback. Label values are bounded: `op` = operation id (≈ 60), `upstream` = upstream id, no request
 ids, IPs or customer codes ever. Per-token series are opt-in (`metrics.per_token: true`, recommended only below
 ~500 tokens); per-token analytics otherwise come from usage rollups (§5.6).
@@ -1754,7 +1770,7 @@ The security controls are specified in 02 (§9.8, §12.1, §12.2, §12.5); the d
 | Commands | all | only commands marked **[A]** below; anything else fails locally with exit code 4 without contacting the server |
 
 Owner actions that the decisions restrict to the server (approve, firewall, live-token creation) do not exist in
-remote mode. 01 §5.2 mentions a `0660 root:bawaba-admin` socket; this document follows 02's root-only socket.
+remote mode. The control socket is `0600 root:root` (01 §5.2, 02 §12.3).
 
 Profiles (`~/.config/bawaba/config.yaml`, 0600):
 
@@ -2185,14 +2201,16 @@ sequenceDiagram
   Note over O,C: contract migrations only in a later release
 ```
 
-**Single node (topologies A/B):** binary installs use **socket handover**: the new process starts with
-`SO_REUSEPORT` on the same listeners, becomes ready, then the old process stops accepting and drains as above —
-no refused connections. Docker Compose installs run a short blue/green: a second gateway service starts on alternate
+**Single node (topologies A/B):** a node runs two processes, `bawaba-data.service` and `bawaba-control.service`
+(01 §5.1). The data-plane process uses **socket handover**: the new process takes over the listening sockets (the
+unix socket of `edge.mode: tunnel` by fd passing or systemd socket activation, TCP in `aop` with `SO_REUSEPORT`),
+becomes ready, then the old process stops accepting and drains as above — no refused connections. The control
+process is simply restarted; only the dashboard and CLI pause. Docker Compose installs run a short blue/green: a second gateway service starts on alternate
 ports, `cloudflared` (or the local reverse proxy) is switched, the old container drains and stops; without that
 setup the restart costs a few seconds of unavailability, which the docs state plainly. Connectors are upgraded one
 instance at a time (two instances per upstream, 01 §8.5).
 
-### 9.7 Backup configuration (bootstrap)
+### 9.7 Backup configuration (bootstrap, control plane `/etc/bawaba/control.yaml`)
 
 ```yaml
 backup:
@@ -2214,9 +2232,9 @@ backup:
 
 | From | Requirement |
 |---|---|
-| Pipeline (01 §6) | S6 runs `advice.lua` in the existing pipelined Valkey call (with the three rate-limit buckets of 03 §23.3) and records warnings in `reqctx`; S14 reports the view's visible record count and walk completion; S16 copies small bodies and passes larger pooled buffers by reference count (§1.5.1), the decoder tees raw upstream bytes into the audit capture buffer; S17 writes `Bawaba-Warning` (max 3). |
+| Pipeline (01 §6) | S6 evaluates advice on node-local state (merged cluster-wide every 1 s by `advice_merge.lua`, §4.3; already in 01 S6) next to the locally leased rate-limit buckets of 03 §23.3, and records warnings in `reqctx`; S14 reports the view's visible record count and walk completion; S16 copies small bodies and passes larger pooled buffers by reference count (§1.5.1), the decoder tees raw upstream bytes into the audit capture buffer; S17 writes `Bawaba-Warning` (max 3). |
 | Operation registry (01 §6.1) | `PollInterval`, webhook event alternatives, dictionary class for audit compression, blind-index dimension extractors, `x-bawaba-*` doc metadata, and per Shamel endpoint `identity_sensitive` (default `true`, §2.3). |
-| Architecture (01) | §10.1: state that the cluster-wide audited throughput in `postgres` metadata mode is bounded by one PostgreSQL primary (≈ 2,000 req/s rating) and that the per-node targets scale linearly only in `segment_first` mode (§1.12). Accept the config keys `audit.metadata_mode`, `audit.ring_max_bytes`, `audit.copy_max`, `audit.spill_queue`, `audit.blocked.*`, `audit.capacity.*`, `audit.segment_first.*`, `webhooks.max_pending_target_requests_per_token`, `webhooks.delivery.replay_delivered_max_age`. The alert manager, evaluator, digest job and SMTP sender are control-plane singletons (§3.1). Optional: the coalescing key (01 §9.1) can drop the identity for `identity_sensitive = false` endpoints in the same way. |
+| Architecture (01) | §10.1: state that the cluster-wide audited throughput in `postgres` metadata mode is bounded by one PostgreSQL primary (≈ 2,000 req/s rating) and that the per-node targets scale linearly only in `segment_first` mode (§1.12). Accept the config keys `audit.metadata_mode`, `audit.ring_max_bytes`, `audit.copy_max`, `audit.spill_queue`, `audit.blocked.*`, `audit.capacity.*`, `audit.segment_first.*`, `webhooks.max_pending_target_requests_per_token`, `webhooks.delivery.replay_delivered_max_age`. Blob GC, pack consolidation/compaction and dictionary training run on the control node (§1.10), not in the data-plane retention singleton of 01 §5.6, because they need `DELETE` on `audit_blobs`, blob read credentials and the `audit_seal` keys that the data plane lacks; partition creation needs DDL, which neither runtime role has, so it goes through a `SECURITY DEFINER` function `audit_ensure_partitions(days)` owned by `bawaba_migrate`. Optional: the coalescing key (01 §9.1) can drop the identity for `identity_sensitive = false` endpoints in the same way. |
 | Security design (02) | Already in the revised 02: two key files, epoch DEKs sealed to `audit_seal`, purposes `audit_index`, `webhook_event`, `webhook_ledger`, `audit_spool`, the `audit_epoch_keys` grant and the Valkey ACL patterns `adv:*`, `behav:*`, `alert:*`, `m:*`, `lease:*`. **Still requested:** (a) the data-plane AEAD purpose `audit_dict` (compression dictionaries, AAD `audit_dict/<dict_id>`, §1.4.4); (b) these `bawaba_data` grants beyond 02 §12.4 (02 points here for them): `SELECT (id, retain_until)` + `UPDATE (retain_until)` on `audit_blobs`; INSERT on `audit_blobs`, `audit_batches`, `audit_gaps`, `audit_segments` (`segment_first`); INSERT and `UPDATE (state, bytes_total, epoch_key_ids, sealed_at)` on its own `audit_packs` rows; SELECT on `audit_zstd_dicts`; INSERT on `alert_outbox` (state `raw` only) and `webhook_target_requests`; DML on the worker tables `webhook_streams`, `webhook_ledger`, `webhook_events`, `webhook_deliveries`, `webhook_delivery_attempts`, `webhook_tracked_orders`, `token_flags`, `usage_*`; SELECT on `webhook_target_approvals` and `upstream_endpoint_scoping`. The data plane needs no grant on `alert_instances` or `alert_digest_items` (control plane only). (c) 02 §5.5: in egress-proxy mode the dial-time check is done by the gateway, which sends `CONNECT <validated-IP>` (§2.7.3). |
 | API design (03) | Already in the final 03: `/v1/me`, `/v1/webhooks…`, `GET /v1/docs/legacy`, the `Bawaba-Warning` grammar and codes, `updated_since` (03 §5.7), `audit_unavailable`, `webhook_target_not_allowed`, `delivery_not_retryable`. **Still requested:** §17.3 should require an owner-approved target host in every egress mode (it still conditions the allowlist on `webhooks.egress.mode=direct`) and mention target requests (§2.7.4); 05 §2.8 keeps HTTPS for sandbox targets while 03 §17.3 allows `http://` for allowlisted sandbox hosts — one of the two must change (this document's position: HTTPS only, since `http://` would put signed payloads and the signature in clear); optional additive `/v1/me` usage fields `upstream_units` and `webhook_deliveries` (§4.4). |
 | Data model | final DDL for the tables named here (including `audit_epoch_keys` from 02, `webhook_target_requests`, `webhook_target_approvals`, `upstream_endpoint_scoping`); `UNIQUE (tenant_id, token_id, idempotency_key)` on `audit_writes` (04 keys the idempotency namespace by `lineage_id`; the backstop key follows it). |
@@ -2238,35 +2256,28 @@ backup:
 5. The PostgreSQL ingest rating of §1.12 (≈ 2,000 audited req/s per primary) is a design estimate to be confirmed by
    the `audit-pg-ingest` load test before release.
 
-**Questions for ISCO** (to merge into the consolidated list)
+**Questions for ISCO.** The single consolidated list is [`08-isco-questions.md`](08-isco-questions.md) (cited as
+"08 ISCO-nn"; its Appendix A.6 maps this section). The questions this document depends on:
 
-- `lastupdatedate` on `GetCustomers` / `GetItems` / `GetItemsStores`: exact comparison (`>` or `>=`), granularity,
-  timezone; which changes update it (balances? contacts? classifications? stock quantities?) (upstream Q18).
-- Does `GetVouchers` filter by voucher date or entry/update date? Maximum date range and response size? Does
-  `VoucherHeader.update_date` change on every edit, and in which format?
-- Which voucher types does `GetExtraVouchers` return (upstream Q23)?
-- `GetStatus`: is `manual` the order's `manual_code` or its voucher code? Response representation and result for
-  unknown values? Can several orders share a `manual_code`?
-- Can vouchers, customers or items be deleted in Shamel, and is there any way to observe deletions?
-- Are `GetCustomerBalances`, `GetItemsStores` and `GetVouchers` salesman-scoped for salesman users (upstream Q17)?
-- Is response serialization stable (field order) between identical calls?
+| Topic | Where it matters here | 08 id |
+|---|---|---|
+| `lastupdatedate` on `GetCustomers` / `GetItems` / `GetItemsStores`: comparison (`>` or `>=`), granularity, timezone, which changes update it | §2.4.1, §2.4.2 | ISCO-22 (dates and timezone also ISCO-24) |
+| Can customers, items and vouchers be deleted, and can deletions be observed? Does `GetVouchers` filter by voucher date or by entry/update date; does `update_date` change on every edit? | §2.4, §2.4.4 | ISCO-23 (a), (c)–(d) |
+| Maximum date range and response size of `GetVouchers` | §2.4.4 | ISCO-21 (d) |
+| What `GetExtraVouchers` returns and which voucher types (stock-only types 12 and 16) | §2.4.4 | ISCO-40 (b) |
+| `GetStatus`: meaning of `manual`, response representation, unknown values, shared manual codes, orders without `manual_code` | §2.4.5 | ISCO-42 |
+| Salesman scoping of `GetCustomerBalances`, `GetItemsStores`, `GetVouchers` (decides `identity_sensitive` defaults) | §2.3 | ISCO-25 (a) |
+| Stable response serialization (field order) between identical calls (assumption 1) | §1.4.3, §1.7 | ISCO-17 (d) |
+| Voucher amount semantics (light-row `amount` vs full-voucher totals) | §2.4.4 | ISCO-46 |
 
-**Reconciliation notes for the design set**
+**Reconciliation notes for the design set** (items already settled by the final 01, 02, 03 and 04 were removed)
 
-- **Resolved by the revised 02:** request ids are UUIDv7 (02 LV-24 = 01 S2); the audit spool limit is 10 GiB (02 §16
-  = 01 §15.2); listener ports are control 7443 and ops 9090 (02 §12.1 = 01 §15.2).
-- **Warning code**: 01 S6's example `polling_too_fast` → canonical `polling_too_frequent` (§4.2, 03 §23.4).
-- **Key hierarchy**: 01 §15.3 (one key file, HKDF purposes `audit`, `blobid`) vs 02 §9.2 (two key files, KEK per
-  plane, purpose keys `audit_body`, `audit_addr`, audit epoch DEKs); this document follows 02, and 02 §20.1 already
-  asks 01 to change.
 - **Webhook config names**: 02 §19 lists `webhooks.timeout` and `webhooks.max_response_read`; this document nests
   them as `webhooks.delivery.timeout` and `webhooks.delivery.max_response_bytes` (§2.9). One spelling should be
-  chosen when 01 §15.2 fixes the config schema.
-- **Removed-event reason**: `no_longer_visible` in 03 §17.2, 04 §4.7 and here (§2.2, §2.6).
+  chosen in the config schema (01 §15.2 accepts 05's keys for the plane they apply to).
+- **Audit jobs placement**: 01 §5.6 lists blob GC under the data-plane retention singleton; this document runs blob
+  GC, compaction and dictionary training on the control node (§1.10, §10).
 - **Credential terminology**: 01 "identity" vs 02 "credential" (`cred_id`); the CLI accepts both
   (`upstream credential`, alias `identity`).
-- **Webhook leases**: 01 §5.6 lists one singleton per (upstream, event type); this document refines the unit to the
-  poll stream (adds credential/identity, variant and detector) for the reason of 01 §9.7, and drops the identity
-  again for endpoints calibrated as not identity-scoped (§2.3).
 - **ID prefixes** (`whs_`, `evt_`, `whd_`, `alr_`, `apr_`, …) and upstream ids (`up_1` in 01, `ups_main` in 02)
   should be harmonised with the data model.
