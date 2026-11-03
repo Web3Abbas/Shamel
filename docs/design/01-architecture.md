@@ -444,8 +444,11 @@ type Operation struct {
     Write            bool
     Snapshot         bool          // list/report: paginated over a snapshot, distributed coalescing
     DefaultSort      SortKey       // snapshot order (§9.4); views in this order stay unmaterialized
-    CostClass        CostClass     // small | large (full lists, reports): limiter share, breaker key, tunnel session
-    Plan             UpstreamPlan  // one or more Shamel calls: endpoint id (compiled table), header params, form field
+    SortKeys         []SortField   // sort allowlist; text/code fields get precomputed collation keys (03 §5.5)
+    Cost             CostRule      // 03 §23.3: class per upstream call (none | small | report | list) from the
+                                   // request shape; report and list calls are "large" in §7.6, §7.9 and §8.5
+    Plan             UpstreamPlan  // one or more Shamel calls: endpoint id (compiled table), header params, form field;
+                                   // may be a range-split plan (§7.11)
     Request          Schema        // query/body schema, size limit
     Resource         ResourceType  // normalized record type (+ generated encoder)
     Dimensions       DimensionMap  // data-scope dims -> record field paths + 04 §4.4 enforcement code
@@ -572,22 +575,33 @@ flowchart TD
 - **Perf:** in-memory only.
 
 #### S6 — Rate & usage accounting
-- **Does:** per-token GCRA rate limit (defaults generous, per-token adjustable) with **local quota leasing**: each
-  node keeps an in-memory GCRA bucket per active token and leases batches of units from the cluster-wide GCRA state
-  `bwb:<t>:rl:<token>` with one script call (`take(n)` returns the granted count; Valkey `TIME` is the single
-  clock). The batch size `n` adapts to the token's recent rate on that node (default 10 % of the burst, min 1); a
-  refill is issued asynchronously when the local balance falls below half a batch, and unused units are returned
-  after 1 s of idleness. Most requests make **no** Valkey call. Sets `RateLimit-Limit`, `RateLimit-Remaining`,
-  `RateLimit-Reset` from the local view (local balance + the cluster-wide remaining reported by the last `take`).
-  Usage advice (05 §4.3, H1–H8) is evaluated on node-local per-(token, normalized query) state, which each node
+- **Does:** per-token GCRA rate limits (defaults generous, per-token adjustable; `limits.defaults.<kind>`,
+  03 §23.3) over three buckets: **reads** (1 unit per read request, cursor pages included), **writes** (1 unit per
+  Shamel write; a batch costs its operation count) and **upstream units** (each read costs the sum of the cost
+  classes of the upstream calls its plan will make: `none` 0, `small` 1, `report` 5, `list` 10, weights in
+  `limits.cost_weights`). S6 computes the cost from the matched route, the token's policy and the request's
+  syntactic shape (cursor present, path code form, `include` values, number of date-range slices) through the
+  operation's `Cost` rule, before execution and whether or not the call is later coalesced. Publishable tokens
+  additionally have per-(token, client IP) reads and upstream buckets. All buckets use **local quota leasing**: each
+  node keeps an in-memory GCRA bucket per active (token, bucket) and leases batches of units from the cluster-wide
+  GCRA state `bwb:<t>:rl:<token>:<bucket>[:<ip>]`; one script call (`take`) refills every bucket a request needs and
+  returns the granted counts (Valkey `TIME` is the single clock). The batch size adapts to the token's recent rate
+  on that node (default 10 % of the burst, min 1, never less than the request's own cost); a refill is issued
+  asynchronously when a local balance falls below half a batch, and unused units are returned after 1 s of
+  idleness. Most requests make **no** Valkey call. A request is admitted only if every bucket it consumes has the
+  units; otherwise nothing is charged to the others. `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`
+  describe the **most constrained** bucket the request consumed (lowest `remaining / limit` after the charge),
+  computed from the local view (local balance + the cluster-wide remaining reported by the last `take`); below
+  `limits.warn_ratio` (20 %) the response adds `Bawaba-Warning: rate_limit_approaching`. Usage advice (05 §4.3, H1–H8) is evaluated on node-local per-(token, normalized query) state, which each node
   merges every 1 s with one pipelined merge call into `bwb:<t>:adv:<token>:<qhash>`, receiving the merged state
   back; warnings may lag by ≤ 1 s, which is acceptable for advice. Tight polling adds
   `Bawaba-Warning: polling_too_frequent;observed=8;recommended=60` (syntax 03 §23.4) and counts toward the
   "abusive/buggy tool" score. Usage counters (requests by op/status, latency histogram, `last_used_at`) are
   recorded in a per-node lock-free aggregator and flushed every 10 s. Runs **before** validation so malformed
   requests still consume budget.
-- **Needs:** token limits from compiled config; Valkey (lease refills and advice merges only).
-- **Failure:** limit exceeded → `429 rate_limited` + `Retry-After`. Valkey unavailable → local GCRA with
+- **Needs:** token limits and cost weights from compiled config; Valkey (lease refills and advice merges only).
+- **Failure:** a bucket exhausted → `429 rate_limited` + `Retry-After` with `details[{code: "bucket_exhausted",
+  param: "reads" | "writes" | "upstream"}]` (03 §23.3). Valkey unavailable → local GCRA with
   `limit / last_known_node_count`, advice from node-local state only, metric
   `bawaba_degraded{function="rate_limit"}`.
 - **Perf:** in the common case ≤ 5 µs and no network I/O; a request waits for a refill (1 RTT) only when the local

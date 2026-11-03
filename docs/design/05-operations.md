@@ -2119,9 +2119,10 @@ The mechanism is 02 §9.5; operations adds tracking:
 
 `bawaba restore drill` (scheduled monthly, `backup.drill.schedule`, `11 5 1 * *`) restores the latest archive into a
 scratch database `bawaba_drill` on the same PostgreSQL server (or `backup.drill.dsn`), then: runs migrations; checks
-row counts against the manifest; unwraps the restored KEK and decrypts a sample of protected columns (no Shamel
-login); fetches and decrypts
-`backup.drill.sample_blobs` (200) random objects from the **backup** blob target, recomputing their keyed ids;
+row counts against the manifest; unwraps the restored KEK_control and the MK copy of KEK_data with `master.key`
+and decrypts a sample of protected columns (no Shamel login); opens a sample of restored `audit_epoch_keys` with the
+restored `audit_seal` private keys, then fetches and decrypts `backup.drill.sample_blobs` (200) random objects from
+the **backup** blob target, recomputing their keyed ids;
 verifies one cold segment and the integrity chain of one day; measures elapsed time. Results go to `backup_runs`
 (kind `drill`), the System page and `restore_drill_overdue` / `backup_failed` alerts. The scratch database is dropped
 afterwards.
@@ -2135,8 +2136,9 @@ afterwards.
 | PostgreSQL corruption / bad migration | PITR to before the event (WAL archiving) or last daily dump | as above | ≤ 1 h |
 | Blob store lost | restore from blob backup target; newer objects recorded as gaps | ≤ 1 h of bodies | depends on volume (≈ 200 GB at medium load) |
 | Valkey lost | start empty; snapshots/cursors expire (`409 snapshot_expired`), coalescing and rate limits rebuild, queues re-derived; idempotency backstopped by `audit_writes` unique key | none for durable state | minutes |
-| Ransomware or root compromise | rebuild host; restore from off-site, object-locked targets; follow the 02 §17 runbook (rotate master key, KEK, owner password, TOTP, all tokens, Shamel passwords, connector re-enrollment, Cloudflare credentials) | as backups | ≤ 4 h |
-| Master key lost and its backup lost | not recoverable: `bawaba init --reinitialize` with a new key, re-enter Shamel credentials, reissue all tokens, re-enroll connectors; old audit bodies unreadable | — | hours, plus reissuing tokens |
+| Ransomware or root compromise | rebuild host; restore from off-site, object-locked targets; follow the 02 §17 runbook (rotate master key, data-plane key, KEKs of both planes, DEKs, owner password, TOTP, all tokens, Shamel passwords, connector re-enrollment, Cloudflare credentials) | as backups | ≤ 4 h |
+| `data.key` lost or suspected exposed (data-plane compromise) | `bawaba key rotate-data-key` from the control plane, rolling restart of data-plane units; after a suspected compromise also `rotate-kek --plane data` and `rotate-dek --plane data` (02 §9.6). Stored audit content was never readable with it. | none | minutes |
+| Master key lost and its backup lost | not recoverable: `bawaba init --reinitialize` with new key files, re-enter Shamel credentials, reissue all tokens, re-enroll connectors; old audit bodies and metadata unreadable (the `audit_seal` private keys are gone) | — | hours, plus reissuing tokens |
 
 ### 9.6 Upgrades and schema migrations
 
@@ -2150,7 +2152,7 @@ afterwards.
   Migrations run with `lock_timeout = 5s`, `statement_timeout` per step, non-transactional for `CONCURRENTLY` steps,
   and are resumable.
 - Versioned formats with N−1 readers: compiled config payload (the control plane writes the format understood by the
-  oldest node in the registry), audit WAL/spool/pack/segment formats, Valkey values (coalescing keys already include
+  oldest node in the registry), audit WAL/spool/pack/segment/index formats, Valkey values (coalescing keys already include
   `normalizer_version`; Lua scripts are loaded by SHA under versioned names), webhook payload `api_version`,
   connector protocol (`min_version`, 01 §8.3).
 - Rollback: binaries can roll back one release as long as no contract migration has run; contract migrations are
@@ -2201,6 +2203,7 @@ backup:
   retention: { daily: 7, weekly: 4, monthly: 12 }
   blobs: { sync_interval: 1h, target: offsite, deleted_retention: 30d }
   include_blob_index: true          # false: smaller dumps; restore rebuilds audit_blobs from pack footers
+                                    # (segment_first mode has no audit_blobs; the idx/ files are synced with the blobs)
   drill: { schedule: "11 5 1 * *", dsn: "", sample_blobs: 200 }
 ```
 
