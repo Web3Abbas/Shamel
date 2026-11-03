@@ -951,8 +951,11 @@ current spec merged with the requested changes (no auto-fill). Auto-fill (03 §1
 request pass: omitted dimensions inherit A's restriction; A's hidden fields are added; omitted
 `writes_require_approval` → `true`; omitted `expires_at` → A's expiry (if any); omitted `rate_limit` fields →
 min(kind default, A's value); omitted `get_all` → `false`. IP lists are deliberately **not** auto-filled (the tool
-usually runs somewhere other than the agent), so an IP-restricted agent must state the tool's addresses. The rule compares effective (compiled) forms, never raw input, so groups, wildcards, occurrences, kind-forced
-hides and the pinned-salesman intersection are all accounted for.
+usually runs somewhere other than the agent), so an IP-restricted agent must state the tool's addresses.
+
+The rule compares effective (compiled) forms, never raw input, so groups, wildcards, occurrences, kind-forced hides
+and the pinned-salesman intersection are all accounted for. `covers(X, Y)` below denotes the comparisons of
+`violations` from `R.kind` onwards with Y as grantor and X as grantee; §10.5 reuses it for owner edits.
 
 Definitions: `env_rank(test)=0 < env_rank(live)=1`; `eff(X,d)` = effective allow-set of dimension *d* (⊤ = `all`);
 `H(X)` = effective hidden-field bitset; for prefixes, `p ⊑ q` ⇔ same family ∧ `q.Bits() ≤ p.Bits()` ∧
@@ -1063,8 +1066,8 @@ trigger), `SELECT` own rows, and `EXECUTE` on two `SECURITY DEFINER` functions o
   with the live subset-rule result; the agent's `reason` and metadata are shown separately, labelled as untrusted
   text written by an agent.
 - **Editing before approval:** the owner may change any field of the granted spec, name, description, metadata and
-  expiry, subject to: `violations(G, A) = ∅` **and** `violations(G, R) = ∅` (R used as grantor, i.e. G may only
-  narrow the request). Examples: drop atoms, add stores restrictions, add hidden fields, add an IP allowlist, set an
+  expiry, subject to: `violations(G, A) = ∅` **and** `covers(G, R)` yields no violation (R as grantor, §10.3, i.e.
+  G may only narrow the request). Examples: drop atoms, add stores restrictions, add hidden fields, add an IP allowlist, set an
   expiry, turn approval on. Granting more than requested is done after approval as an ordinary owner update of the
   token (separately audited). `bawaba access-request approve areq_… --narrow '{"data_scopes":{"stores":[1]}}'`.
 - The narrowing patch and `owner_note` are visible to the agent in the request resource (`decision.granted_spec`,
