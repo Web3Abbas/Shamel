@@ -535,14 +535,30 @@ sequenceDiagram
   `edge.mode=none` it goes directly to `listeners.tunnel.addr`.
 - **Inner layer:** TLS 1.3 only, ALPN `bawaba-tunnel/1`, curves `X25519MLKEM768` (hybrid post-quantum, the Go
   default) and `X25519`. The connector is the TLS client and dials. The gateway is the TLS server and opens streams.
-- **Multiplexing:** yamux over the inner TLS. At most 256 streams per tunnel. Keepalive every 15 s. Frames are
-  length-prefixed protobuf (request frames are at most 1 MiB; response bodies are streamed in chunks up to the cap).
-  Because framing is explicit there is no HTTP parsing between gateway and connector, so no desync is possible.
+- **Multiplexing:** yamux over the inner TLS. At most 256 streams per tunnel session; stream 1 is the control
+  stream. Frames are length-prefixed protobuf (request frames are at most 1 MiB; response bodies are streamed as
+  chunk frames of at most 256 KiB up to the cap). Because framing is explicit there is no HTTP parsing between
+  gateway and connector, so no desync is possible.
+- **Liveness is progress-based** (01 §8.3): an application `Ping` on the control stream every 15 s, and a session is
+  dead only when **no inbound bytes at all** arrived for `tunnel.liveness_timeout` (60 s). yamux's own keepalive is
+  disabled (its `ConnectionWriteTimeout` is 60 s), because on a saturated office uplink pings queue behind data
+  frames; a session busy streaming a body is alive by definition. A dead session is closed and redialed with
+  backoff; its in-flight streams fail as transport outcomes, never as partial bodies.
+- **Two sessions per connector instance** (01 §8.5): each instance opens `tunnel.sessions` (default 2) independent
+  sessions, each its own WebSocket, inner TLS handshake and yamux stack with the same client certificate. Session 0
+  is `interactive` (small calls, writes, control traffic), session 1 is `bulk` (calls of cost class `report` or
+  `list`); `hello` names the `session_class`. If one session is lost, its class falls back to the other until it
+  reconnects. Both sessions are authenticated, verified and frame-checked identically; the split only keeps large
+  transfers from delaying interactive streams and control frames.
 - **Request frame** (illustrative):
   `ShamelCall{request_id, endpoint_id (uint16), headers [{param_id, value}], form {field_id, value}?, credential
-  {cred_id, version, sealed}, role_epoch, deadline_ms, max_response_bytes}`.
+  {cred_id, version, sealed}, role_epoch, deadline_ms, max_response_bytes, priority, cost_class}`.
+  `priority` (`interactive` | `write` | `background`) and `cost_class` (`small` | `report` | `list`) are scheduling
+  hints for the connector's queue (check 8) and session choice; they never widen what a frame may do (checks 1–7
+  and the response caps do not depend on them), so a forged hint can at most reorder the gateway's own calls.
   Other operations: `MediaFetch{cref}`, `Ping`, `RenewCert{csr}`, `ResealCredentials{blobs}`,
-  `SessionRole{cred_id, epoch, holder}` (§7.5), `Kill{reason}`. The connector's `hello` advertises its compiled
+  `SessionRole{cred_id, epoch, holder}` (§7.5), `Kill{reason}`; control-stream messages `hello`, `welcome`, `status`
+  and `cap_share` (01 §8.3). The connector's `hello` advertises its compiled
   endpoint-table version and the endpoint ids it supports; the gateway never routes an endpoint to a connector that
   does not advertise it (the request gets `503 upstream_unavailable` and the owner an "upgrade connector" alert), so a
   rolling upgrade (05 §9.6) never turns into a stream of rejected frames.
@@ -558,7 +574,7 @@ sequenceDiagram
 | 5 | The form field is the endpoint's `obj` or `filters`. The value parses as JSON, is at most `policy.max_form_bytes` (1 MiB), and is re-encoded with `url.Values`. | Reject |
 | 6 | The sealed credential opens with AAD `conn_id ‖ cred_id ‖ version` (§7.5) | Reject |
 | 7 | In `single_holder` mode, this connector is the credential's holder at `role_epoch` (§7.5) | `not_holder` (not a reject) |
-| 8 | In-flight requests stay within the effective cap: the `cap_share` from the `welcome` message (01 §7.6, §8.3), lowered by the local `policy.max_concurrency` when the owner set one; optional `policy.max_rps` (default `0` = off) | Queue (FIFO), then `busy` |
+| 8 | In-flight requests stay within the effective cap: the `cap_share` from the `welcome` message or the latest `cap_share` update (01 §7.6, §8.3), lowered by the local `policy.max_concurrency` when the owner set one; optional `policy.max_rps` (default `0` = off) | Queue (FIFO per `priority` class, ordered by frame deadline), then `busy` when the deadline cannot be met |
 | 9 | The deadline is at most `policy.max_deadline` (90 s, equal to `server.request_timeout`) | Clamp |
 
 The effective cap follows the gateway's global upstream cap automatically, so connector throughput scales with the
@@ -577,12 +593,20 @@ operation type outside the protocol version), or (b) a sustained reject ratio: m
 throttles a compromised gateway that probes the connector, while a validator mismatch on one endpoint during an
 upgrade only fails the affected requests.
 
-**Response frame:** status, content type, body, outcome enum and timings. The body is capped at
+**Response frames** (01 §8.1, §8.4): a header frame `{status, content_type, outcome, compression}`, body chunk frames
+(at most 256 KiB each) and a trailer `{outcome, timings, bytes}`. The body is capped at
 `min(frame.max_response_bytes, compiled per-endpoint cap, local policy.max_response_bytes)`, counted after
 decompression; the compiled per-endpoint caps use the same classes as the gateway registry (§10.6), and local
 configuration can only lower them. Raw Go error strings are never included. Before sending, the connector scrubs its
 own origin markers from the body: base URL host, resolved IPs, local hostname and NetBIOS name, and media roots. This
 is best effort and is what keeps Shamel's address out of the gateway's audit too.
+
+**Compression after the scrub.** The connector compresses the scrubbed body as one zstd stream (level 1–3, encoder
+reused per session, flagged in the header frame), so a large list crosses the office uplink 8–10× smaller. The order
+is fixed: scrub on plaintext first, then compress, so no marker can hide inside compressed bytes. The gateway
+decompresses through the operation's `MaxResponseBytes` limiter, which counts **decompressed** bytes (01 §7.4), so a
+compromised connector cannot use a compression bomb to exceed the response caps; a relaying node forwards the
+compressed frames unchanged and only the calling node decompresses (01 §8.6).
 
 **Streaming scrub.** The scrub never buffers a whole body. JSON bodies are tokenized as they stream (`jsontext`);
 each string token is unescaped and scanned with an Aho–Corasick automaton over the marker set, and each matched
@@ -627,9 +651,11 @@ first (unknown, Q14), independent logins would kick each other out continuously.
 
 1. **Assignment.** The holder record `bwb:<t>:credrole:<upstream>:<cred_id> = {conn_id, epoch}` lives in Valkey and
    changes only through a compare-and-set script that increments `epoch`. The node that observes the holder's loss
-   (tunnel registry expiry, 01 §8.6), or an owner action (`bawaba connector suspend|kill`), picks the connected
-   instance with the most recent successful `shamel_probe` and publishes `credrole_changed` on `bwb:events`. The
-   current holder stays holder while it is connected (no rebalancing churn).
+   (tunnel registry expiry or tunnel close, 01 §8.6), or an owner action (`bawaba connector suspend|kill`), elects
+   the connected instance with the most recent successful `shamel_probe`, **preferring the instance that already
+   holds the upstream's other credentials** (so one primary instance normally holds all of them, 01 §7.1, §8.5),
+   and publishes `credrole_changed` on `bwb:events`. The current holder stays holder while it is connected (no
+   rebalancing churn).
 2. **Handover.** The node holding the old holder's tunnel sends `SessionRole{cred_id, epoch, holder=false}`; the
    connector drops its Shamel session for that credential (and logs out if Shamel offers a logout) and replies
    `SessionRoleAck`. If no ack arrives within 2 s, that node closes the old holder's tunnels (the connector reconnects
@@ -646,6 +672,13 @@ first (unknown, Q14), independent logins would kick each other out continuously.
    connector's reject counter. No holder connected → `503 upstream_unavailable`.
 5. **Valkey unavailable.** Nodes keep the last known holder. A holder change is not possible until Valkey returns,
    unless exactly one connector instance is connected for the upstream, which then becomes holder locally.
+6. **Capacity follows the holders** (01 §7.6). `cap_share` is allocated to holders so that Σ `cap_share` over the
+   upstream's instances equals the upstream's `max_concurrency`: in `single_holder` mode the primary holder receives
+   `cap_share = cap` and standbys `0`; if credentials are split across instances, the cap is divided in proportion to
+   their recent per-credential call rate (at least 1 per holder); in `per_connector` mode each instance gets
+   `cap / instances`. Every holder change sends a `cap_share` update on the control stream, the old holder's share
+   is lowered before the new holder's is raised, and the local `policy.max_concurrency` ceiling (check 8) still
+   applies, so a handover never lets the instances together exceed the cap or the owner's local ceilings.
 
 In direct mode the gateway's own cluster-wide session cache with serialized login (01 §7.1) solves the same problem.
 `bawaba upstream calibrate` tests the behaviour (login twice, then check whether the first session still works) and
