@@ -625,9 +625,11 @@ first (unknown, Q14), independent logins would kick each other out continuously.
    current holder stays holder while it is connected (no rebalancing churn).
 2. **Handover.** The node holding the old holder's tunnel sends `SessionRole{cred_id, epoch, holder=false}`; the
    connector drops its Shamel session for that credential (and logs out if Shamel offers a logout) and replies
-   `SessionRoleAck`. Only then (or once the old holder's tunnel is gone, or after a 2 s ack timeout, since a connector
-   without a tunnel receives no calls and therefore never contacts Shamel) does the node holding the new holder's
-   tunnel send `SessionRole{cred_id, epoch, holder=true}`, wait for the ack, and start routing.
+   `SessionRoleAck`. If no ack arrives within 2 s, that node closes the old holder's tunnels (the connector reconnects
+   and learns its roles from `welcome`); a connector without a tunnel receives no calls and therefore never contacts
+   Shamel. Only after the ack or the closure does the node holding the new holder's tunnel send
+   `SessionRole{cred_id, epoch, holder=true}`, wait for the ack, and start routing. The old holder thus never uses its
+   session again before the new holder's first login.
 3. **Connector rules.** A connector logs in for a credential only while it is the holder at the highest epoch it has
    seen, and re-logs in after `auth_failed` only under the same condition. A `ShamelCall` whose `role_epoch` differs
    from its current holder epoch, or for a credential it does not hold, is answered with outcome `not_holder`
@@ -763,30 +765,71 @@ being set up correctly.
 
 ### 9.2 Key hierarchy
 
+The hierarchy is split by plane, so that a compromise of the data-plane user (ADV-8 without root) yields only what
+the data plane needs to serve traffic, and the plane separation of P6 also holds for keys.
+
 ```mermaid
 flowchart TD
-    MK["Master key MK<br/>256-bit file on the server<br/>outside DB and backups"]
-    KEK["KEK (versioned)<br/>random 256-bit<br/>crypto_keks: wrapped by MK"]
-    MK -- "AES-256-GCM wrap" --> KEK
-    KEK -- wrap --> K1["AEAD: shamel_credential, upstream_config, media_ref"]
-    KEK -- wrap --> K2["AEAD: audit_body (monthly), audit_meta"]
-    KEK -- wrap --> K3["AEAD: snapshot, idempotency, queue, cursor, approval_payload"]
-    KEK -- wrap --> K4["AEAD: webhook_secret, webhook_url, totp_seed, pending_secret"]
-    KEK -- wrap --> K5["AEAD: pki_ca, cf_api_token, smtp_password, upstream_session"]
-    KEK -- wrap --> K6["MAC: token_pepper, audit_addr, audit_chain, media_id, media_sign"]
+    MK["Master key MK<br/>master.key, control plane only<br/>outside DB and backups"]
+    DK["Data-plane key DK<br/>data.key, data plane only<br/>re-issuable by the control plane"]
+    KC["KEK_control (versioned)<br/>wrapped by MK only"]
+    KD["KEK_data (versioned)<br/>wrapped twice: by MK and by DK"]
+    MK -- "AES-256-GCM wrap" --> KC
+    MK -- "wrap (control copy)" --> KD
+    DK -- "wrap (data copy)" --> KD
+    KC -- wrap --> C1["AEAD: pki_ca, totp_seed, cf_api_token, smtp_password"]
+    KC -- wrap --> C2["HPKE private keys: audit_seal (monthly)"]
+    KC -- wrap --> C3["MAC: admin_chain"]
+    KD -- wrap --> D1["AEAD: shamel_credential, upstream_config, media_ref, upstream_session (direct mode)"]
+    KD -- wrap --> D2["AEAD: snapshot, view, cursor, idempotency, queue, approval_payload, pending_secret"]
+    KD -- wrap --> D3["AEAD: webhook_secret, webhook_url, webhook_event, compiled_config, audit_spool"]
+    KD -- wrap --> D4["MAC: token_pepper, coalesce, audit_addr, audit_index, audit_chain, webhook_ledger, media_id, media_sign"]
+    E["Audit epoch DEKs (audit_body, audit_meta)<br/>random per node and epoch, memory only"]
+    C2 -. "opens the sealed epoch DEKs<br/>(nodes seal to the public key)" .-> E
 ```
 
 - **Why three tiers:** rotating MK means rewrapping only the KEK rows. A future KMS or Vault replaces MK with no data
   migration. A per-tenant KEK is possible later because tenancy is latent in the data model.
-- **Tables:** `crypto_keks(id, version, mk_key_id, wrapped, status, created_at)` and
-  `crypto_keys(id, purpose, kind {aead|mac}, version, kek_id, wrapped, status {active|decrypt_only|destroyed},
-  created_at, not_after)`. `crypto_meta(install_id, kcv)`.
-- **Startup:** read MK, verify `kcv`, unwrap the active and decrypt-only KEKs, and unwrap the other keys lazily into
-  memory. The data plane zeroizes MK once the KEKs are unwrapped. When a policy-epoch change announces a new KEK, it
-  re-reads MK from its credential file (systemd credentials stay available for the unit's lifetime), unwraps the KEK
-  and zeroizes MK again. The control plane keeps MK for rotations.
-- **Plane separation:** the data plane never loads `pki_ca` (§7.2) or `totp_seed`. Key loading is driven by an
-  explicit per-plane purpose list.
+- **Two root files, one backup.** `bawaba init` creates `master.key` (MK) and `data.key` (DK). MK is readable only by
+  the control-plane unit; DK only by the data-plane unit (§9.4). KEK_data is wrapped under both, so the control plane
+  can read and write every data-plane purpose (it creates direct-mode credentials, webhook secrets and pending
+  secrets, and shows approval payloads), while the data plane can never unwrap KEK_control. DK needs no offline
+  backup: `bawaba key reissue-data-key` generates a new DK from the control plane and wraps KEK_data under it. MK
+  remains the single key the owner must back up (§9.5).
+- **Purpose assignment.** The data plane decrypts only what it must use in clear to serve requests and run its
+  workers. Everything else is control-only:
+  - `pki_ca`: certificate signing runs only in the control plane (§7.2).
+  - `totp_seed`, `admin_chain`: owner authentication and the admin event chain (§12.5), so a compromised data plane
+    can neither verify TOTP codes nor forge admin events.
+  - `cf_api_token`: Cloudflare ban sync is performed by the control plane, which reads `ip_bans` (§10.3).
+  - `smtp_password`: the SMTP sender runs in the control plane and reads `alert_outbox` (05 §3.1); data-plane
+    emitters only enqueue alerts.
+  - `audit_seal`: the HPKE private keys that open audit epoch DEKs.
+- **Write-only audit.** Each data-plane node generates a random 256-bit DEK per epoch (`security.audit_epoch`,
+  default 1 h, or earlier after 64 GiB of output) for the purposes `audit_body` and `audit_meta` (which includes
+  05's `params_enc`). It seals the DEK with HPKE (`info = "bawaba/audit-epoch/v1"`, `aad = epoch_key_id ‖ node_id`)
+  to the current `audit_seal` public key, inserts the sealed DEK into `audit_epoch_keys(id, tenant_id, node_id,
+  seal_key_id, sealed_dek, created_at, not_after)`, uses the plaintext DEK only in memory and zeroizes it when the
+  epoch ends. Objects and metadata are encrypted under the epoch DEK with the normal envelope (§9.3), whose key id
+  names the epoch key. Only the control plane holds the `audit_seal` private key, so a node compromised at time T
+  can read the bodies it is processing during the current epoch (which it sees in plaintext anyway), but none stored
+  in earlier epochs or by other nodes. This is what makes the write-only claim of 05 §1.10 hold even on a single host
+  with a filesystem blob store. Cost: one HPKE seal per node per epoch; per object it is plain AES-GCM.
+- **Node-local spool.** The overflow spool holds raw events not yet processed (05 §1.5.3), so it uses the data-plane
+  purpose `audit_spool`; WAL segments hold only objects and rows already sealed under the epoch DEK, and replay moves
+  ciphertext without decrypting it.
+- **Tables:** `crypto_keks(id, plane {control|data}, version, wrapped_by {mk|dk}, root_key_id, wrapped, status,
+  created_at)` (KEK_data has one row per wrapping), `crypto_keys(id, plane, purpose, kind {aead|mac|hpke}, version,
+  kek_id, wrapped, public_key, status {active|decrypt_only|destroyed}, created_at, not_after)`,
+  `audit_epoch_keys` (above) and `crypto_meta(install_id, mk_key_id, mk_kcv, dk_key_id, dk_kcv)`. The `bawaba_data`
+  role reads only `plane = 'data'` rows through the view `crypto_keys_data` and the `audit_seal` public keys
+  (§12.4).
+- **Startup:** each plane reads its own root file, verifies the key check value, unwraps its active and decrypt-only
+  KEKs, and unwraps its purpose keys lazily into memory. The data plane keeps DK in locked memory (DK reveals nothing
+  beyond the data-plane keys it already holds) so it can unwrap a new KEK_data version announced by a config change.
+  The control plane keeps MK for rotations.
+- **Loading is driven by an explicit per-plane purpose list.** A test asserts that the data-plane binary can unwrap
+  no `plane = 'control'` key with DK and that its list contains none of the control-only purposes.
 
 ### 9.3 Encrypted record format and AAD
 
@@ -795,7 +838,7 @@ All encrypted values share one binary envelope:
 ```
 offset len  field
 0      1    format version (0x01)
-1      16   key id (UUID of the crypto_keys row)
+1      16   key id (UUID of the crypto_keys or audit_epoch_keys row)
 17     16   salt (random)
 33     12   nonce (random)
 45     n    ciphertext
@@ -817,48 +860,57 @@ offset len  field
 | `webhook_secret`, `webhook_url` | `webhooks/<webhook_id>/<column>` |
 | `totp_seed` | `owners/<owner_id>/totp` |
 | `audit_body` | `blob/<blob_id>` |
-| `snapshot` | `snapshot/<snapshot_id>/<token_id>/<policy_version>` |
+| `audit_meta` | `audit_event/<request_id>/<column>` |
+| `snapshot` | `snapshot/<snapshot_id>/<chunk_n>` (one shared, unfiltered snapshot per coalesced fetch, 01 §9.4) |
+| `view` | `view/<view_id>/<token_id>/<policy_version>` |
 | `idempotency` | `idem/<token_id>/<sha256(idempotency_key)>` |
-| `cursor` | `cursor/<token_id>/<route_id>` |
+| `cursor` | `cursor/<token_id>/<route_id>` (contents add `view_id`, offset, `query_hash`, `policy_version`, expiry) |
 | `approval_payload` | `approval/<approval_id>` |
-| `pending_secret` | `access_request/<request_id>` |
+| `pending_secret` | `access_request/<request_id>/<agent_token_id>` |
 | `pki_ca` | `pki/<ca_id>` |
 
 - **Audit bodies** are content-addressed with a **keyed** address, `blob_id = HMAC-SHA256(audit_addr, plaintext)`. A
   plain SHA-256 would let someone holding only the blob store confirm guesses, for example that a given balance
-  response exists. The body is compressed with zstd before encryption. Identical bodies are stored once, and an
-  existence check on `blob_id` comes before each write. A `decrypt_only` audit key is destroyed only when no live blob
-  references it (tracked by the retention GC).
+  response exists. The body is compressed with zstd before encryption under the writing node's current epoch DEK
+  (§9.2). Identical bodies are stored once, and an existence check on `blob_id` comes before each write. An epoch
+  key is destroyed only when no live blob references it, and an `audit_seal` private key only when no live epoch key
+  is sealed under it (both tracked by the retention GC).
 
 ### 9.4 Master key file
 
 ```
 # Bawaba master key. Back it up OFFLINE and SEPARATELY from data backups.
 bawaba-mk1:<install_id>:<key_id>:<base64url(32 random bytes)>:<crc32c hex>
+
+# Bawaba data-plane key (data.key). No backup needed: re-issue with `bawaba key reissue-data-key`.
+bawaba-dk1:<install_id>:<key_id>:<base64url(32 random bytes)>:<crc32c hex>
 ```
 
-The file may hold a second key line (the previous key) only during master-key rotation.
+`master.key` may hold a second key line (the previous key) only during master-key rotation; `data.key` likewise
+during data-key rotation.
 
 | Deployment | Path | Owner:group | Mode | How the service reads it |
 |---|---|---|---|---|
-| Binaries + systemd (reference) | `/etc/bawaba/master.key` | `root:root` | `0400` | `LoadCredential=master.key:/etc/bawaba/master.key`. The service reads `$CREDENTIALS_DIRECTORY/master.key` from a ramfs readable only by that unit. The services stay non-root and the file stays root-only. |
-| systemd + TPM2 (recommended hardening) | `/etc/bawaba/master.key.cred` | `root:root` | `0400` | `systemd-creds encrypt --with-key=tpm2` and `LoadCredentialEncrypted=`. A copied disk image is useless without this machine's TPM. |
-| Docker Compose | `/etc/bawaba/master.key` | `root:bawaba-key` | `0440` | Bind-mounted read-only at `/run/secrets/master.key`, into the data-plane and control-plane containers only. They run with supplementary gid `bawaba-key`, a group with no human members. This is the documented interpretation of "root-only" for containers: no non-root human account can read the file. |
+| Binaries + systemd (reference) | `/etc/bawaba/master.key`, `/etc/bawaba/data.key` | `root:root` | `0400` | The control-plane unit has `LoadCredential=master.key:/etc/bawaba/master.key`; the data-plane unit has `LoadCredential=data.key:/etc/bawaba/data.key` (§15.4). Each service reads `$CREDENTIALS_DIRECTORY/<name>` from a ramfs readable only by that unit, so the data-plane user can never read MK. The services stay non-root and the files stay root-only. |
+| systemd + TPM2 (recommended hardening) | `/etc/bawaba/master.key.cred`, `/etc/bawaba/data.key.cred` | `root:root` | `0400` | `systemd-creds encrypt --with-key=tpm2` and `LoadCredentialEncrypted=`. A copied disk image is useless without this machine's TPM. |
+| Docker Compose | `/etc/bawaba/master.key`, `/etc/bawaba/data.key` | `root:bawaba-mk` and `root:bawaba-dk` | `0440` | `master.key` is bind-mounted read-only at `/run/secrets/master.key` into the **control-plane container only**, which runs with supplementary gid `bawaba-mk`. `data.key` is mounted at `/run/secrets/data.key` into the **data-plane container only**, with gid `bawaba-dk`. Neither group has human members, and no container receives both files. This is the documented interpretation of "root-only" for containers: no non-root human account can read either file. |
 
 **Startup checks** (any failure means exit with a non-zero code; there is no degraded mode):
 
-- The file exists.
+- The plane's own root file exists, and a data-plane process refuses to start if it can read a file at
+  `security.master_key_file` (misconfiguration that would undo the split).
 - No world bits are set, and no group bits except in the Docker case.
 - The owner is root, or the file comes from the credentials directory.
 - Format and CRC are valid.
 - `install_id` matches the database.
-- The file contains the key whose id is recorded in `crypto_meta`, and that key's
-  `kcv = HMAC-SHA256(MK, "bawaba-kcv")[:8]` matches `crypto_meta.kcv`.
+- The file contains the key whose id is recorded in `crypto_meta`, and that key's check value
+  (`kcv = HMAC-SHA256(key, "bawaba-kcv")[:8]`) matches `crypto_meta.mk_kcv` or `crypto_meta.dk_kcv`.
 
-The master key is **never** in the database, environment variables, config files, images, logs or `bawaba backup`
-archives (the backup tool refuses paths that match the key file), and never on the same backup medium as the data.
-Auto-start after reboot works because the file is on disk. The trade-off: a thief with the whole running disk gets
-both key and data. TPM2 sealing or LUKS with TPM unlock closes that gap. The owner's stated threat, a stolen DB or
+Neither key is **ever** in the database, environment variables, config files, images, logs or `bawaba backup`
+archives (the backup tool refuses paths that match a key file), and MK is never on the same backup medium as the
+data.
+Auto-start after reboot works because the files are on disk. The trade-off: a thief with the whole running disk gets
+both keys and data. TPM2 sealing or LUKS with TPM unlock closes that gap. The owner's stated threat, a stolen DB or
 backup on its own, is fully covered without it.
 
 ### 9.5 Key backup
@@ -869,14 +921,18 @@ backup on its own, is fully covered without it.
 - `bawaba key export --shares 3 --threshold 2` optionally splits the key with Shamir's scheme.
 - `bawaba key verify --file <backup>` checks a backup against `kcv` without loading it. Run a restore drill
   quarterly: restore into a scratch environment and confirm that decryption works.
+- `data.key` is not backed up. After a restore, `bawaba key reissue-data-key` (control plane, step-up) creates a new
+  DK and wraps KEK_data under it.
 
 ### 9.6 Rotation
 
 | Operation | Command | Procedure | Schedule |
 |---|---|---|---|
-| Master key | `bawaba key rotate-master` | 1. Generate MK′. 2. Rewrite `master.key` with MK′ first and MK second (temp file, fsync, atomic rename). 3. Copy the file to every node and do a rolling restart, so each node holds both keys. 4. Rewrap all KEKs under MK′ in one transaction and record MK′'s id and `kcv` in `crypto_meta`. 5. `bawaba key retire-master <old_key_id>` rewrites the file with MK′ only. 6. Distribute it and do a second rolling restart. | Yearly, and immediately on suspected exposure |
-| KEK | `bawaba key rotate-kek` | New KEK. Rewrap every `crypto_keys` row in one transaction and bump the policy epoch, so nodes unwrap the new KEK. The old KEK becomes `retired` and is destroyed after 7 days. | Yearly, and on suspicion |
-| DEK or MAC key | `bawaba key rotate-dek --purpose <p>` | The new version becomes active for writes and the old one becomes `decrypt_only`. Low-volume purposes (credentials, upstream config, webhook secrets, TOTP, CA keys) are re-encrypted in the background. High-volume purposes (audit, snapshot, idempotency, queue, cursor) are not re-encrypted: the old version is destroyed once its data has expired. | `audit_body` monthly (automatic), others yearly |
+| Master key | `bawaba key rotate-master` | 1. Generate MK′. 2. Rewrite `master.key` with MK′ first and MK second (temp file, fsync, atomic rename). 3. Copy the file to every host that runs the control plane and restart those units, so each holds both keys (data-plane units are unaffected: they use DK). 4. Rewrap KEK_control and the MK copy of KEK_data under MK′ in one transaction and record MK′'s id and `kcv` in `crypto_meta`. 5. `bawaba key retire-master <old_key_id>` rewrites the file with MK′ only. 6. Distribute it and restart the control-plane units again. | Yearly, and immediately on suspected exposure |
+| Data-plane key DK | `bawaba key rotate-data-key` (alias `reissue-data-key`) | 1. Generate DK′. 2. Add a KEK_data wrapping under DK′ (the MK wrapping is untouched). 3. Write `data.key` with DK′ first and DK second, distribute, rolling restart of data-plane units. 4. Delete the DK wrapping and rewrite `data.key` with DK′ only. After a suspected data-plane compromise, also run `rotate-kek --plane data` and `rotate-dek --plane data`, because the attacker held KEK_data in memory. | On suspicion, or when `data.key` is lost |
+| KEK | `bawaba key rotate-kek [--plane control\|data]` | New KEK for that plane (a new KEK_data is wrapped under both MK and DK). Rewrap that plane's `crypto_keys` rows in one transaction and publish a new config version, so nodes unwrap the new KEK. The old KEK becomes `retired` and is destroyed after 7 days. | Yearly, and on suspicion |
+| DEK or MAC key | `bawaba key rotate-dek --purpose <p>` (or `--plane <p>`) | The new version becomes active for writes and the old one becomes `decrypt_only`. Low-volume purposes (credentials, upstream config, webhook secrets, TOTP, CA keys) are re-encrypted in the background. High-volume purposes (snapshot, view, cursor, idempotency, queue, audit spool) are not re-encrypted: the old version is destroyed once its data has expired. | Yearly |
+| Audit sealing key pair | automatic (`security.rotation.audit_seal`) | A new `audit_seal` X25519 key pair; nodes seal new epoch DEKs to the new public key from their next epoch on. The old private key becomes `decrypt_only` and is destroyed when no live epoch key references it. Epoch DEKs themselves rotate every `security.audit_epoch` (1 h). | Monthly (automatic) |
 | Token pepper | `bawaba key rotate-pepper` | New tokens use the new version. Existing tokens keep their recorded `pepper_version`, and lookups try each live version (§9.7). A version is retired when no token references it. `--list-affected` shows the tokens to reissue. | On suspicion |
 
 Lazy re-hashing of tokens to a new pepper version is **rejected**: it would require granting the data plane UPDATE on
@@ -914,8 +970,8 @@ stored server-side. Only `env` and `pk` are visible in the prefix.
 1. Parse the prefix and check length, character set and checksum. Any failure is `invalid_token`, with no store
    access.
 2. Compute `h = HMAC(pepper[current], token)` and look it up in the node's **in-memory index** of active tokens. The
-   index is loaded from PostgreSQL and synced by the policy epoch (below), so lookups are O(1), invalid tokens cost
-   no I/O, and floods are cheap to reject.
+   index is part of the compiled config (01 §5.4) and follows its version (below), so lookups are O(1), invalid
+   tokens cost no I/O, and floods are cheap to reject.
 3. Confirm the hit with `subtle.ConstantTimeCompare(rec.TokenHash, h) == 1`.
 4. On a miss, repeat steps 2–3 for each older live pepper version (at most 2).
 5. Check `status` and `expires_at`, and check that the prefix agrees with the row's `env` and `kind`. A mismatch is
@@ -928,9 +984,13 @@ yield `token_expired`, which helps developers and reveals almost nothing.
 
 - **Show once:** the plaintext appears only in the creation response (CLI `--json` field `token`, dashboard modal).
   Responses carry `Cache-Control: no-store`. The plaintext is never logged. It reaches agents only through §13.3.
-- **Revocation propagation:** the control plane increments `policy_epoch` in PostgreSQL and publishes on Valkey.
-  Nodes apply changes on the pub/sub message and also poll the epoch every second (one indexed query), so a revocation
-  takes effect within 1 s even if a message is lost.
+- **Revocation propagation** (01 §5.4, 04 §2.4.2): the control plane commits the change together with a new
+  `compiled_config` version and publishes `token_revoked` on `bwb:events`. Every node adds the id to its in-memory
+  deny-set on the message (p99 < 1 s) and also polls `max(version)` every `config.poll_interval` (5 s; 2 s while
+  Valkey is unavailable), so a revocation takes effect within the poll interval even if a message is lost. While
+  PostgreSQL is down, normal revocation is impossible (it needs a commit); `bawaba token revoke --emergency <id>`
+  then publishes a signed deny entry on `bwb:events` and stores it in `bwb:deny`, which every node, including a
+  restarting one, applies regardless of config age (§16).
 - **Last used:** `last_used_at` is written in batches every 60 s through a column-level UPDATE grant. Tokens unused
   for 90 days are flagged to the owner (`tokens.unused_flag_after`). Expiry is optional per token (never by default).
 - **Scale:** at SaaS scale (millions of tokens) the in-memory index becomes a sharded map with a PostgreSQL fallback.
@@ -968,8 +1028,9 @@ yield `token_expired`, which helps developers and reveals almost nothing.
 
 | Value | Protection |
 |---|---|
-| Pagination cursor | `base64url(envelope)` sealed with purpose `cursor`, AAD-bound to token and route. Contents: snapshot id, offset, `policy_version`, expiry. Tampering yields `invalid_cursor`. A cursor is honored only while the token is active and its `policy_version` is unchanged, so revocation or narrowing applies immediately even to running snapshots. |
-| Snapshot payload (Valkey) | Encrypted (`snapshot`). Stored **after** policy is applied, so it never holds fields the token may not see. Bound to the token. TTL about 60 s. |
+| Pagination cursor | `base64url(envelope)` sealed with purpose `cursor`, AAD-bound to token and route. Contents: view id, offset, `query_hash`, `policy_version`, expiry (01 §9.6). Tampering, use by another token or with another query yields `invalid_cursor`. A cursor is honored only while the token is active and its `policy_version` is unchanged (`409 cursor_invalidated`), so revocation or narrowing applies immediately even to running walks. |
+| Snapshot payload (Valkey) | Encrypted (`snapshot`, AAD `snapshot/<sid>/<chunk_n>`), TTL 60 s absolute. It holds the **unfiltered** normalized records of one coalesced upstream call, shared by every requester of that call; the coalescing key covers (tenant, upstream, environment, credential, call signature, normalizer version) through a keyed HMAC (01 §9.1), so a snapshot contains exactly what Shamel returns to that credential and is never shared across credentials or environments. It therefore contains fields some readers may not see (`purchase_price`, balances, credit limits). Controls: snapshot ids are 128-bit random and never leave the gateway; no API accepts a snapshot id; a snapshot is read only through a view; every page, including page 1 and every cursor page, runs S14 (data scope) and S15 (field mask) with the requesting token's **current** policy; S15 is fused into the generated encoder, so a hidden field is never serialized into a response buffer; Valkey ACLs limit the keys to the data-plane user (§12.4). |
+| View (Valkey) | Encrypted (`view`, AAD `view/<vid>/<token_id>/<policy_version>`), TTL = the snapshot's remaining TTL. Holds the snapshot id and the record positions that passed this token's data scope and filters (01 §9.5). A view read by another token, or after a policy change, fails AEAD or the binding check and yields `invalid_cursor` / `cursor_invalidated`. |
 | Idempotency record (Valkey) | Encrypted (`idempotency`). Keyed by `(token_id, sha256(key))`, so one token can never replay another's. It stores a fingerprint of the canonical request, and reusing a key with a different body is rejected (API document). |
 | Queues (webhooks, approved writes) | Payloads encrypted (`queue`). Policy is never carried in Valkey: only invalidation signals, after which nodes re-read PostgreSQL. |
 | Approval payloads (PostgreSQL) | Encrypted (`approval_payload`). The control plane records `approved_payload_sha256` at approval time, and the executor refuses a payload whose hash differs. |
@@ -990,7 +1051,7 @@ Steps 2 to 8 run against in-memory structures only, so hostile traffic is reject
 | 3 | Ban list | Client IP (IPv6 matched by /64) | 403 `ip_blocked` (+ `Retry-After` for temporary bans) |
 | 4 | Global IP rules | Global deny, then global allow (§10.2) | 403 `ip_blocked` |
 | 5 | Protocol hygiene | Method allowlist; URL, header and body size; path hygiene (§11.3); request framing (§11.4); no request `Content-Encoding`; no token-shaped strings in the URL | 400 / 405 / 413 / 414 / 415 / 431 |
-| 6 | Prefix | Known prefixes only (`/v1/`, `/legacy/`, `/docs`, `/healthz`). Anything else returns 404 `not_found` and feeds the `scanner_paths` signal. | 404 |
+| 6 | Prefix | Known public paths only (03 §6.5): prefixes `/v1/`, `/legacy/`, `/docs`; exact paths `/llms.txt`, `/healthz`. Anything else returns 404 `not_found` and feeds the `scanner_paths` signal. | 404 |
 | 7 | Pre-auth rate | Per-IP token bucket for unauthenticated and failed requests (`firewall.preauth_rate`) | 429 `rate_limited` |
 | 8 | Token parse | Format and checksum | 401 |
 | 9 | Token lookup | §9.7 | 401 `invalid_token` / `token_expired` |
@@ -1008,8 +1069,11 @@ Steps 2 to 8 run against in-memory structures only, so hostile traffic is reject
 
 ### 10.2 IP allow and deny lists
 
-- **Model:** `firewall_rules(id, tenant_id, scope {global|token}, token_id, action {allow|deny}, cidr inet, note,
-  created_by, expires_at)`. Rules can be changed only through the control plane.
+- **Model:** global rules live in `firewall_rules(id, tenant_id, action {allow|deny}, cidr inet, note, created_by,
+  expires_at)`. **Token-scoped rules live in the token's versioned policy spec** (`token_policies.spec.ip_allowlist`
+  and `ip_denylist`, 04 §2.2), so they are diffed, audited and covered by the subset rule like every other grant;
+  `bawaba firewall allow add <cidr> --token <id>` is a policy update that creates a new `policy_version`. Both kinds
+  can be changed only through the control plane, and the compiler materializes both into the tries below.
 - **Evaluation:**
   1. A global deny match blocks.
   2. If any global allow rules exist, the address must match one of them.
@@ -1018,7 +1082,8 @@ Steps 2 to 8 run against in-memory structures only, so hostile traffic is reject
 
   Deny always wins over allow at the same level.
 - **Implementation:** compiled into per-scope prefix tries over `netip.Prefix` (lookup cost is O(prefix length)).
-  IPv4-mapped IPv6 addresses are unmapped first. The tries are rebuilt on each epoch change and swapped atomically.
+  IPv4-mapped IPv6 addresses are unmapped first. The tries are rebuilt on each compiled-config version and swapped
+  atomically.
 - Publishable tokens may carry IP rules (for example an office-only internal dashboard), but origin locks are their
   main control.
 
@@ -1029,30 +1094,55 @@ Steps 2 to 8 run against in-memory structures only, so hostile traffic is reject
 | `auth_failure` | 401 on `/v1` or `/legacy` | IP | 10 in 1 min, or 30 in 10 min | Ban (ladder) |
 | `token_spray` | Distinct invalid token hashes | IP | 5 distinct in 10 min | Ban |
 | `enroll_failure` | Bad enrollment secret | IP | 5 in 1 h | Ban |
-| `injection_probe` | CR/LF/NUL or bidi controls in values; encoded traversal, `%`, `\`, `;`, `(` in `/legacy` paths; smuggling-shaped framing; Shamel-native paths at the root (`/Customer/...`); Shamel credential headers on `/legacy` | IP | 3 in 10 min | Ban. If a valid token was used, also **suspend the token** (`firewall.autosuspend.on_injection_probe=true`). |
+| `injection_probe` | CR/LF/NUL or bidi controls in values; encoded traversal, `%`, `\`, `;`, `(` in `/legacy` paths; smuggling-shaped framing; Shamel-native paths at the root (`/Customer/...`); Shamel credential headers on `/legacy` | IP, and (token, IP) when a valid token was used | 3 in 10 min | Ban the IP. The token is **not** suspended by default; see "Token containment" below. |
 | `scanner_paths` | 404 on unknown prefixes (`/.env`, `/wp-admin`, `/phpmyadmin`) | IP | 20 in 10 min | Ban |
 | `rate_abuse` | 429 responses while `Retry-After` is being ignored | IP | 300 in 1 min | Ban |
-| `scope_probe` | 403 `insufficient_scope` | Token | 50 in 10 min | Owner alert and `Bawaba-Warning`. No ban: it is usually a buggy tool. |
-| `enumeration` | 404 `not_found` on single-resource routes | Token | 200 in 10 min | Owner alert. The token is throttled to 1 req/s for 10 min. |
+| `scope_probe` | 403 `insufficient_scope` | Token | 50 in 10 min | Owner alert and `Bawaba-Warning`. No ban and no throttle: it is usually a buggy tool. |
+| `enumeration` | 404 `not_found` on single-resource routes | (token, IP) | 200 in 10 min | That (token, IP) pair is throttled to 1 req/s for 10 min; other IPs using the same token are unaffected. Owner alert per token (batched). |
+
+**Token containment.** The token-related signals (`injection_probe`, `scope_probe`, `enumeration`) can be produced
+by anyone who holds the token, and publishable tokens are public by design (§10.7). Suspending or throttling a whole
+token on such signals would hand any visitor of a page, or any thief of a token, a switch that turns off the
+legitimate tool (A11). Therefore:
+
+- Bans and throttles are keyed by IP or by (token, IP), never by token alone.
+- **Publishable tokens are never auto-suspended.** Config validation rejects `publishable` in
+  `firewall.autosuspend.any_source_kinds`.
+- A secret token (tool or agent) is auto-suspended for `injection_probe` only when (a) the token has a non-empty IP
+  allowlist and the probing IP is inside it, so the probes come from where the tool legitimately runs and the tool
+  or its host is compromised or broken (`firewall.autosuspend.injection_probe = allowlisted_source`, the default),
+  or (b) the owner opted in for that token kind with `firewall.autosuspend.any_source_kinds` (default `[]`).
+  `firewall.autosuspend.injection_probe = off` disables suspension entirely.
+- Probes carrying a valid secret token from an IP **outside** its allowlist (possible, because hygiene checks in
+  step 5 run before the token's IP rules in step 10; the token is resolved from the in-memory index only to attribute
+  the signal), and probes with a valid secret token that has no allowlist, ban the IP and raise
+  `token_probe_suspected` (owner alert: the token may be stolen; rotate it or add an IP allowlist). Probes through a
+  publishable token ban the IP only.
+
+**Mechanics:**
 
 - **Ladder:** `firewall.autoban.ladder = [15m, 1h, 24h, 168h, permanent]`. The offense level per key drops back to
   zero after `firewall.autoban.decay` (30 d) without an offense. IPv6 bans cover the /64.
 - **Exemptions:** `firewall.autoban.never_ban` CIDRs (the owner's office and tool servers) are still counted and
   alerted, but never banned.
-- **Storage:** Valkey keys `ban:<prefix>` with TTL for cluster-wide effect, plus `ip_bans` rows in PostgreSQL for
-  history and permanent bans. Each node keeps an in-memory copy (synced every second and by pub/sub), so bans still
-  hold if Valkey fails. Counters use Valkey fixed windows (`INCR` with `EXPIRE`).
+- **Storage:** Valkey keys `bwb:ban:<prefix>` with TTL for cluster-wide effect, plus `ip_bans` rows in PostgreSQL
+  for history and permanent bans. Each node keeps an in-memory copy (updated by `ip_banned`/`ip_unbanned` on
+  `bwb:events` and a periodic resync), so bans still hold if Valkey fails. Counters use Valkey fixed windows (`INCR`
+  with `EXPIRE`, e.g. `bwb:authfail:<ip>`).
 - **Edge push (optional):** `firewall.cloudflare_sync.enabled` mirrors bans of 24 h or longer to Cloudflare IP Access
-  Rules, so repeat offenders are dropped at the edge. It needs a Cloudflare API token limited to *Zone, Firewall
-  Services, Edit*, stored encrypted (`cf_api_token`).
+  Rules, so repeat offenders are dropped at the edge. The control plane performs the sync (it reads `ip_bans`), so
+  the Cloudflare API token, limited to *Zone, Firewall Services, Edit* and stored encrypted (`cf_api_token`), is a
+  control-only secret (§9.2).
 - **Alerts:** bans and suspensions are batched into at most one email per `alerts.batch_window` (15 min).
+  `token_auto_suspended` is raised only when a suspension actually happened (rule above);
+  `token_probe_suspected` covers probes that banned an IP but did not suspend the token.
 - **CLI** (all commands support `--json`; the IPs are documentation addresses):
 
 ```
 bawaba firewall bans list --active
 bawaba firewall ban 203.0.113.7 --duration 24h --reason "manual"
 bawaba firewall unban 203.0.113.7 --reason "false positive"      # also resets the ladder unless --keep-level
-bawaba firewall allow add 198.51.100.0/24 [--token tok_...] --note "office"
+bawaba firewall allow add 198.51.100.0/24 [--token tok_...] --note "office"   # --token = policy update (§10.2)
 bawaba firewall deny add 192.0.2.0/24 [--expires 72h]
 bawaba token resume tok_...                                      # lift an auto-suspension
 ```
@@ -1062,8 +1152,9 @@ bawaba token resume tok_...                                      # lift an auto-
 - **Pre-auth limiter:** `firewall.preauth_rate` = 20 req/s per IP, burst 40, counted only for requests without a
   valid token.
 - **Per-token limits:** generous and adjustable (API and performance documents). The **global upstream concurrency
-  cap** and queue are the invisible safety net, and the connector's own `policy.max_concurrency` and `max_rps` sit
-  behind it.
+  cap** and queue are the invisible safety net. Behind it the connector enforces its `cap_share` of that cap, plus
+  the optional local ceilings `policy.max_concurrency` and `policy.max_rps` that the owner may set on the Shamel host
+  (§7.4).
 - **Access requests:** at most 20 pending and 50 per day per agent token (§13.2).
 - **Owner login:** semaphore and lockout (§9.8).
 
@@ -1074,7 +1165,7 @@ bawaba token resume tok_...                                      # lift an auto-
 | JSON bodies | One top-level value; trailing data rejected. Unknown fields rejected (`invalid_request`, with the JSON pointer). **Duplicate keys rejected.** **Field names matched case-sensitively.** Invalid UTF-8 rejected (not replaced). Depth at most `json.max_depth` (32). Per-field string length and array size from the schema, with defaults 4096 bytes and 1000 items. Numbers decoded as decimal strings (no float rounding of money); NaN and Infinity rejected. Go's `encoding/json` v1 is case-insensitive, keeps the last duplicate and replaces invalid UTF-8, so it is **not** used for client input. Bawaba uses the `encoding/json/v2` semantics, through the standard library package once it is non-experimental in the pinned Go version, or through the pinned `github.com/go-json-experiment/json` until then. |
 | Strings | No C0 control characters except `\n` and `\t`, and those only in fields declared as free text. No bidi overrides or isolates (U+202A–202E, U+2066–2069) in identifiers. Identifier fields use their patterns from the API document; the default code pattern is `^[A-Za-z0-9._/-]{1,64}$`. Business free text (names, notes) keeps Arabic as entered, without normalization. |
 | Query parameters | Allowlisted per route. Unknown parameters return `unknown_parameter`. A repeated parameter is a 400 (prevents HTTP parameter pollution). Values are validated by type. |
-| Request headers | Unknown headers are ignored, because browsers and Cloudflare add many, and **never forwarded upstream**. Recognized headers (`Authorization`, `Idempotency-Key`, `Content-Type`, `Origin`) are validated: `Idempotency-Key` must match `^[A-Za-z0-9_-]{8,128}$`. |
+| Request headers | Unknown headers are ignored, because browsers and Cloudflare add many, and **never forwarded upstream**. Recognized headers (`Authorization`, `Idempotency-Key`, `Content-Type`, `Origin`, `Bawaba-Client-Request-Id`, `Bawaba-Mock-Scenario`; 03 §4.12) are validated: `Idempotency-Key` must match `^[A-Za-z0-9_-]{8,128}$`; `Bawaba-Client-Request-Id` must match `^[\x21-\x7E]{1,128}$` and is recorded in audit only, never echoed; `Bawaba-Mock-Scenario` is honoured for test tokens only and stripped otherwise. |
 | Dates and timestamps | Parsed into typed values (`YYYY-MM-DD`, RFC 3339) and re-formatted. The client's string is never reused. |
 
 ### 10.6 Size and time limits
@@ -1089,17 +1180,19 @@ bawaba token resume tok_...                                      # lift an auto-
 | `http.read_header_timeout` | 5 s | Slowloris |
 | `http.read_timeout` | 30 s | Whole request |
 | `http.min_body_rate` | 1 KiB/s after the first 5 s | Slow-body protection (custom reader) |
-| `http.write_timeout` | 120 s | Long reports |
-| `http.idle_timeout` | 60 s | Keep-alive |
-| `http.request_timeout` | 30 s (reports 120 s) | Context deadline per route |
+| `server.request_timeout` | 90 s | Hard per-request deadline (01 §7.7). It MUST stay below Cloudflare's 100 s origin timeout, so the client always receives a Bawaba envelope (`504 upstream_timeout`) rather than an edge 524 that Bawaba never sees. |
+| `http.write_timeout` | 95 s | Longer than `server.request_timeout`, so the deadline error can still be written; shorter than the edge's 100 s |
+| `http.idle_timeout` | 120 s | Keep-alive (01 §5.2) |
+| Upstream budget per operation | reads 30 s, reports 60 s, writes 60 s, login 15 s | `Operation.Timeout` in the registry, per-upstream override (01 §7.7). Invariant checked at startup: `queue_timeout` (15 s) + the largest operation budget ≤ `server.request_timeout`. No budget may exceed 80 s. |
 | `http.max_conns` | 10000 per node | `netutil.LimitListener` |
 | `firewall.max_conns_per_ip` | 100 | – |
-| `http2.max_concurrent_streams` | 100 | A patched Go is required for HTTP/2 Rapid Reset and CONTINUATION flood fixes; govulncheck enforces this in CI. |
-| `upstream.timeout` | 25 s (reports 110 s) | Always shorter than the request deadline |
-| `upstream.max_response_bytes` | 64 MiB | Counted after decompression |
+| `http2.max_concurrent_streams` | 250 | 01 §5.2. A patched Go is required for HTTP/2 Rapid Reset and CONTINUATION flood fixes; govulncheck enforces this in CI. |
+| Upstream response cap per operation | single record 4 MiB; master data 16 MiB; large lists and reports 256 MiB | `Operation.MaxResponseBytes` in the registry, by class, counted after decompression. A 50,000-item `GetItems` (≈ 70 MB of JSON) fits the list class. The connector's compiled table uses the same classes (§7.4). |
+| `upstream.max_response_bytes` | 256 MiB | Global ceiling over every class (01 §7.4); configuration can lower a class, never raise it above this |
 | `upstream.max_header_value_bytes` | 4096 | §11.1 |
 | `upstream.max_header_total_bytes` | 8192 | §11.1 |
-| `http.max_response_bytes` | 32 MiB | §10.8 |
+| `http.max_response_bytes` | 256 MiB | Absolute guard on one encoded response (§10.8). `/v1` pages are bounded by `limit`; only legacy whole-list responses (03 §20.1) come near it. |
+| `http.response_spill_bytes` | 8 MiB | Response assembly above this size spills to an encrypted temp file (§10.8) |
 
 Request bodies with `Content-Encoding` are refused with 415, because accepting them invites decompression bombs.
 Upstream responses that use gzip are decompressed through a limiter that counts decompressed bytes.
@@ -1119,7 +1212,8 @@ Upstream responses that use gzip are decompressed through a limiter that counts 
     `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy: same-origin`,
     `Strict-Transport-Security: max-age=31536000; includeSubDomains`.
   - As applicable: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`, `Bawaba-Warning`,
-    CORS headers, and the headers defined by the API document.
+    `Bawaba-Environment`, `Bawaba-Idempotent-Replay`, `Location`, `Deprecation`, `Sunset`, `Server-Timing`
+    (sandbox tokens only), `Content-Encoding`, `Vary`, and CORS headers (03 §23.1).
   - Adding a header requires a change to `internal/httpx/respheaders.go`, which has a security CODEOWNER.
 - **Publishable tokens and CORS:**
   - **Scopes:** only `*:read` scopes (never `webhooks:*` or `access_requests:write`) are accepted when the token is
@@ -1127,12 +1221,14 @@ Upstream responses that use gzip are decompressed through a limiter that counts 
   - **Origins:** 1 to 10 exact origins (`https://host[:port]`, no wildcards, no `null`). `http://` is allowed only for
     `bwb_pk_test_` tokens with `localhost` origins.
   - **Preflight** (`OPTIONS`, unauthenticated by nature): the response allows the request only if `Origin` is in the
-    union of all active publishable tokens' origins. It echoes that exact origin with `Vary: Origin`, allows
-    `Authorization, Content-Type`, sets `Access-Control-Max-Age: 600`, and never sends
-    `Access-Control-Allow-Credentials`. Any other origin gets 403 with no CORS headers.
-  - **Actual request:** `Origin` must be in **this** token's list, otherwise `origin_not_allowed`.
-    `Access-Control-Expose-Headers` lists only `Bawaba-Request-Id`, the `RateLimit-*` headers, `Retry-After` and
-    `Bawaba-Warning`.
+    union of all active publishable tokens' origins. It answers `204`, echoes that exact origin with `Vary: Origin`,
+    sends `Access-Control-Allow-Methods: GET` and `Access-Control-Allow-Headers: Authorization, Content-Type,
+    Bawaba-Client-Request-Id`, sets `Access-Control-Max-Age: 600`, and never sends
+    `Access-Control-Allow-Credentials`. Any other origin gets 403 with no CORS headers (03 §23.5).
+  - **Actual request:** `Origin` must be in **this** token's list, otherwise `origin_not_allowed`. Responses, errors
+    included, carry the echoed origin, `Vary: Origin` and `Access-Control-Expose-Headers: Bawaba-Request-Id,
+    Bawaba-Environment, Bawaba-Warning, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After`, and
+    nothing else.
   - **Trust limit:** an origin lock stops *other websites* from using the token in browsers. It does **not** stop a
     non-browser client that forges `Origin`. Publishable tokens are therefore treated as public, and their grants and
     field hiding must be acceptable for anyone who can view the page. The dashboard warns about this when such a
@@ -1143,12 +1239,18 @@ Upstream responses that use gzip are decompressed through a limiter that counts 
 
 ### 10.8 Response guards
 
-- The upstream response cap (§10.6) is enforced while streaming. Exceeding it yields `upstream_response_too_large`.
+- The per-operation upstream response cap (§10.6) is enforced while streaming. Exceeding it yields
+  `upstream_response_too_large`.
 - Client pages are bounded by `limit` (maximum per route, API document). As an absolute guard, a fully encoded
   response larger than `http.max_response_bytes` is replaced by 502 `upstream_response_too_large` and an owner alert.
-- **Write-path invariant:** a response is assembled completely in memory and checked before the first byte is sent,
-  so a half-written body with a leaked fragment is impossible. The only streamed responses are media, which are
-  re-encoded first.
+- **Write-path invariant:** a response is assembled **completely** and checked (size guard, origin-marker scan of
+  every string value, §5.2 step 9) before the status line or the first body byte is sent, so a half-written body
+  with a leaked fragment is impossible. Assembly uses a list of pooled 64 KiB chunks; once the response exceeds
+  `http.response_spill_bytes` (8 MiB) further chunks spill to a temp file in `/var/lib/bawaba/tmp` (directory
+  `0700`, file created with `O_TMPFILE` so it has no name, encrypted with AES-256-GCM under a per-process random key
+  that is never persisted). After the checks pass, the chunks and the file are streamed to the client. Heap per
+  response therefore stays at most 8 MiB plus one chunk, however large a legacy whole-list response is, and a crash
+  leaves only unreadable ciphertext. Media responses follow the same rule after re-encoding.
 
 ### 10.9 Security error codes
 
@@ -1308,12 +1410,12 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
 
 | Component | OS user | Listener | DB role | Valkey user | Keys loaded |
 |---|---|---|---|---|---|
-| Data plane (`bawaba-gateway`) | `bawaba-data` | `tunnel`: `/run/bawaba/data.sock` (0660 `bawaba-data:cloudflared`). `aop`: `:443`. Ops: `127.0.0.1:9180`. | `bawaba_data` | `data` | All AEAD and MAC keys except `pki_ca` and `totp_seed` |
-| Control plane (separate process; packaging such as `bawaba-gateway serve --plane=control` is the architecture document's choice) | `bawaba-control` | `127.0.0.1:7700` (dashboard and admin API) and `/run/bawaba/control.sock` (CLI) | `bawaba_control` | `control` | All, including MK |
+| Data plane (`bawaba-gateway`) | `bawaba-data` | `tunnel`: `/run/bawaba/data.sock` (0660 `bawaba-data:cloudflared`). `aop`: `:443`. Ops: `listeners.ops.addr` (`127.0.0.1:9090`). | `bawaba_data` | `data` | `data.key` (DK) → KEK_data → data-plane purposes only (§9.2). Never MK, `pki_ca`, `totp_seed`, `admin_chain`, `cf_api_token`, `smtp_password` or an `audit_seal` private key. |
+| Control plane (separate process; packaging such as `bawaba-gateway serve --plane=control` is the architecture document's choice) | `bawaba-control` | `listeners.control.addr` (`127.0.0.1:7443`, dashboard and admin API) and `listeners.control.socket` (`/run/bawaba/control.sock`, CLI) | `bawaba_control` | `control` | `master.key` (MK) → KEK_control and KEK_data: all purposes |
 | Migrations | root, one-shot | none | `bawaba_migrate` (schema owner) | – | none |
 | `cloudflared` | `cloudflared` | none | – | – | – |
 
-- **Bind check:** `control.listen` must be an IP literal in `127.0.0.0/8` or `::1`, or a unix socket path. Anything
+- **Bind check:** `listeners.control.addr` must be an IP literal in `127.0.0.0/8` or `::1`, or a unix socket path. Anything
   else makes startup fail. There is no override flag. In Docker, the control-plane service uses
   `network_mode: host` so that this check still means host loopback.
 - **No route from the data plane:**
@@ -1325,7 +1427,7 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
     table inet bawaba {
       chain output {
         type filter hook output priority 0; policy accept;
-        oifname "lo" meta skuid "bawaba-data" tcp dport 7700 reject
+        oifname "lo" meta skuid "bawaba-data" tcp dport 7443 reject
       }
     }
     ```
@@ -1334,7 +1436,7 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
   - **Tripwire:** the control plane answers any request carrying `Cf-Ray`, `Cf-Connecting-Ip`, `Cf-Visitor` or
     `Cdn-Loop` with 403 and raises a critical alert. This catches a `cloudflared` ingress rule mistakenly pointed at
     the control plane.
-- The owner reaches the dashboard with `ssh -L 7700:127.0.0.1:7700 <server>`. SSH is key-only, and goes through
+- The owner reaches the dashboard with `ssh -L 7443:127.0.0.1:7443 <server>`. SSH is key-only, and goes through
   Cloudflare Access for SSH or WireGuard when the host has no public SSH port (§15.5).
 
 ### 12.2 Web dashboard
@@ -1371,7 +1473,7 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
   (uid must be 0) and records in the admin event log the peer uid, pid and `/proc/<pid>/loginuid`, which identifies
   the human login even under `sudo`.
 - **Alternative (non-root operator):** `bawaba login` authenticates with the owner password and TOTP over
-  `127.0.0.1:7700`. It stores a session in `~/.config/bawaba/session` (`0600`), with the same lifetime as dashboard
+  `127.0.0.1:7443`. It stores a session in `~/.config/bawaba/session` (`0600`), with the same lifetime as dashboard
   sessions.
 - Agent-level actions (requests, docs, own usage) are not CLI-over-socket operations. They use the network API with an
   agent token (§13).
@@ -1380,16 +1482,32 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
 
 | Role | Privileges |
 |---|---|
-| `bawaba_data` | **SELECT** on tokens, grants, firewall rules, upstreams, credentials (ciphertext), connectors, crypto keys (wrapped), approvals. **INSERT** on audit index, usage rollups, security events, ip_bans, cert_requests, media_objects, approval_items (status column excluded, defaults to `pending`), access_requests (status column excluded, defaults to `pending`). **Column-level UPDATE** only on `tokens(last_used_at)`, `connectors(last_seen_at, last_ip)`, and `approval_items(execution_status, upstream_reference)` (a trigger allows it only where `status='approved'`). No DELETE except on its own expiring work tables. No DDL. |
+| `bawaba_data` | **SELECT** on `compiled_config`, tokens, token policies, firewall rules, upstreams, credentials (ciphertext), connectors, approvals, the view `crypto_keys_data` (wrapped `plane = 'data'` keys and the DK wrapping of KEK_data only) and the `audit_seal` public keys. **INSERT** on audit index, `audit_epoch_keys`, usage rollups, security events, ip_bans, cert_requests, media_objects, approval_items (status column excluded, defaults to `pending`), access_requests (status forced to `pending` by default and trigger). **SELECT** on its own access requests, and **EXECUTE** only on the `SECURITY DEFINER` functions `cancel_access_request` and `claim_access_request_secret` (04 §10.4) and the approval executor's claim and finalize functions (04 §11.6). **Column-level UPDATE** only on `tokens(last_used_at)` and `connectors(last_seen_at, last_ip)`. No DELETE except on its own expiring work tables. No DDL. The operations document lists further worker-table grants (05 §10). |
 | `bawaba_control` | DML on policy, registry, approvals and keys. No DDL. |
 | `bawaba_migrate` | Schema owner, used only by migrations. |
 
 - **Row-level security:** v1 runs as one tenant (`ten_default`). RLS policies keyed on
   `current_setting('bawaba.tenant_id')` are added when tenancy becomes active.
-- **Valkey ACLs:** the `data` user gets `+@read +@write +@pubsub` minus `-@dangerous` (no `CONFIG`, `FLUSHALL`,
-  `KEYS`, `DEBUG`, `MODULE`), limited to key patterns `rl:* snap:* idem:* coal:* ban:* q:*`. The `control` user is
-  similar, limited to its own patterns. The default user is disabled. Valkey is bound to a unix socket or a private
-  interface, with `protected-mode yes`, and uses TLS when remote.
+- **Valkey ACLs:** key names follow 01's namespace (`bwb:<tenant>:…` for tenant data, `bwb:…` for cluster state).
+  The `data` user gets `+@read +@write +@pubsub +@scripting -@dangerous` (no `CONFIG`, `FLUSHALL`, `KEYS`, `DEBUG`,
+  `MODULE`) and only these patterns:
+
+  ```
+  user data on >… -@all +@read +@write +@pubsub +@scripting -@dangerous resetkeys
+    ~bwb:*:rl:* ~bwb:*:snap:* ~bwb:*:view:* ~bwb:*:idem:* ~bwb:*:coal:* ~bwb:*:coalres:*
+    ~bwb:*:sess:* ~bwb:*:sesslock:* ~bwb:*:sem:* ~bwb:*:credrole:* ~bwb:*:mock:*
+    ~bwb:*:adv:* ~bwb:*:behav:* ~bwb:*:alert:* ~bwb:*:m:*
+    ~bwb:tun:* ~bwb:node:* ~bwb:nodes ~bwb:lease:* ~bwb:authfail:* ~bwb:ban:* ~bwb:q:*
+    %R~bwb:deny
+    resetchannels &bwb:events &bwb:coal
+  ```
+
+  `bwb:deny` (emergency revocations) is read-only for the data plane (`%R~`). The `control` user gets `~bwb:*` and the
+  same channels with the same command restrictions. The default user is disabled. Valkey is bound to a unix socket or
+  a private interface, with `protected-mode yes`, and uses TLS when remote. Residual: the data user can publish on
+  `bwb:events`, so a compromised data plane can send forged notifications; they carry no authority (nodes re-read
+  PostgreSQL on a version notice), and a forged emergency deny entry could only revoke, which is denial of service
+  that a compromised data plane can cause anyway.
 - **PostgreSQL:** reached over a unix socket with peer authentication, or with `scram-sha-256` and TLS
   `verify-full` when remote. `log_statement=none`. No listener on public interfaces.
 
@@ -1399,8 +1517,9 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
   approving an access request or queued write, creating or promoting a live token, firewall edits, connector
   kill/confirm, key operations, owner settings and audit decryption.
 - **Admin event log:** `admin_events(seq, ts, actor, peer, action, target, diff, prev, mac)` with
-  `mac = HMAC-SHA256(audit_chain, prev ‖ canonical(event))`. The audit index is chained in the same way per node and
-  hour, and hourly roots are stored in `audit_anchors`.
+  `mac = HMAC-SHA256(admin_chain, prev ‖ canonical(event))`. `admin_chain` is control-only (§9.2), so a compromised
+  data plane cannot forge admin events. The audit index is chained in the same way per node and hour with the
+  data-plane key `audit_chain`, and hourly roots are stored in `audit_anchors`.
 - **Daily anchors:** the latest anchors are included in the owner's daily security digest email, so a later rewrite
   of past records is detectable even by an attacker who obtains the chain key. `bawaba audit verify-chain` checks
   everything.
@@ -1429,28 +1548,26 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
 
 ### 13.2 The subset rule
 
-Applied when a request is created (rejected with `exceeds_own_grant`, including the violations list) and **again at
-approval time** against the agent's *current* grants, which may have been narrowed or revoked since:
+The authoritative definition, `violations(R, A)` with its auto-fill rules, is in the permissions document
+(04 §10.3). This section fixes the security properties it must have; any change to 04 §10.3 must keep them.
 
-```
-violations(req, agent):
-  atoms(req.scopes) ⊆ atoms(agent.scopes) − {access_requests:write}    # voucher types expanded to atoms
-  req.kind ∈ {tool, publishable}
-  req.env ≤ agent.env                                                  # test < live
-  req.upstream == agent.upstream and req.shamel_credential == agent.shamel_credential
-  for each data-scope dimension d (stores, salesmen, customers, currencies, price classes):
-      agent[d] == ALL or (req[d] != ALL and req[d] ⊆ agent[d])
-  req.hidden_fields ⊇ agent.hidden_fields
-  agent.ip_allow empty or (req.ip_allow non-empty and every req prefix ⊆ some agent prefix)
-  agent.expires_at unset or (req.expires_at set and req.expires_at ≤ agent.expires_at)
-  req.legacy_endpoints ⊆ agent.legacy_endpoints
-  agent.writes_require_approval ⇒ req.writes_require_approval
-  req.rate_limits ≤ agent.rate_limits
-  req.kind == publishable ⇒ read-only scopes and 1..10 origins
-```
-
-- A request to change a token's permissions is allowed only for tokens that came from this agent's own requests. The
-  resulting grant must satisfy the same rule.
+- **When:** at creation (rejected with `403 exceeds_own_grant` and one `details` entry per violation), when the owner
+  opens or edits the request, and **again at approval** against the agent's *current* compiled policy, which may
+  have been narrowed or revoked since. An inactive agent's pending requests become `rejected` (`requester_inactive`).
+- **On effective forms:** the rule compares compiled policies (groups, presets, wildcards, kind-forced hides and the
+  pinned-salesman intersection already resolved), never raw input, so no encoding of a request can slip past it.
+- **What it covers** (the resulting token R may never exceed the agent A on any of these):
+  - kind (`tool` or `publishable` only, never `agent`); environment (test < live); upstream and Shamel credential;
+  - scope atoms, with `vouchers:write:<voucher_type>` expanded to atoms; `access_requests:write` is never grantable;
+  - every data-scope dimension: `stores`, `salesmen`, `customers`, `currencies`, `price_classes` and
+    `voucher_types`;
+  - hidden fields (R hides at least what A hides);
+  - IP allowlist and denylist (R's allowlist inside A's, R's denylist covering A's);
+  - expiry, legacy endpoints, `writes_require_approval`, `legacy_require_idempotency_key`, `get_all`,
+    `reject_browser_origin`, rate limits and the rate `mode` (`warn_only` is weaker than `enforce`);
+  - publishable constraints (business read atoms only, 1–10 valid origins, §10.7).
+- **Targets:** `modify_token` and `revoke_token` requests may target only tokens born from this agent's lineage
+  (`requested_by_token_id`); any other target is `404 not_found`. The resulting grant must satisfy the same rule.
 - Pinning a different Shamel user is a violation, because it could widen Shamel-side salesman scoping.
 - Tokens born from agent requests default to `writes_require_approval=true`. Only the owner can turn this off.
 - **Caps:** at most 20 pending requests and 50 per day per agent token (`agents.max_pending_requests`,
@@ -1468,27 +1585,38 @@ sequenceDiagram
     participant DP as Data plane
     participant CP as Control plane
     actor O as Owner
-    A->>DP: POST /v1/access_requests (spec, reason, delivery_public_key optional)
+    A->>DP: POST /v1/access-requests (type, spec, reason, delivery_public_key optional)
     DP->>DP: agent token, access_requests:write, subset rule, caps
     DP-->>A: 202 (id areq_..., status pending)
     CP->>O: email - approval waiting (no secrets, agent text escaped)
     O->>CP: review diff, step-up auth, approve (optionally narrowed)
     CP->>CP: re-check subset rule, create token
     CP->>CP: seal secret to agent key (HPKE) or encrypt as pending_secret
-    A->>DP: GET /v1/access_requests/areq_... (poll, 10 s minimum)
-    DP-->>A: status approved plus secret, once, then the blob is deleted
+    A->>DP: GET /v1/access-requests/areq_... (poll, 10 s minimum)
+    DP-->>A: status approved, secret.status available (never the secret)
+    A->>DP: POST /v1/access-requests/areq_.../claim-secret (Idempotency-Key)
+    DP->>DP: claim_access_request_secret(): DELETE ... RETURNING, once
+    DP-->>A: 200 sealed_token (or token), Cache-Control no-store
 ```
+
+Retrieval is a `POST` because it changes state; the status `GET` never carries the secret (03 §18.3, 04 §10.7).
 
 - **Preferred delivery:** the agent submits an X25519 public key with the request. On approval the control plane
   seals the token to it with HPKE (`info = "bawaba/token-delivery/v1"`, `aad = request_id`), so only the requesting
   agent can open it. Plaintext exists only in control-plane memory during creation.
   `bawaba request-token --scopes ... --wait` (CLI) generates the key pair, polls, decrypts and prints the token for
   agents that have the CLI.
-- **Fallback:** without a public key, the token is encrypted with purpose `pending_secret` until picked up.
+- **Fallback:** without a public key, the token is encrypted with purpose `pending_secret` (AAD bound to the request
+  id and the agent token id) until claimed, and returned in clear over TLS once.
 - **Owner-only delivery:** the owner MAY choose "deliver to me only", copy the token, and hand it over themselves.
-- **Pickup rules:** only by the same agent token, at most once, within `agents.secret_pickup_window` (72 h). After
-  that the blob is deleted; the token stays valid and the owner can rotate it. Pickups are audited, and a pickup from
-  a different IP than the request raises an alert. Polling faster than every 10 s returns `Bawaba-Warning`.
+- **Claim rules:** only by the requesting agent token (or its rotation successor in the same lineage), through
+  `POST …/claim-secret` with an `Idempotency-Key`, at most once, within `agents.secret_pickup_window` (72 h). The
+  stored secret row is deleted in the same statement that returns it. A retry with the same `Idempotency-Key` within
+  `agents.secret_claim_replay_window` (10 min) gets the same body from an idempotency record (purpose `idempotency`,
+  bound to the agent token); any other later claim is `409 secret_already_claimed`. After the window the row is
+  deleted; the token stays valid and the owner can rotate it. Claims are audited, and a claim from a different IP
+  than the request raises `token_pickup_anomaly`. Polling the status faster than every 10 s returns
+  `Bawaba-Warning: polling_too_frequent`.
 
 ### 13.4 Prompt-injection-driven misuse
 
@@ -1543,7 +1671,7 @@ judge meaning, so it limits what a misled tool can *do*:
 - **Display:** the dashboard and CLI never show a token after creation (hint only), and never show Shamel passwords.
   The Shamel base URL and address (direct mode) are masked unless explicitly revealed with step-up authentication.
 - **Backups:** `bawaba backup create` produces PostgreSQL data (ciphertext columns and token HMACs), a list of
-  blob-store objects and a config snapshot. It excludes the master key, the TLS keys and the `cloudflared`
+  blob-store objects and a config snapshot. It excludes `master.key`, `data.key`, the TLS keys and the `cloudflared`
   credentials. Valkey persistence contains only ciphertext payloads and short-lived counters.
 - **Alerts** never contain tokens, credentials or business-data bodies.
 
@@ -1595,7 +1723,7 @@ judge meaning, so it limits what a misled tool can *do*:
 [Service]
 User=bawaba-data
 Group=bawaba-data
-LoadCredential=master.key:/etc/bawaba/master.key
+LoadCredential=data.key:/etc/bawaba/data.key
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -1625,8 +1753,9 @@ ReadWritePaths=/var/lib/bawaba /run/bawaba
 
 - In `aop` mode, if binding to 443 directly, use `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and
   `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
-- The control-plane unit is the same with `User=bawaba-control`, plus `IPAddressDeny=any` and
-  `IPAddressAllow=localhost` and the SMTP relay's address (alerts).
+- The control-plane unit is the same with `User=bawaba-control` and `LoadCredential=master.key:/etc/bawaba/master.key`
+  (it is the only unit that loads MK), plus `IPAddressDeny=any` and `IPAddressAllow=localhost`, the SMTP relay's
+  address (alerts) and, when `firewall.cloudflare_sync.enabled`, Cloudflare's API addresses (or an egress proxy).
 - The connector's Linux unit follows the same pattern.
 
 ### 15.5 Remote access to the host
@@ -1642,10 +1771,10 @@ ReadWritePaths=/var/lib/bawaba /run/bawaba
 
 | Failure | Behaviour |
 |---|---|
-| Master key missing, unreadable, wrong `kcv` or loose permissions | Process refuses to start (non-zero exit). No degraded mode. |
-| PostgreSQL unreachable | The data plane serves with in-memory policy for at most `policy.max_staleness` (30 s), then returns 503 `service_unavailable` on authenticated routes, so a revocation is never missed for long. Owner alert. |
-| Valkey unreachable | Auth is unaffected (in-memory index). Bans apply from the local copy. Rate limits fall back to per-node local limiters. Writes that need idempotency return 503. Pagination serves page 1 only (`cursor` returns 503). |
-| Audit store unavailable | Writes fail closed (503). Reads continue through a local encrypted spool up to `audit.spool_max_bytes` (1 GiB), then fail closed. Owner alert. |
+| Master key or data-plane key missing, unreadable, wrong `kcv` or loose permissions | Process refuses to start (non-zero exit). No degraded mode. |
+| PostgreSQL unreachable | Aligned with 01 §13.1 and 04 §9.4: reads continue on the last compiled config for up to `config.max_staleness` (6 h), then authenticated routes return 503 `service_unavailable`. Writes, access requests and webhook subscription changes fail closed immediately (they need PostgreSQL). The `config_stale` alert fires at 50 % of `config.max_staleness` (05 §3.3), and `dependency_unavailable` after 60 s. **Why not fail closed early:** a normal revocation is a PostgreSQL commit by the control plane (§9.7), so while PostgreSQL is down no normal revocation can be issued at all; the only revocation path that works then is the signed emergency deny entry in Valkey (`bwb:deny`, 01 §5.4), which every node applies regardless of config age. Failing closed after seconds would therefore catch no revocation and would make a single PostgreSQL primary a hard dependency of every read (01 principle 4). **Blind nodes:** a node that can reach neither PostgreSQL nor Valkey (`bwb:events`, `bwb:deny`) can receive no revocation by any path; after `config.blind_staleness` (5 min) in that state it returns 503 `service_unavailable` on authenticated routes until either recovers. |
+| Valkey unreachable | Auth is unaffected (in-memory index). Bans apply from the local copy. Rate limits fall back to per-node local limiters. Config invalidation falls back to the PostgreSQL version poll every 2 s. Writes that need idempotency return 503. Pagination serves single-page results only (results that need a cursor, and cursor reads, return 503 `pagination_unavailable`, 01 §13.2). |
+| Audit store unavailable | Writes fail closed (503). Reads continue through the local encrypted WAL and spool up to `audit.spool_max_bytes` (10 GiB, shared by WAL and spool, 05 §1.11), then fail closed (`503 audit_unavailable`). Owner alert at 50 % and 80 %. |
 | Connector tunnel down | 503 `upstream_unavailable` with `Retry-After`. Owner alert after `alerts.connector_down_after` (2 min). |
 | Policy compile error (for example an invalid rule) | Running nodes keep the last good policy and alert. Starting nodes refuse to start. |
 | Cloudflare IP list refresh fails | Keep the last good list. Alert after 7 days. |
@@ -1684,7 +1813,7 @@ Every command supports `--json`, and every action is written to the admin event 
 | Item | Command or action |
 |---|---|
 | Rebuild compromised hosts | From signed images or binaries (verified with `cosign verify`), never in place |
-| Master key, KEK, DEKs | `bawaba key rotate-master`, `bawaba key rotate-kek`, `bawaba key rotate-dek --all` |
+| Master key, data-plane key, KEKs, DEKs | `bawaba key rotate-master`, `bawaba key rotate-data-key`, `bawaba key rotate-kek --plane control` and `--plane data`, `bawaba key rotate-dek --all` |
 | Token pepper | `bawaba key rotate-pepper` (all tokens were revoked in IR-1) |
 | Tunnel PKI | `bawaba pki rotate-issuing`. If the control plane or root key may be exposed: `bawaba pki rotate-root`, then re-enroll every connector. |
 | Webhook secrets | `bawaba webhook rotate-secret --all` (the dual-signature window lets receivers switch over) |
@@ -1734,14 +1863,23 @@ if Shamel credentials or the host were exposed. Notify anyone else as required b
 
 - **Policy engine:** scopes, voucher-type atoms, data scopes, field hiding, legacy entitlements, publishable
   restrictions.
-- **Subset rule:** property-based (`pgregory.net/rapid`). For random grant pairs where `violations(R, A)` is empty,
-  every request allowed by R must also be allowed by A.
+- **Subset rule (04 §10.3):** property-based (`pgregory.net/rapid`). For random grant pairs where `violations(R, A)`
+  is empty, every request allowed by R must also be allowed by A, including every data-scope dimension
+  (`voucher_types` too) and every record and field visible to R.
 - **Firewall:** CIDR evaluation, including IPv4-mapped IPv6 and /64 bans. Auto-ban ladder transitions and decay.
+  Token containment (§10.3): a publishable token is never suspended whatever the probes; a secret token is suspended
+  only for probes from inside its allowlist (or with the owner's opt-in); `enumeration` throttles only the offending
+  (token, IP) pair while the same token from another IP keeps full speed.
 - **Tokens:** generation and parsing, checksum, pepper versions, constant-time path, uniform `invalid_token`.
 - **Error mapper:** every outcome class produces the right code. Property: for random upstream error text, the client
   response never contains any substring of 4 or more characters from it.
-- **Crypto:** envelope round trips. AAD mismatches (wrong row, column, tenant or purpose) must fail. Key rotation
-  state transitions. Master key file checks.
+- **Crypto:** envelope round trips. AAD mismatches (wrong row, column, tenant or purpose; a view under another token
+  id or `policy_version`; a snapshot chunk under another `sid` or chunk number) must fail. Key rotation state
+  transitions. Master and data key file checks.
+- **Plane key split (§9.2):** with only `data.key`, no `plane = 'control'` KEK or key unwraps; the data-plane purpose
+  list contains no control-only purpose; an audit object written under an epoch DEK opens with the control plane's
+  `audit_seal` private key and not with anything the data plane holds once the epoch has ended; a data-plane process
+  refuses to start if it can read `security.master_key_file`.
 - **CORS and browser rules:** exact-origin matching, no reflection of unlisted origins, preflight behaviour.
 - **Control plane:** Host allowlist, CSRF (all five conditions), cookie flags, step-up expiry, the bind check refusing
   non-loopback addresses, the Cloudflare-header tripwire.
@@ -1762,6 +1900,7 @@ unit tests. OSS-Fuzz integration comes later.
 | `FuzzCursor` | Tampering always yields `invalid_cursor` and never a panic or another token's data. |
 | `FuzzMediaPath` | The connector's Windows and Linux canonicalizer never resolves outside `media.roots` (`..\`, `\\?\`, ADS, device names, junction fixtures). |
 | `FuzzTunnelFrame` | The connector rejects any frame outside the compiled table. No panic. |
+| `FuzzConnectorScrub` | For random JSON and raw bodies cut into random chunk sizes, the streaming scrub (§7.4) finds exactly the marker occurrences a whole-body scan finds, and memory stays at one chunk plus the carry. |
 | `FuzzCIDRRules` | Trie lookups equal a naive linear scan. |
 
 ### 18.3 Origin-leak suite (blocking in CI on every PR)
@@ -1787,8 +1926,17 @@ unit tests. OSS-Fuzz integration comes later.
 
 - **Edge trust:** a spoofed `CF-Connecting-IP` or `X-Forwarded-For` from a non-Cloudflare peer is ignored. AOP
   handshakes without the per-hostname client certificate fail. An unknown SNI gets no certificate.
-- **Isolation:** the data-plane container or user cannot open the control port or socket. The data-plane DB role
-  cannot UPDATE grants, approvals or token hashes, or INSERT approved rows.
+- **Isolation:** the data-plane container or user cannot open the control port or socket, cannot read `master.key`,
+  and cannot decrypt audit bodies stored in an earlier epoch. The data-plane DB role cannot UPDATE grants, approvals
+  or token hashes, cannot INSERT approved rows, and cannot SELECT `plane = 'control'` key rows.
+- **Shared snapshots (I-3, T-5):** the hostile and standard mocks put canary values in every hideable field
+  (`purchase_price`, balances, credit limits, GL accounts). Several tokens on the same credential, with different data
+  scopes and field masks, issue identical concurrent list requests so that they coalesce onto one snapshot; then each
+  walks all pages. Assertions: exactly one upstream call per generation; no response to a token that hides a field
+  contains its canary, on page 1 or any cursor page; every record returned passes that token's data scope. A cursor
+  or view id replayed by another token, with another query, or after the token's policy changed returns
+  `invalid_cursor` or `cursor_invalidated` and never data. A snapshot chunk swapped in Valkey for a chunk of another
+  `sid` fails AEAD and yields an error, never another snapshot's records.
 - **Smuggling and protocol:** CL+TE, TE variants, obs-fold, bodies on GET, h2 Rapid Reset and CONTINUATION floods
   (tested with h2spec and smuggling test tools), slowloris and slow bodies (`slowhttptest`), and oversized
   headers, URLs and bodies.
@@ -1797,7 +1945,11 @@ unit tests. OSS-Fuzz integration comes later.
   token request. Webhook SSRF: private, metadata and rebinding targets, and redirects.
 - **Connector:** enrollment replay, expired codes, a wrong CA pin, SAS mismatch, a revoked serial, a cloned
   certificate (tripwire), kill persistence across restarts, `writes: deny` enforcement, header-injection frames,
-  non-allowlisted endpoint ids, and media traversal on Windows.
+  non-allowlisted endpoint ids, and media traversal on Windows. Reject policy: isolated bad frames are rejected
+  without closing the tunnel; more than 50 % rejects with at least 20 in 60 s close it; a framing violation closes it
+  at once. Session holder protocol (§7.5) against a mock that invalidates the previous session on each login: with two
+  connectors in `single_holder` mode, exactly one login per epoch, no login flapping when the holder is killed,
+  suspended or partitioned, and `not_holder` answers never reach Shamel.
 - **Timing** (nightly, informative): latency distributions for unknown, revoked, malformed and valid-but-forbidden
   tokens. A Kolmogorov–Smirnov test flags any distinguishable distribution.
 - **DAST:** OWASP ZAP API scan driven by the OpenAPI document against a sandbox deployment on every release
@@ -1813,8 +1965,10 @@ low-privilege live token, an agent token, and a connector deployment.
 3. Fingerprinting: error pages, headers, timing, TLS, docs. Expected: no upstream product, version or address.
 4. Token attacks: guessing, format abuse, lookup timing, revocation latency, IP-allowlist bypass (IPv6, mapped
    addresses).
-5. Authorization: horizontal access through cursors, snapshots, idempotency keys, webhooks, media URLs and legacy.
-   Field-hiding and data-scope bypass. Publishable-token writes.
+5. Authorization: horizontal access through cursors, views, shared snapshots (via coalescing with a token on the
+   same credential that sees more fields or rows), idempotency keys, webhooks, media URLs and legacy. Field-hiding
+   and data-scope bypass. Publishable-token writes. Using a public (publishable) token to get it, or another
+   token, suspended or throttled.
 6. Injection: header, CRLF, `obj` and `filters` JSON, legacy path encodings (IIS-specific tricks), smuggling, log
    injection.
 7. Agent escalation: access-request subset bypass, approval UI XSS or spoofing via request text, secret-pickup abuse,
@@ -1826,31 +1980,37 @@ low-privilege live token, an agent token, and a connector deployment.
 10. DoS resilience within the agreed rules of engagement: slowloris, large bodies, expensive endpoints, the upstream
     queue.
 11. Crypto at rest: from a provided DB dump and blob-store copy (without the master key), try to recover any secret
-    or body.
+    or body. Second scenario: with the same dump plus `data.key` (simulating a data-plane compromise), try to recover
+    audit bodies of past epochs, the CA key or the TOTP seed. Expected: none.
 12. Supply chain: verify signatures, SBOM accuracy and the container hardening settings.
 
 ---
 
 ## 19. Security configuration reference
 
-Defaults are shown. Every key lives in `bawaba.yaml` (no secrets there). The connector's keys are in its own local
-config.
+Defaults are shown. Every key lives in `bawaba.yaml` (no secrets there). Key names follow the architecture
+document's configuration model (01 §15.2), which rejects unknown keys; keys introduced here are listed for 01 to
+accept (§20.1). The connector's keys are in its own local config.
 
 | Key | Default | Section |
 |---|---|---|
 | `edge.mode` | `tunnel` | §6.1 |
 | `edge.cloudflare_ips_refresh` | `168h` | §6.2 |
-| `tunnel.listen` | unset (only with `edge.mode=none`) | §7.4 |
-| `control.listen` | `127.0.0.1:7700` | §12.1 |
-| `control.socket` | `/run/bawaba/control.sock` | §12.3 |
+| `listeners.tunnel.addr` | as 01 §15.2; never publicly reachable except through Cloudflare | §7.4 |
+| `listeners.control.addr` | `127.0.0.1:7443` (loopback only; startup fails otherwise) | §12.1 |
+| `listeners.control.socket` | `/run/bawaba/control.sock` | §12.3 |
+| `listeners.ops.addr` | `127.0.0.1:9090` | LV-17 |
 | `control.session_idle` / `control.session_max` | `30m` / `12h` | §12.2 |
 | `control.stepup_window` | `5m` | §12.5 |
-| `ops.listen` | `127.0.0.1:9180` | LV-17 |
-| `crypto.master_key_file` | `$CREDENTIALS_DIRECTORY/master.key`, else `/etc/bawaba/master.key` | §9.4 |
-| `crypto.rotation.audit_body` | `monthly` | §9.6 |
-| `crypto.rotation.default` | `8760h` | §9.6 |
-| `policy.max_staleness` | `30s` | §16 |
-| `policy.epoch_poll` | `1s` | §9.7 |
+| `security.master_key_file` | `$CREDENTIALS_DIRECTORY/master.key`, else `/etc/bawaba/master.key` (control plane only) | §9.4 |
+| `security.data_key_file` | `$CREDENTIALS_DIRECTORY/data.key`, else `/etc/bawaba/data.key` (data plane only) | §9.4 |
+| `security.audit_epoch` | `1h` (or 64 GiB of output, whichever comes first) | §9.2 |
+| `security.rotation.audit_seal` | `720h` (monthly) | §9.6 |
+| `security.rotation.default` | `8760h` | §9.6 |
+| `server.request_timeout` | `90s` | §10.6 |
+| `config.max_staleness` | `6h` | §16 |
+| `config.poll_interval` | `5s` (2 s while Valkey is unavailable) | §9.7 |
+| `config.blind_staleness` | `5m` | §16 |
 | `tokens.unused_flag_after` | `2160h` (90 d) | §9.7 |
 | `tokens.reject_browser_origin_default` | `true` | §10.7 |
 | `firewall.preauth_rate` | `20/s`, burst `40` | §10.4 |
@@ -1860,10 +2020,12 @@ config.
 | `firewall.autoban.ipv6_prefix` | `64` | §10.3 |
 | `firewall.autoban.never_ban` | `[]` | §10.3 |
 | `firewall.autoban.signals.*` | thresholds as in §10.3 | §10.3 |
-| `firewall.autosuspend.on_injection_probe` | `true` | §10.3 |
+| `firewall.autosuspend.injection_probe` | `allowlisted_source` (`allowlisted_source` \| `off`) | §10.3 |
+| `firewall.autosuspend.any_source_kinds` | `[]` (may contain `tool`, `agent`; never `publishable`) | §10.3 |
 | `firewall.cloudflare_sync.enabled` | `false` | §10.3 |
 | `http.*`, `http2.*`, `json.*` limits | as in §10.6 | §10.6 |
-| `upstream.timeout` / `upstream.max_response_bytes` | `25s` / `64MiB` | §10.6 |
+| `upstream.max_response_bytes` | `256MiB` (ceiling over the per-operation caps) | §10.6 |
+| `upstreams[].credential_session_mode` | `single_holder` (`single_holder` \| `per_connector`) | §7.5 |
 | `upstream.max_header_value_bytes` / `upstream.max_header_total_bytes` | `4096` / `8192` | §11.1 |
 | `upstreams[].direct.allow_plaintext` | `false` | §8 |
 | `upstreams[].direct.tls.pin_spki_sha256` | unset | §8 |
@@ -1877,15 +2039,17 @@ config.
 | `connector.cert_ttl` | `720h` | §7.7 |
 | `connector.autosuspend_on_clone` | `true` | §7.6 |
 | `agents.max_pending_requests` / `agents.max_requests_per_day` | `20` / `50` | §13.2 |
-| `agents.secret_pickup_window` | `72h` | §13.3 |
-| `audit.spool_max_bytes` | `1GiB` | §16 |
+| `agents.secret_pickup_window` / `agents.secret_claim_replay_window` | `72h` / `10m` | §13.3 |
+| `audit.spool_max_bytes` | `10GiB` (WAL and spool together, 01 §15.2, 05 §1.11) | §16 |
 | `alerts.batch_window` / `alerts.connector_down_after` | `15m` / `2m` | §10.3, §16 |
 | *(connector)* `gateway_url` | from the bundle | §7.1 |
 | *(connector)* `shamel.base_url`, `shamel.tls_pin_spki_sha256`, `shamel.host_header` | local only | §7.4 |
 | *(connector)* `policy.writes` | `deny` | §7.4 |
 | *(connector)* `policy.allow_endpoints` | all compiled endpoints | §7.4 |
-| *(connector)* `policy.max_concurrency` / `policy.max_rps` / `policy.max_deadline` | `8` / `20` / `120s` | §7.4 |
-| *(connector)* `policy.max_form_bytes` / `policy.max_response_bytes` | `1MiB` / `64MiB` | §7.4 |
+| *(connector)* `policy.max_concurrency` | unset: follow the `welcome` `cap_share`; when set, a ceiling below it | §7.4 |
+| *(connector)* `policy.max_rps` / `policy.max_deadline` | `0` (off) / `90s` | §7.4 |
+| *(connector)* `policy.max_form_bytes` | `1MiB` | §7.4 |
+| *(connector)* `policy.max_response_bytes` | unset: the compiled per-endpoint caps (same classes as §10.6, at most 256 MiB); when set, a ceiling below them | §7.4 |
 | *(connector)* `media.roots` / `media.http_prefixes` | `[]` / `[]` | §5.4 |
 
 ---
@@ -1896,20 +2060,23 @@ config.
 
 | To | Requirement |
 |---|---|
-| Architecture | In connector mode, **the connector performs the Shamel login and holds the Shamel session**. Credentials arrive sealed (§7.5). The tunnel is end-to-end inner TLS 1.3 inside WSS through Cloudflare, with an explicitly framed protocol (§7.4). CA signing happens only in the control plane, through a PostgreSQL work queue (§7.2). The data plane and control plane are separate processes and users with no network path from data to control (§12.1). |
+| Architecture | In connector mode, **the connector performs the Shamel login and holds the Shamel session**. Credentials arrive sealed (§7.5). With several connectors per upstream, the session holder protocol (`SessionRole`, `credential_session_mode`) decides which connector may log in for each credential (§7.5). The tunnel is end-to-end inner TLS 1.3 inside WSS through Cloudflare, with an explicitly framed protocol (§7.4). CA signing happens only in the control plane, through a PostgreSQL work queue (§7.2). The data plane and control plane are separate processes and users with no network path from data to control (§12.1). |
+| Architecture | **Key split (§9.2):** the data-plane role receives `data.key` (`security.data_key_file`), never `master.key`; 01 §15.3's single-file delivery and direct HKDF derivation of every purpose from the master key are replaced by the two-KEK hierarchy, and the control plane is the only process that loads MK. The SMTP sender and Cloudflare ban sync run in the control plane. Audit bodies and audit metadata are written under per-node epoch DEKs sealed to the control plane (§9.2). |
 | Architecture | The **coalescing key** MUST include `upstream_id`, `cred_id` (the Shamel user), env, endpoint id and canonical upstream parameters. Requests made as different Shamel users are never coalesced (salesman scoping, Q17). Policy is applied per requesting token after the shared fetch. |
-| Architecture | **Snapshots** are stored per token after policy is applied, encrypted, and bound to `policy_version`. Cursors are honored only while the token is active and its policy is unchanged (§9.10). |
+| Architecture | **Snapshots** follow 01 §9: one unfiltered, encrypted snapshot per coalesced fetch (AAD `snapshot/<sid>/<chunk_n>`), never exposed directly; token-bound views (AAD `view/<vid>/<token_id>/<policy_version>`) and cursors; S14/S15 applied with the token's current policy on every page; cursors honored only while the token is active and its policy is unchanged (§9.10, 01 §9.7). |
+| Architecture | **Registry and limits:** `Operation.MaxResponseBytes` by class (§10.6); per-operation upstream budgets of at most 80 s under `server.request_timeout` 90 s; legacy response assembly with spill-to-disk (§10.8). Configuration keys to accept: `security.data_key_file`, `security.audit_epoch`, `security.rotation.*`, `config.blind_staleness`, `http.*` limits of §10.6, `upstreams[].credential_session_mode`. Valkey key `bwb:<t>:credrole:<upstream>:<cred_id>` and the `credrole_changed` event (§7.5). The connector's `hello` advertises its endpoint table; `welcome` carries its credential roles. |
 | API | Error catalog entries (English and Arabic messages, `docs_url`) for every code in §10.9. A code for an expired or invalidated cursor. The public paths list for WAF rule R2. The webhook signature format of §9.9 documented for receivers. The `/v1/media/{id}` presigned contract (§5.4). Public docs must not name the upstream product or version (LV-13). |
-| Permissions | Atomic expansion of scopes and voucher types so the subset rule (§13.2) can be evaluated. Publishable tokens limited to read scopes. `access_requests:write` is agent-only and never grantable. |
-| Operations | Backups exclude the master key (§9.4, §14). Key backup and restore drills (§9.5). The incident runbook commands (§17). The daily security digest with audit anchors (§12.5). |
+| Permissions | Atomic expansion of scopes and voucher types so the subset rule can be evaluated; 04 §10.3 is the authoritative rule and must keep the properties of §13.2. Publishable tokens limited to read scopes. `access_requests:write` is agent-only and never grantable. Per-token IP rules live in the policy spec (§10.2). Auto-suspension follows §10.3 (never publishable; secret tokens only for probes from inside their allowlist unless opted in). |
+| Operations | Backups exclude `master.key` and `data.key` (§9.4, §14). Key backup and restore drills (§9.5), including `bawaba key reissue-data-key` after a restore. The incident runbook commands (§17). The daily security digest with audit anchors (§12.5). Audit encryption (05 §1.4.5) uses epoch DEKs whose key id is the envelope key id, `audit_epoch_keys` retention follows the objects that reference them, and monthly rotation applies to the `audit_seal` key pair (§9.2, §9.6). New alert `token_probe_suspected` (warning, per token) next to `token_auto_suspended`, whose trigger becomes the §10.3 rule. Grants for `audit_epoch_keys` (§12.4). |
 
 ### 20.2 Questions for ISCO (security-related; add them to the ISCO list)
 
 1. Does the Shamel Web API support **HTTPS**, and with which certificate options? (Q11)
 2. What exactly does `ItemCatalog.image_path` contain: a URL, a local path or a UNC path? Is there an endpoint that
    returns image bytes? (Q26)
-3. Shamel session token lifetime. Does a new login invalidate earlier tokens? Can sessions be revoked server-side?
-   (Q14)
+3. Shamel session token lifetime. **Does a second login for the same user invalidate the first session?** (The
+   answer switches `credential_session_mode` between `single_holder` and `per_connector`, §7.5; `bawaba upstream
+   calibrate` also measures it.) Can sessions be revoked server-side, and is there a logout? (Q14)
 4. Does the API site use IIS **Windows authentication** (NTLM/Negotiate) anywhere, or anonymous authentication plus
    Shamel tokens only?
 5. Are API users the same accounts as Shamel desktop users (password reuse)? Can API access be enabled per user, and
@@ -1919,16 +2086,23 @@ config.
    long?
 8. Which IIS, ASP.NET and Shamel versions are deployed? What is the security patch cadence, and how are
    vulnerabilities reported?
-9. Rate and concurrency limits (Q47), so the global upstream cap and the connector's `max_concurrency` can be sized.
+9. Rate and concurrency limits (Q47), so the global upstream cap (which the connectors follow through `cap_share`)
+   and any local connector ceiling can be sized. Largest expected response sizes for `GetItems` and `GetCustomers`, to
+   confirm the per-operation caps of §10.6.
 10. Is SQL Server reachable from the LAN, and does the API host run any other exposed services (RDP, file shares) that
     the deployment guide should tell the owner to firewall?
 
 ### 20.3 Design assumptions made here
 
-- **Connector-held Shamel credentials (§7.5)** is a designer decision: it shrinks the gateway's blast radius and avoids
-  multi-node session contention. If the architecture document cannot adopt it, direct-mode custody (gateway envelope
-  encryption) applies to both modes, and the §7.8 table changes accordingly.
+- **Connector-held Shamel credentials (§7.5)** is a designer decision: it shrinks the gateway's blast radius. With
+  several active connectors per upstream it needs the session holder protocol of §7.5 (default `single_holder`) so
+  that connectors do not invalidate each other's sessions. If the architecture document cannot adopt it, direct-mode
+  custody (gateway envelope encryption, cluster-wide shared session, 01 §7.1) applies to both modes, and the §7.8
+  table changes accordingly.
+- **Two root key files (§9.2)** is a designer decision implementing the owner's "key file on the server" with plane
+  separation: only `master.key` must be backed up; `data.key` is re-issuable from it.
 - **Connector writes default to `deny`.** Enabling writes is a deliberate local act on the Shamel host. This matches
   milestone 1 (reads first) and puts a backstop under any gateway compromise.
-- `/healthz`, port numbers, CLI subcommand names and table names are proposals. The architecture and operations
-  documents may rename them, but the security properties attached to them may not change.
+- Configuration keys and listener ports follow 01 §15.2. `/healthz`, CLI subcommand names and table names are
+  proposals. The architecture and operations documents may rename them, but the security properties attached to them
+  may not change.
