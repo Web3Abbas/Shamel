@@ -4,7 +4,8 @@
 > [`../upstream/shamel-api.md`](../upstream/shamel-api.md) (cited as "U §x" and "Qnn").
 > Related: [`01-architecture.md`](01-architecture.md) (pipeline, coalescing, snapshots; cited "01 §x"),
 > [`02-security.md`](02-security.md) (tokens, firewall, origin hiding; "02 §x"),
-> [`05-operations.md`](05-operations.md) (webhooks engine, warnings, audit; "05 §x").
+> [`04-permissions-and-tokens.md`](04-permissions-and-tokens.md) (scopes, data scoping, lineage, access requests,
+> approvals; "04 §x"), [`05-operations.md`](05-operations.md) (webhooks engine, warnings, audit; "05 §x").
 >
 > This document owns the **public HTTP contract** of `bawaba-gateway`: the `/v1` resources and their query and
 > response shapes, the field mapping from Shamel, the upstream translation of every operation, pagination and
@@ -92,12 +93,16 @@ Format, checksum and storage are defined in 02 §9.7. Rules visible to clients:
 | `/v1` reads (§8–§14) | yes, by scope | yes, by scope | yes: read scopes only, `GET` only, `Origin` must be in the token's list |
 | Media (§10.6) | yes | yes | yes |
 | `/v1` writes and batch (§15) | yes | yes | no (`403 token_kind_not_allowed`) |
-| Approvals of own writes (§16) | yes | yes | no |
+| Approvals of own writes (own lineage, §16) | yes | yes | no |
 | Webhooks (§17) | yes | yes | no |
 | Access requests (§18.3) | no | yes, with `access_requests:write` | no |
-| `GET /v1/me`, `GET /v1/event-types` | yes | yes | yes |
+| `GET /v1/me`, `GET /v1/event-types` | yes | yes | yes (reduced `/v1/me`, §18.1) |
 | `GET /v1/me/requests` | yes | yes | no (a publishable token is public by nature) |
-| `/legacy` (§20) | if enabled for the token | if enabled | no |
+| `/legacy` (§20) and `GET /v1/docs/legacy` (§20.5) | if enabled for the token | if enabled | no |
+
+A token **lineage** is a token plus its rotation successors (`lineage_id`, 04 §2.4.5). Idempotency keys (§15.2),
+approval visibility (§16) and webhook ownership (§17.3) are keyed by lineage, so a rotated token keeps seeing and
+replaying what its predecessor created; cursors stay bound to the individual token.
 
 ### 2.3 Scopes
 
@@ -149,8 +154,10 @@ Voucher types (path segment, scope suffix and `type` field), from U §6.1:
 
 ### 2.4 Data scopes as seen through the API
 
-A token may be restricted per **dimension**: stores, salesmen, customers, currencies, price classes (00 §5). The
-permissions model owns how restrictions are configured; this section fixes their observable behaviour.
+A token may be restricted per **dimension**: stores, salesmen, customers, currencies, price classes (00 §5) and
+voucher types (`voucher_types`, values from §2.3; added by 04 §4.1). The permissions model owns how restrictions are
+configured and the authoritative per-operation enforcement matrix (04 §4.4); this section fixes their observable
+behaviour.
 
 **Rules**
 
@@ -160,32 +167,36 @@ permissions model owns how restrictions are configured; this section fixes their
 | DS-2 | **Single-resource lookups** of an out-of-scope record return `404 not_found`, indistinguishable from a missing record, after the same upstream fetch (02 LV-11). |
 | DS-3 | **Filter values** naming an out-of-scope entity (`store_id=9` when store 9 is not allowed) produce an empty result, never an error, so scopes cannot be probed. |
 | DS-4 | **Sub-collections** are filtered per row: item `prices[]` by price class and currency, stock rows by store, per-currency balance rows (including the customer overview's `balances`) by currency. Aggregates (`total_quantity`, statement totals) are computed over visible rows only. |
-| DS-5 | **Vouchers are atomic.** A voucher is visible only if *every* dimension value it carries is allowed: `customer_code`, `salesman_code`, `currency_code`, `order_store_id` and every `lines[].store_id`. Bawaba never returns a voucher with lines removed, because partial vouchers misstate totals. |
+| DS-5 | **Vouchers are atomic.** A voucher is visible only if *every* dimension value it carries is allowed: `type`, `customer_code`, `salesman_code`, `currency_code` and every `cheques[].currency_code`, `order_store_id` and every `lines[].store_id`. For customer- or salesman-restricted tokens every `accounts[].account_code` must also be a visible customer, so vouchers with general-ledger account lines are invisible to them (04 §4.4 journal rule). Bawaba never returns a voucher with lines removed, because partial vouchers misstate totals. Unknown voucher types (`type: "other"`, §4.7) are visible only to tokens whose `voucher_types` is unrestricted. |
 | DS-6 | **Derived salesman dimension.** For salesman-restricted tokens, records that carry a customer code but no salesman (balances, customer prices, voucher summaries, statements, last prices) are checked through the customer's `salesman_code`, resolved by one extra live `GetCustomers` call (coalesced, no `getBalance`) inside the same request. |
 | DS-7 | **Unevaluable dimensions fail closed.** If a restricted dimension cannot be evaluated on an endpoint's records, the endpoint either requires a narrowing parameter (`403 data_scope_filter_required`, `details` names the parameter) or is unavailable to that token (`403 data_scope_unsupported`). |
 | DS-8 | **Writes** referencing an out-of-scope entity fail with `422 reference_not_found` on that field, exactly as for a non-existent entity. |
 | DS-9 | **Cursors** re-check every record against the token's *current* policy; a policy change invalidates outstanding cursors (`409 cursor_invalidated`, 02 §9.10). |
+| DS-10 | **Null values.** A record whose dimension value is null or empty counts as the reserved member `@none`; it is visible only if the token's allow-set contains `@none` (e.g. `salesmen: ["S07", "@none"]` adds customers without a salesman). A voucher dimension with no value at all is `{@none}`, so a receipt (no store) is visible to a store-restricted token only with `@none` in its store set. `@none` cannot collide with a code (codes never contain `@`; 04 §4.2). |
 
-**Dimension map** (field evaluated per resource; "–" = not scoped by that dimension):
+**Dimension map** (field evaluated per resource; "–" = not scoped by that dimension; 04 §4.4 is authoritative):
 
-| Resource | stores | salesmen | customers | currencies | price classes |
-|---|---|---|---|---|---|
-| stores | `id` | – | – | – | – |
-| salesmen | – | `code` | – | – | – |
-| currencies / currency rates | – | – | – | `code` / `currency_code` | – |
-| price classes | – | – | – | – | `id` |
-| banks, bank branches, cities, item groups | – | – | – | – | – |
-| customers | – | `salesman_code` | `code` | `currency_code` | `price_class_id` |
-| customer balances | – | DS-6 | `customer_code` | `currency_code` (row) | – |
-| customer prices | – | DS-6 | `customer_code` | `currency_code` | `price_class_name` → id via live `GetPriceClasses` |
-| items | – | – | – | `prices[].currency_code` (DS-4) | `prices[].price_class_id` (DS-4) |
-| stock, item serials | `store_id` | – | – | – | – |
-| vouchers, prepared deliveries | DS-5 | `salesman_code` | `customer_code` | `currency_code` | – |
-| voucher summaries | `data_scope_unsupported` for store-restricted tokens | DS-6 | `customer_code` | `currency_code` | – |
-| account statement | – | DS-6 on `account_code` | `account_code` must be an allowed customer | `currency_code` parameter required and allowed (DS-7) | – |
-| last-price report | – | DS-6 on `customer` | row `customer` | row `currency_code` | – |
-| cost-center statement | – | `data_scope_unsupported` | `data_scope_unsupported` | `currency_code` parameter required and allowed | – |
-| order status | via the order (`order_code` required when customer- or salesman-restricted, DS-7) | | | | |
+| Resource | stores | salesmen | customers | currencies | price classes | voucher types |
+|---|---|---|---|---|---|---|
+| stores | `id` | – | – | – | – | – |
+| salesmen | – | `code` | – | – | – | – |
+| currencies / currency rates | – | – | – | `code` / `currency_code` | – | – |
+| price classes | – | – | – | – | `id` | – |
+| banks, bank branches, cities, item groups | – | – | – | – | – | – |
+| customers | – | `salesman_code` | `code` | `currency_code` | `price_class_id` | – |
+| customer balances | – | DS-6 | `customer_code` | `currency_code` (row) | – | – |
+| customer prices | – | DS-6 | `customer_code` | `currency_code` | `price_class_name` → id via live `GetPriceClasses` | – |
+| items | – | – | – | `prices[].currency_code` (DS-4); `units[].unit_price` omitted | `prices[].price_class_id` (DS-4); `units[].unit_price` omitted | – |
+| stock, item serials | `store_id` | – | – | – | – | – |
+| vouchers, prepared deliveries | DS-5 (`order_store_id`, `lines[].store_id`) | `salesman_code` | `customer_code`, `accounts[].account_code` (DS-5) | `currency_code`, `cheques[].currency_code` | – | `type` |
+| voucher summaries | `data_scope_unsupported` for store-restricted tokens | DS-6 | `customer_code` | `currency_code` | – | `type` |
+| account statement | `include_stock_lines=true` → `data_scope_unsupported` | DS-6 on `account_code` | `account_code` must be an allowed customer | `currency_code` parameter required and allowed (DS-7); `include_other_currencies=true` → `data_scope_unsupported` | – | `data_scope_unsupported` |
+| last-price report | – | DS-6 on `customer` | row `customer` | row `currency_code` | – | `data_scope_unsupported` |
+| cost-center statement | – | `data_scope_unsupported` | `data_scope_unsupported` | `currency_code` parameter required and allowed; `include_other_currencies=true` → `data_scope_unsupported` | – | `data_scope_unsupported` |
+| order status | via the order: `order_code` required when store-, salesman-, customer- or currency-restricted (DS-7) | | | | – | `404 not_found` when `voucher_types` excludes `order` |
+
+`units[].unit_price` cannot be attributed to a price class or currency *(provisional)*, so it is omitted for tokens
+restricted on either. Statements carry running balances, so they are allowed whole or denied, never row-filtered.
 
 ### 2.5 Field hiding as seen through the API
 
@@ -293,7 +304,11 @@ Shamel entities are addressed by their **business codes** (customer code, item c
   rejected by path hygiene (02 §11.3), which is why this form exists. The decoded value must be valid UTF-8,
   1–64 characters, without control or bidi characters.
 - Codes that contain characters outside printable ASCII cannot be sent in upstream headers (Q48). For those, Bawaba
-  performs the lookup as a full live list fetch plus an exact snapshot match; the result is identical, only slower.
+  performs the lookup as a full live list fetch plus an exact snapshot match; the result is identical, but the
+  request costs the `list` class in the upstream-units bucket instead of `small` (§23.3) and carries
+  `Bawaba-Warning: expensive_lookup;reason="non_ascii_code"` (§23.4), so N+1 loops over such codes are throttled and
+  flagged instead of sending N full fetches to the upstream at single-lookup cost. Tools should list once and match
+  locally.
 - The OpenAPI path-parameter pattern is `^(~[A-Za-z0-9_-]{2,344}|[A-Za-z0-9._-]{1,64})$`.
 
 ### 4.3 Methods and status codes
@@ -342,7 +357,9 @@ The application-level statuses are the shared set (400/401/403/404/409/422/429/5
 | Write result | `{"data": {…}}` (201) or `{"data": {"approval": {…}}}` (202) |
 | Error | `{"error": {"code", "message", "message_ar", "request_id", "docs_url", "details"?}}` (§22) |
 
-No response is a bare array or a bare scalar.
+No response is a bare array or a bare scalar. Two routes return non-envelope success bodies: media bytes (§10.6) and
+the legacy reference, which is the OpenAPI document itself so generators can consume it directly (§20.5). `/legacy`
+responses use Shamel's shapes (§20.4).
 
 ### 4.5 Dates, times and timezone
 
@@ -519,8 +536,20 @@ sequenceDiagram
 - **Expiry.** `409 snapshot_expired` (snapshot gone or evicted) and `409 cursor_invalidated` (token policy changed)
   both mean: start again from page 1. They are never answered with partial or stale data.
 - **Limits.** At most `pagination.max_views_per_token` (32) live views per token; creating a 33rd evicts the oldest
-  (its cursor then returns `snapshot_expired`). A snapshot above `pagination.snapshot_max_bytes` fails page 1 with
-  `422 result_too_large` (narrow the filters).
+  (its cursor then returns `snapshot_expired`).
+- **Size caps and which error a client gets.** Two caps apply to page 1, in this order:
+  1. The **raw upstream body** is limited while streaming by the operation's response cap (`Operation.MaxResponseBytes`:
+     single record 4 MiB, master data 16 MiB, large lists and reports 256 MiB; 02 §10.6). Exceeding it →
+     `502 upstream_response_too_large`.
+  2. The **normalized snapshot** (compact binary records plus search and sort keys, zstd-compressed, 01 §9.4) is
+     limited by `pagination.snapshot_max_bytes` (64 MiB compressed). Exceeding it → `422 result_too_large`.
+
+  Normalized snapshots compress to a fraction of the raw JSON (typically 4–10×), so with the defaults the raw cap is
+  reached first and `result_too_large` is a backstop for an owner-raised raw cap or unusually incompressible data.
+  Both errors mean the same thing to a client: the **unfiltered upstream result** is too large. Snapshot filters,
+  `q` and `limit` cannot help, because the snapshot is built before them; only **pushdown** filters
+  (`x-bawaba-pushdown`, §5.4) shrink it. Routes without any pushdown cannot be narrowed by the client; the docs say
+  so on those routes, and the owner must raise the cap. Tools must not retry either error unchanged.
 - **Single-page results** carry `next_cursor: null` and `snapshot_expires_at: null`.
 
 ### 5.4 Filtering
@@ -542,6 +571,20 @@ filter** (Shamel returns the full list and Bawaba filters). Snapshot filters cos
 unfiltered list; the docs say so on every route so that AI-built tools prefer pushdowns. A pushdown value that
 cannot be sent in a header (non-ASCII, Q48) is silently evaluated as a snapshot filter instead.
 
+**Pushdowns per list route** (the only parameters that reduce upstream work and the snapshot size, §5.3):
+
+| Route | Pushdowns | Can a client narrow it? |
+|---|---|---|
+| master data (§8), `/v1/item-groups`, `/v1/item-images`, `/v1/deliveries/prepared` | none | no (small or identity-scoped lists) |
+| `/v1/customer-prices`, `/v1/customers/{code}/prices` | none (Q25) | no |
+| `/v1/customers` | `updated_since`, `code`, `vat_reg` (single values), `stopped=true` | yes |
+| `/v1/customer-balances` | `customer_code` (single value), `vat_reg` | yes |
+| `/v1/items` | `updated_since`, `item_code` (single value), `serial`, `store_id`, `model_id` | yes |
+| `/v1/item-serials` | `serial`, `customer_code` | yes |
+| `/v1/stock` | `updated_since`, `item_code` (single value) | yes |
+| `/v1/vouchers`, `/v1/voucher-summaries` | `from`/`to` (required), `customer_code`, `currency_code` (single values) | yes |
+| reports (§13) | every parameter (form body or headers) | yes |
+
 ### 5.5 Sorting
 
 - `sort=<key>[,<key>…]`, at most 3 keys, `-` prefix for descending. Keys are allowlisted per route; each route has a
@@ -551,6 +594,21 @@ cannot be sent in a header (non-ASCII, Q48) is silently evaluated as a snapshot 
   chronologically, booleans `false` < `true`. `null` sorts last in both directions. Ties keep upstream order
   (stable sort).
 - Routes whose order carries meaning (account statements with running balances) do not accept `sort`.
+
+**Implementation (precomputed sort keys).** Calling `Collator.CompareString` inside every comparison would cost
+about n·log₂n ≈ 800,000 Arabic-aware comparisons for 50,000 records, repeated by every page-1 requester that shares
+the snapshot (each builds its own view, 01 S14). Instead:
+
+1. While normalizing (01 S13), the coalescing leader computes `Collator.KeyFromString(buf, s)` once per record for
+   every text or code field in the route's sort allowlist and stores the byte keys with the snapshot record, beside
+   the search keys of §5.6. They are never returned to clients and count toward `pagination.snapshot_max_bytes`.
+2. View construction (S14) sorts record positions with `slices.SortStableFunc` comparing keys with `bytes.Compare`;
+   decimals, dates and booleans compare on their typed values. `null` is handled before the key comparison.
+3. A `collate.Collator` keeps internal buffers and is not safe for concurrent use, so collators come from a
+   `sync.Pool` (one per goroutine at a time), never from a shared instance.
+4. Records stay in upstream order (so ties keep upstream order); the leader additionally stores the position
+   permutation for its route's default sort, so views in the default order, the most common case, only filter that
+   permutation and need no sort; ranking for `q` (§5.6) is a stable partition of it.
 
 ### 5.6 Search and Arabic normalization
 
@@ -683,6 +741,7 @@ required. Routes without a scope need only a valid token of an allowed kind (§2
 | GET | `/v1/access-requests/{id}` | `access_requests.get` | agent (M2) | none | 18.3 |
 | POST | `/v1/access-requests/{id}/claim-secret` | `access_requests.claim_secret` | agent (M2) | none | 18.3 |
 | POST | `/v1/access-requests/{id}/cancel` | `access_requests.cancel` | agent (M2) | none | 18.3 |
+| GET | `/v1/docs/legacy` | `docs.legacy` | tool, agent with legacy enabled | none | 20.5 |
 
 ### 6.3 Writes, batches and approvals (M2)
 
@@ -718,7 +777,7 @@ required. Routes without a scope need only a valid token of an allowed kind (§2
 | Path | Purpose | § |
 |---|---|---|
 | `/legacy/<Controller>/<Action>` | Shamel-compatible passthrough, per-token opt-in, strict allowlist (reads M1, writes M2) | 20 |
-| `/docs`, `/docs/…` | Bilingual HTML and Markdown docs, `openapi.{en,ar}.json`, error/warning/event pages | 24.5 |
+| `/docs`, `/docs/…` | Bilingual HTML and Markdown docs, `openapi.{en,ar}.json`, error/warning/event pages (public, cacheable; never the legacy reference, which is `GET /v1/docs/legacy`) | 24.5 |
 | `/llms.txt` | Alias of `/docs/llms.txt` | 24.5 |
 | `/healthz` | Constant `{"status":"ok"}` (02 LV-17) | – |
 
@@ -1001,8 +1060,9 @@ search `customer_code`, `item_code`, `price_class_name`; sort `customer_code,ite
 `GET /v1/customers/{code}/prices` — customer resolution step, then rows of that customer; filters `item_code`,
 `currency_code`.
 
-Shamel documents no inputs (Q25): every request fetches the whole price table (coalesced), so tools should use the
-per-customer route and cache results. Poll interval 60 s.
+Shamel documents no inputs (Q25): every request fetches the whole price table (coalesced), so both routes cost the
+`list` class in the upstream-units bucket (§23.3) and cannot be narrowed by pushdowns (§5.4); tools should use the
+per-customer route (smaller responses) and cache results. Poll interval 60 s.
 
 | v1 field | Type | Shamel (unnamed row, U §5.37) | Notes |
 |---|---|---|---|
@@ -1375,7 +1435,7 @@ An empty or `null` response, or a voucher failing DS-5, → `404 not_found`.
 
 | Parameter | Kind | Upstream | Notes |
 |---|---|---|---|
-| `from`, `to` | required, pushdown | `filters.fromDate`, `filters.toDate` | range ≤ `api.vouchers.max_range_days` (366) else `422 date_range_too_large` |
+| `from`, `to` | required, pushdown | `filters.fromDate`, `filters.toDate` | range ≤ `api.vouchers.max_range_days` (31) else `422 date_range_too_large`; ranges longer than `api.vouchers.slice_days` (7) use the range-split plan (below) |
 | `customer_code` | pushdown (single) / snapshot (list) | `filters.customerCode` | |
 | `currency_code` | pushdown (single) / snapshot (list) | `filters.currencyCode` | |
 | `type` | snapshot (list of voucher types) | – | Shamel has no type filter |
@@ -1398,13 +1458,36 @@ GET /Voucher/GetVouchers                   (printed without a leading slash)
 Shamel does not say which `Voucher` class this returns (Q23); the decoder accepts the full variant and tolerates
 missing collections. Poll interval 60 s; better: `voucher.created` / `voucher.updated` events.
 
+**Range-split plan (decision).** `GetVouchers` returns full vouchers (26 header fields, lines of 23 fields, cheques,
+accounts), roughly 3–5 KB of JSON each, and has no paging. At 200 vouchers per day a 366-day range would be about
+73,000 vouchers or 220–370 MB in one upstream response: above every response cap (02 §10.6) and every timeout. So:
+
+- The default maximum range is 31 days (`api.vouchers.max_range_days`; the owner may raise it to at most 366).
+- A range of up to `api.vouchers.slice_days` (7) days is one upstream call. A longer range becomes consecutive
+  slices `[from, from+6]`, `[from+7, from+13]`, …, `[…, to]`, fetched **sequentially**, each as its own
+  `GetVouchers` call that is admitted by the upstream concurrency limiter and coalesced on its own key (01 §9.1), so
+  two tools asking for overlapping months share slices. Pushdowns (`customerCode`, `currencyCode`) apply to every
+  slice.
+- The normalized slices are appended, in slice order, into **one** snapshot; the client sees an ordinary list with
+  one cursor walk. A voucher appears once (its date falls into exactly one slice).
+- The whole plan must finish within the page-1 deadline (`server.request_timeout`, 90 s, minus the queue budget);
+  otherwise the request fails with `504 upstream_timeout` and no partial snapshot is kept. Each slice keeps the
+  read budget of 01 §7.7.
+- Cost: one `report`-class charge per slice in the upstream-units bucket (§23.3); `x-bawaba-cost` documents
+  "5 units × number of slices". Tools that need a year should page by month, add `customer_code`, or use webhooks.
+
+Rejected alternative: one call per request with a low cap (31 days) and no slicing; it keeps single upstream
+responses of up to about 30 MB for a busy month and still exceeds the single-call timeout on slow links.
+
 ### 12.3 `GET /v1/voucher-summaries`
 
 Shamel's `GetExtraVouchers` returns light rows (type, amount, direction, customer balance) for customer-affecting
 vouchers. Its meaning beyond the field list is undocumented (Q23); Bawaba exposes it as a cheap feed for statements
 and dashboards.
 
-Parameters: `from`, `to` (required, same limits as §12.2), `customer_code`, `currency_code` (pushdowns), `type`,
+Parameters: `from`, `to` (required; range ≤ `api.voucher_summaries.max_range_days` (366), split into slices of
+`api.voucher_summaries.slice_days` (31) with the range-split plan of §12.2, because rows are light, about 0.25 KB
+each), `customer_code`, `currency_code` (pushdowns), `type`,
 `direction_id`, `min_amount`, `max_amount` (snapshot), `include=customer_balance`, sort `date,code` (default),
 `-date`, `-amount`. Store-restricted tokens → `403 data_scope_unsupported` (rows carry no store).
 

@@ -1,6 +1,6 @@
 # 04 — Tokens, Permissions, AI Agents and Approvals
 
-> Status: draft v1 · 2026-11-03 · Binding input: [`00-decisions.md`](00-decisions.md). Upstream reference:
+> Status: draft v1.1 (revised after review, aligned with the revised 02) · 2026-11-03 · Binding input: [`00-decisions.md`](00-decisions.md). Upstream reference:
 > [`../upstream/shamel-api.md`](../upstream/shamel-api.md) (cited "U §x", "Qnn").
 > Related: [`01-architecture.md`](01-architecture.md) (pipeline S1–S17, compiled config; "01 §x"),
 > [`02-security.md`](02-security.md) (token format, crypto, agent containment; "02 §x"),
@@ -214,9 +214,11 @@ agent → `environment=test`, `writes_require_approval=true`, same hidden fields
 
 - `bawaba token revoke <id> [--reason …]` or dashboard. Sets `status=revoked`, `revoked_at/by/reason`, compiles a
   new config version and publishes `token_revoked` on `bwb:events` (01 §5.4).
-- **Propagation bound N = `config.poll_interval` (default 5 s)**: every node adds the id to its in-memory deny-set on
-  the pub/sub message (typically < 1 s) and, if the message is lost, at the next version poll. With PostgreSQL down,
-  `--emergency` uses the signed Valkey deny entry (01 §5.4).
+- **Propagation bound N = `config.poll_interval` (default 5 s; 2 s while Valkey is unavailable, 02 §9.7)**: every
+  node adds the id to its in-memory deny-set on the pub/sub message (typically < 1 s) and, if the message is lost, at
+  the next version poll. With PostgreSQL down no normal revocation can be committed; `bawaba token revoke --emergency
+  <id>` publishes a signed deny entry on `bwb:events` and stores it in `bwb:deny`, which every node applies regardless
+  of config age (01 §5.4, 02 §9.7, §16).
 - Effects (applied by every component on the next touch): requests → `401 invalid_token`; cursors refused
   (02 §9.10); webhook subscriptions → `suspended`, queued deliveries `cancelled` (05 §2.6); pending approvals →
   `cancelled` with reason `token_revoked` (03 §16); pending access requests of a revoked agent → `rejected` with
@@ -258,7 +260,17 @@ Q39). Cursors stay token-bound (they live ~60 s). This refines 03 §15.2 "per to
 #### 2.4.6 Suspend / resume
 
 Reversible block (`status=suspended` → `401 invalid_token`, same as revoked to the client). Used by the owner
-(investigation) and by auto-suspension on injection probes (02 §10.3). Resume restores the token unchanged.
+(investigation) and by auto-suspension on injection probes, under the token-containment rule of 02 §10.3:
+
+- **Publishable tokens are never auto-suspended** (they are public; suspending them would hand any page visitor an
+  off switch). Probes through them ban the IP only.
+- A secret token (`tool`, `agent`) is auto-suspended for `injection_probe` only when its policy spec has a non-empty
+  `ip_allowlist` and the probing IP is inside it (`firewall.autosuspend.injection_probe = allowlisted_source`,
+  default), or when the owner opted in for its kind (`firewall.autosuspend.any_source_kinds`). Otherwise the IP is
+  banned and the owner receives `token_probe_suspected` (rotate the token or add an IP allowlist, §7).
+- Bans and throttles are keyed by IP or (token, IP), never by token alone (02 §10.3).
+
+Resume restores the token unchanged (`bawaba token resume <id>`).
 
 ---
 
@@ -461,7 +473,7 @@ filters on the same field (e.g. `store_id=9` for a token without store 9 → emp
 | `salesmen.list` | – | `F code` | – | – | – | – | provisional decoder (03 §8.8) |
 | `customers.list`, `customers.get` | – | `F salesman_code` (+ Shamel-side for pinned salesmen) | `F code`, `P Hdr code` | `F currency_code` | `F price_class_id` | – | `get_all` per §6.3 |
 | `customer_balances.list`, `customers.balances` | – | `D` | `F customer_code`, `P Hdr customerCode` | `F currency_code` (row) | – | – | `customers.balances` runs the resolution step first (404 if not visible) |
-| `customer_prices.list`, `customers.prices` | – | `D` (rows with a customer) | `F customer_code` (rows with a customer) | `F currency_code` | `F price_class_name→id` (live `GetPriceClasses`, coalesced; unmapped name → hidden) | – | rows with null `customer_code` are price-class rows: customer and salesman dimensions do not apply to them |
+| `customer_prices.list`, `customers.prices` | – | `D`; null/empty `customer_code` → `@none` | `F customer_code`; null/empty → `@none` | `F currency_code` | `F price_class_name→id` (live `GetPriceClasses`, coalesced; unmapped name → hidden) | – | rows without a customer follow the `@none` rule (see below the table); `customers.prices` returns only rows of the path customer |
 | `customers.overview` | base as `customers.get` | sections as their operations | | | | | a section that would be `X` is absent with `meta.sections.<s> = "omitted_data_scope"` (proposed addition to 03 §14) |
 | `items.list`, `items.get` | `Q store_id` | – | – | `S prices[].currency_code`; `M units[].unit_price` | `S prices[].price_class_id`; `M units[].unit_price` | – | `unit_price` cannot be attributed to a class/currency (provisional, 03 §10.1), so it is masked for tokens restricted on either |
 | `items.get?include=stock`, `items.stock` | `S stock.stores[].store_id`, `total_quantity` over visible rows | – | – | – | – | – | store names filtered by the same set |
@@ -484,6 +496,17 @@ with a non-empty `accounts[]` is visible only if every `account_code` is a visib
 lines therefore make such vouchers invisible to restricted tokens (fail closed).
 
 **Unknown voucher types** (`type: "other"`, 03 §3.2) are visible only to tokens whose `voucher_types` is `all`.
+
+**Customer-price rows without a customer (decision: `@none`, fail closed).** The `GetCustomerPricesAsRows` row model
+and its nullability are unverified (Q25, Q46), so a row whose `customer_code` is null or empty cannot be assumed to be
+a general price-class row: it may be a customer-specific negotiated price whose customer field came back empty. Such
+a row therefore carries `customers = {@none}` and, having no customer to resolve, `salesmen = {@none}`. For a token
+restricted on `customers` or `salesmen` it is visible only if the restricted dimension's allow-set contains `@none`
+(§4.2); unrestricted tokens see it, subject to `currencies` and `price_classes`. Tradeoff: a customer- or
+salesman-restricted tool sees no customer-less price rows unless the owner adds `@none` deliberately. The rejected
+alternative (treat rows with a non-empty, mappable `price_class_name` as price-class rows) would rest on an unverified
+shape. If ISCO or a live capture confirms the row model (§17.3 question 8), the registry may switch these rows to a
+verified price-class classification in a later release, which is a documented widening.
 
 ### 4.5 Policy pushdowns and forced upstream behaviour
 
@@ -542,8 +565,9 @@ derived checks always perform their lookup, write errors are not an existence or
 | Subscription filters | `store_ids`, `customer_codes`, … naming out-of-scope values are accepted and match nothing. |
 | Errors | Bawaba messages are static catalogue text; `details` name parameters and atoms, never data values (02 LV-19). |
 | Idempotent replays | A replayed stored response is re-masked with the **current** field mask before sending. |
-| Cursors / views | Token-bound; every cursor page re-checks rows against the current policy; a policy change invalidates cursors (`409 cursor_invalidated`). |
-| Coalescing | Shared objects are unfiltered upstream results per (upstream, credential, environment); policy is applied per requester afterwards (01 §9.7). A follower's shorter latency reveals only that another tool of the same tenant made the same call (accepted). |
+| Snapshots | One **unfiltered**, encrypted snapshot per coalesced fetch, shared by every requester of that fetch (01 §9.4, 02 §9.10). It may hold fields and rows the reader may not see, so it is never exposed: snapshot ids never leave the gateway, no API accepts one, and it is read only through a view. Every page, page 1 included, runs S14 (data scope) and S15 (mask, fused into the encoder) with the requesting token's **current** policy. |
+| Views / cursors | A view (01 §9.5) holds the positions that passed this token's data scope and filters; it is AAD-bound to `view/<vid>/<token_id>/<policy_version>` (02 §9.3), so another token or a changed policy cannot open it. Cursors are sealed to the token and route and carry `view_id`, `query_hash` and `policy_version` (01 §9.6, 02 §9.10). A cursor is honoured only while the token is active and its `policy_version` is unchanged (`409 cursor_invalidated`), and every cursor page still re-checks rows against the current policy. |
+| Coalescing | The coalescing key covers (tenant, upstream, environment, credential, upstream call signature, normalizer version) under a keyed HMAC (01 §9.1); token policy is deliberately not in the key, and policy is applied per requester afterwards (01 §9.7). Tokens bound to different Shamel credentials never share a fetch or a snapshot. A follower's shorter latency reveals only that another tool of the same tenant made the same call (accepted). |
 | `result_too_large` | Reveals coarsely that the unfiltered upstream result exceeds `pagination.snapshot_max_bytes` (accepted; no counts). |
 
 ---
@@ -691,9 +715,20 @@ Event `object` and `previous` are rendered by the `/v1` encoder with the mask of
 | Pinned credential | `cred_…` on the same upstream | that Shamel user | a salesman app that must keep Shamel's own salesman scoping (00 §5) |
 
 - Credentials are owned by the upstream (`shamel_credentials(id, tenant_id, upstream_id, label, salesman_code,
-  status, …)`); storage and custody per 02 §7.5: in connector mode the gateway stores only an HPKE ciphertext sealed
-  to the connector (the connector logs in); in direct mode envelope encryption (AES-256-GCM, purpose
-  `shamel_credential`). The token row holds only the id. Agents and tools never see credentials (00 §4).
+  status, …)`). Storage and custody follow 02 §7.5:
+  - **Connector mode:** the gateway stores only HPKE ciphertexts sealed to each connector instance's sealing key
+    (one ciphertext per connector) and learns only `cred_id` and the owner's label. The connector logs in and holds
+    the Shamel session. With several connectors per upstream, the session-holder protocol
+    (`upstreams[].credential_session_mode`, default `single_holder`) decides which connector instance logs in for a
+    given `cred_id`.
+  - **Direct mode:** the gateway stores the credential under envelope encryption (AES-256-GCM, purpose
+    `shamel_credential`) and holds the session (purpose `upstream_session` when shared across nodes).
+  - **Sandbox:** no real credential (bawaba-mock); mock salesman identities (§12) are synthetic and hold no secret.
+- The token row holds only `credential_id`. **Authorization binds a token to a `cred_id`, never to a connector**:
+  which connector holds the session, a holder handover, a sealing-key rotation or a connector re-enrolment (which
+  requires the owner to re-enter the password, 02 §7.5) changes neither the token's binding nor its compiled policy,
+  and the coalescing key uses `cred_id` (01 §9.1). Agents and tools never see credentials, connector ids or the
+  upstream address (00 §4, 02 §13.1).
 - A credential with bound tokens cannot be deleted (`ON DELETE RESTRICT`); the owner rebinds or revokes first. A
   disabled credential makes its tokens fail with `502 upstream_error` (01 §7.1) and alerts the owner.
 - Changing a token's credential is a permission change (versioned, audited) and is never allowed through an agent
@@ -702,7 +737,8 @@ Event `object` and `previous` are rendered by the `/v1` encoder with the mask of
 ### 6.2 Salesman-bound credentials
 
 - A credential becomes usable only after a successful **registration test login** (`bawaba upstream credential add`
-  / `test-login`, 05 §7.3; in connector mode the connector performs it and reports the non-secret result), which
+  / `test-login`, 05 §7.3; in connector mode the connector that holds the credential performs it and reports only
+  the non-secret result, i.e. success and `salesmanCode`), which
   records `salesman_code` from `AuthResult.salesmanCode` before any token can bind to it. The owner may also declare
   the expected code. Every later login (connector-reported in connector mode) is compared: a mismatch disables the
   credential and raises `credential_salesman_mismatch`, so the compiled intersection below can never be stale.
@@ -729,13 +765,21 @@ Event `object` and `previous` are rendered by the `/v1` encoder with the mask of
 
 ## 7. Per-token IP rules
 
-- Spec keys `ip_allowlist` and `ip_denylist` (§2.3), IPv4 and IPv6 CIDRs; IPv4-mapped IPv6 is unmapped first.
+- **Storage (decision, adopted by 02 §10.2):** per-token rules live only in the token's versioned policy spec, keys
+  `ip_allowlist` and `ip_denylist` (§2.3), so they are diffed, audited (§9.6) and covered by the subset rule
+  (`ip_wider`, §10.3) like every other grant. `firewall_rules` holds global rules only;
+  `bawaba firewall allow|deny add <cidr> --token <id>` is a policy update that creates a new `policy_version`.
+  Both kinds change only through the control plane.
+- IPv4 and IPv6 CIDRs; IPv4-mapped IPv6 is unmapped first.
 - Evaluation order (02 §10.2): global deny → global allow (if any) → token deny → token allow (if non-empty, the
   client IP must match). The client IP is the edge-derived IP (01 S1, `CF-Connecting-IP`).
 - Failure: `403 ip_blocked` (02 §10.9; the message never says which rule matched; 01 S5's `ip_not_allowed_for_token`
   is superseded by 02's code).
 - Compiled into per-token `netip.Prefix` tries (lookup O(prefix bits)), swapped atomically with the policy.
 - Publishable tokens may carry IP rules (office-only internal dashboards), but origins are their main control.
+- A secret token's `ip_allowlist` also decides auto-suspension: only probes from inside a non-empty allowlist suspend
+  it (§2.4.6, 02 §10.3). The owner is therefore advised to give live write-capable tokens an allowlist; without one,
+  probes ban the IP and raise `token_probe_suspected`.
 - `bawaba firewall explain <ip> --token <id>` shows which rule decides (05 §7.3).
 
 ---
@@ -843,7 +887,10 @@ full compile of 10,000 tokens is well under a second; in practice only changed t
 
 The operation registry declares per operation and dimension the enforcement code and the field accessor
 (generated, no reflection). A registry test fails the build if an operation lacks a scope, if a resource carrying a
-dimension field has no enforcement entry for it, or if a hideable path has no legacy mapping.
+dimension field has no enforcement entry for it, or if a hideable path has no legacy mapping. A fixture test feeds
+every dimension-carrying field a null and an empty value and asserts the record is treated as `@none` (visible to a
+restricted token only with `@none` in its allow-set); it includes customer-price rows without `customer_code` (§4.4)
+and a voucher without stores (§4.2).
 
 ### 9.3 Request-time evaluation (S8)
 
@@ -878,11 +925,15 @@ generated encoder (01 S15). The S8 stage itself allocates nothing.
   (`atomic.Pointer`), readers lock-free. Propagation p99 < 1 s, bound `config.poll_interval`.
 - Nothing per-request is cached across requests: derived lookups (`D`) and reference pre-checks are live, coalesced
   only with concurrent identical calls (00 §8).
-- `policy_version` ties dependent state to the policy it was created under: cursors (`409 cursor_invalidated` on
-  change, 03 DS-9), approvals (re-validation, §11.5), webhook deliveries (evaluated at send time), access requests
-  (subset rule re-checked at approval, §10.3).
-- When PostgreSQL is unavailable, nodes serve with the last compiled config for `config.max_staleness` (6 h), then
-  fail closed (01 §13.1); emergency revocation still works through Valkey (01 §5.4).
+- `policy_version` ties dependent state to the policy it was created under: views and cursors (AAD and cursor
+  binding; `409 cursor_invalidated` on change, 03 DS-9, 02 §9.10), approvals (re-validation, §11.5), webhook
+  deliveries (evaluated at send time), access requests (subset rule re-checked at approval, §10.3).
+- When PostgreSQL is unavailable (02 §16, 01 §13.1), nodes serve reads with the last compiled config for
+  `config.max_staleness` (6 h), then return `503 service_unavailable` on authenticated routes. Writes, access requests
+  and webhook subscription changes fail closed at once (they need PostgreSQL). Emergency revocation still works
+  through the signed `bwb:deny` entry in Valkey (01 §5.4). A node that reaches neither PostgreSQL nor Valkey can
+  receive no revocation by any path, so after `config.blind_staleness` (5 min) in that state it also returns `503`
+  on authenticated routes until either recovers.
 
 ### 9.5 Deny-by-default guarantees
 
@@ -953,6 +1004,15 @@ request pass: omitted dimensions inherit A's restriction; A's hidden fields are 
 min(kind default, A's value); omitted `get_all` → `false`. IP lists are deliberately **not** auto-filled (the tool
 usually runs somewhere other than the agent), so an IP-restricted agent must state the tool's addresses.
 
+**Publishable requests.** For `R.kind = publishable` the kind-forced hides (**PF**, §5.3) are added at compile time as
+for any publishable token, and auto-fill **always** adds the publishable default hides (**PD**: `@pii`,
+`@free_text`, `tokens.publishable.default_hidden`). A request has no way to un-hide a field. A `modify_token` whose
+merged spec would drop a PD hide is a violation (`public_fields_exposed`), unless the owner had already un-hidden
+that path on the target (an owner act with `--acknowledge-public`, §13). So an agent can never make PD data public;
+only the owner can, by an ordinary audited update. A publishable R that holds `customers:read`, `vouchers:read` or
+`reports:read` is not a violation (an agent may hold these atoms), but it carries the review flag `public_exposure`,
+and approving it needs an explicit acknowledgement (§10.5).
+
 The rule compares effective (compiled) forms, never raw input, so groups, wildcards, occurrences, kind-forced hides
 and the pinned-salesman intersection are all accounted for. `covers(X, Y)` below denotes the comparisons of
 `violations` from `R.kind` onwards with Y as grantor and X as grantee; §10.5 reuses it for owner edits.
@@ -967,7 +1027,7 @@ violations(R, A) -> list
   V = []
   R.kind ∉ {tool, publishable}                                   -> kind_not_allowed
   env_rank(R.env) > env_rank(A.env)                              -> environment_higher
-  if R.env == A.env:
+  if R.env == A.env:          # credential = resolved cred_id (pinned or upstream default), never a connector (§6.1)
       R.upstream ≠ A.upstream or R.credential ≠ A.credential     -> credential_differs
   else:  # R.env = test, A.env = live: R binds to the tenant's sandbox upstream; credential check skipped
          # (synthetic data); dimensions and every other rule still apply
@@ -983,7 +1043,11 @@ violations(R, A) -> list
                                                                  -> expiry_later
   R.legacy_enabled and (¬A.legacy_enabled or R.legacy_endpoints ⊄ A.legacy_endpoints)
                                                                  -> legacy_wider
-  A.writes_require_approval and ¬R.writes_require_approval       -> approval_weaker
+  ¬R.writes_require_approval and (type = create_token or target.writes_require_approval)
+                                                                 -> approval_weaker
+      # stricter than "not weaker than A": agent-born tokens always start with approval on; only the
+      # owner turns it off, after approval, by an ordinary update (02 §13.2, §11.1); a modify_token may
+      # keep an owner's earlier "off" but never set it
   A.legacy_require_idempotency_key and R.legacy_enabled and ¬R.legacy_require_idempotency_key
                                                                  -> approval_weaker
   R.get_all and ¬A.get_all                                       -> get_all_not_held
@@ -992,20 +1056,49 @@ violations(R, A) -> list
   R.rpm > A.rpm or R.burst > A.burst or R.wpm > A.wpm or R.writes_burst > A.writes_burst
      or (A.mode = enforce and R.mode = warn_only)                -> rate_higher
   R.kind = publishable: R.Atoms ⊄ business read atoms or origins ∉ 1..10 valid   -> kind_not_allowed
+  R.kind = publishable and (PD \ H(R)) \ U ≠ ∅                   -> public_fields_exposed(paths)
+      # PD = expanded publishable default hides; U = PD paths the owner already un-hid on the
+      # modify_token target (∅ for create_token, where auto-fill adds PD anyway)
   return V
 ```
 
 - Rate limits compare effective values (kind defaults resolved); a publishable request's per-IP limit is not
   compared (agents have none).
 - Origins are not compared (an agent has none); they are validated per 02 §10.7.
-- `modify_token`: additionally the target must exist, not be revoked, and belong to the agent's lineage
-  (`requested_by_token_id` ∈ lineage of A); otherwise `404 not_found`.
+- **Targets (`modify_token` and `revoke_token`):** the target must exist, not be revoked, and belong to the agent's
+  lineage (`requested_by_token_id` ∈ lineage of A); otherwise `404 not_found` (the same body as a non-existent id).
+  For `modify_token` the merged result R must pass `violations(R, A)`. A `revoke_token` produces no grant, so only
+  the requester check (`requester_inactive`) and the target rule apply.
 - The rule runs (1) at creation (`403 exceeds_own_grant`, one `details` entry per violation, 03 §18.3), (2) when the
   owner opens/edits the request (live result shown), and (3) **at approval**, against A's policy at that moment. If
   A was narrowed and R no longer fits, approval is blocked until the owner narrows R; if A is inactive, the request
   becomes `rejected` with reason `requester_inactive`.
 - Complexity: O(|atoms|/64 + Σ_d |eff(R,d)| + |catalogue|/64 + |R.ip|·|A.ip|): microseconds.
-- New violation codes beyond 03 §18.3: `get_all_not_held`, `browser_weaker`, `requester_inactive`.
+- New violation codes beyond 03 §18.3: `get_all_not_held`, `browser_weaker`, `requester_inactive`,
+  `public_fields_exposed`. Review flag (not a violation): `public_exposure`.
+- **Test (02 §18.1):** property-based; for random (A, R) pairs with `violations(R, A) = ∅`, every request R allows
+  is allowed by A, and every record and field visible to R is visible to A, across all six dimensions.
+
+**Conformance with 02 §13.2.** 02 §13.2 points here for the definition and fixes the security properties the rule
+must keep; any change to this section must keep every row of this table.
+
+| 02 §13.2 property | Where it is enforced here |
+|---|---|
+| Checked at creation, when the owner opens or edits, and again at approval against A's *current* policy; an inactive agent's requests become `rejected` | the three evaluation points above; `requester_inactive` |
+| Effective (compiled) forms, never raw input | comparison of compiled policies (groups, presets, wildcards, kind-forced hides, pinned-salesman intersection resolved) |
+| Kind `tool` or `publishable` only | `kind_not_allowed` |
+| Environment test < live | `environment_higher` |
+| Same upstream and Shamel credential (pinning another Shamel user is a violation) | `credential_differs` |
+| Scope atoms, voucher-type atoms expanded; `access_requests:write` never grantable | `scope_not_held` |
+| Every dimension, `voucher_types` included | `dimension_wider` |
+| R hides at least what A hides | `hidden_fields_missing` |
+| R's allowlist inside A's; R's denylist covers A's | `ip_wider` |
+| Expiry, legacy endpoints, `writes_require_approval`, `legacy_require_idempotency_key`, `get_all`, `reject_browser_origin`, rate limits and `mode` | `expiry_later`, `legacy_wider`, `approval_weaker`, `get_all_not_held`, `browser_weaker`, `rate_higher` |
+| Publishable constraints (business read atoms, 1–10 valid origins) | `kind_not_allowed`; plus `public_fields_exposed` and the `public_exposure` approval gate (§10.5) |
+| Targets only from the agent's lineage | target rule above (`404 not_found`) |
+| Agent-born tokens default to `writes_require_approval=true`; only the owner turns it off | auto-fill; `approval_weaker` |
+| Caps 20 pending / 50 per day | §10.2 |
+| No bulk approval of widening requests; owner may narrow, never widen | §10.5 (`covers(G, R)`) |
 
 ### 10.4 State machine
 
@@ -1072,15 +1165,23 @@ trigger), `SELECT` own rows, and `EXECUTE` on two `SECURITY DEFINER` functions o
   token (separately audited). `bawaba access-request approve areq_… --narrow '{"data_scopes":{"stores":[1]}}'`.
 - The narrowing patch and `owner_note` are visible to the agent in the request resource (`decision.granted_spec`,
   `decision.narrowed`).
-- Requests that widen anything relative to existing tokens cannot be bulk-approved; bulk reject is available
-  (02 §13.2). Revocation requests may be bulk-approved.
+- **Public exposure gate.** A request whose granted spec G is a publishable token holding `customers:read`,
+  `vouchers:read` or `reports:read` (review flag `public_exposure`, §10.3) shows a distinct banner above the diff:
+  "Publicly readable data: anyone who can load the page can read these resources" (Arabic and English), listing the
+  atoms, the effective visible fields per resource and the origins. Approval then requires an explicit
+  acknowledgement: `--acknowledge-public` on `bawaba access-request approve` (refused with exit code 2 and the
+  flagged atoms otherwise), or a separate, unticked-by-default checkbox in the dashboard. The acknowledgement is
+  recorded in the `access_request.approve` admin event. Narrowing the request (dropping those atoms) removes the flag.
+  The same gate applies to a `modify_token` that adds those atoms to a publishable target.
+- Requests that widen anything relative to existing tokens, and requests flagged `public_exposure`, cannot be
+  bulk-approved; bulk reject is available (02 §13.2). Revocation requests may be bulk-approved.
 
 ### 10.6 Notification
 
 - New request → alert `access_request_pending` (05 §3.3, severity high), reminder after 24 h. E-mail content: request
   id, agent token name and id, type, environment, a one-line machine summary (e.g. "tool token, test, 3 read
-  scopes, stores=[1,4]"), the agent's reason truncated to 200 chars and labelled untrusted, the localhost URL and the
-  CLI command. No secrets, no approve link.
+  scopes, stores=[1,4]"; publishable requests flagged `public_exposure` start with "PUBLIC:"), the agent's reason
+  truncated to 200 chars and labelled untrusted, the localhost URL and the CLI command. No secrets, no approve link.
 - The agent learns the outcome by polling `GET /v1/access-requests/{id}` (`poll_after_seconds` 10;
   `polling_too_frequent` if faster) or with `bawaba request-token --wait` / `bawaba access-request wait`.
 
@@ -1126,9 +1227,11 @@ sequenceDiagram
 ### 10.8 Prompt-injection and approval-fatigue controls
 
 The controls of 02 §13.4 apply. Specific to this model: caps (§10.2); untrusted text separated from the diff;
-no bulk approval of widening requests; agent-born tokens default to `writes_require_approval=true` (only the owner
-can turn it off); agents default to the sandbox; and every agent-born token is traceable
-(`requested_by_token_id`, `origin_access_request_id`) for one-command cascade revocation.
+no bulk approval of widening requests; the public-exposure gate for publishable requests (§10.5); agent-born tokens
+start with `writes_require_approval=true` (only the owner can turn it off); caps on pending write approvals and a
+separate sandbox queue, so live approvals cannot be buried (§11.1, §11.9); agents default to the sandbox; and every
+agent-born token is traceable (`requested_by_token_id`, `origin_access_request_id`) for one-command cascade
+revocation.
 
 ---
 
@@ -1144,6 +1247,20 @@ can turn it off); agents default to the sandbox; and every agent-born token is t
   publishable tokens cannot write.
 - Held writes are not available on `/legacy` (`403 approval_not_supported_in_legacy`, 03 §20.3).
 - A batch from an approval-required token becomes **one** approval (`kind: batch`, 03 §15.8).
+- **Caps (decision).** Like access requests (§10.2), pending approvals are bounded per lineage and environment, so
+  a buggy or prompt-injected tool cannot bury the owner's queue:
+
+  | Key | `live` | `test` | On excess |
+  |---|---|---|---|
+  | `approvals.max_pending_per_lineage` | 50 | 20 | `429 approval_limit_reached`, `details[].reason = "pending"`, no `Retry-After` (it clears when the owner decides) |
+  | `approvals.max_new_per_day_per_lineage` | 200 | 100 | `429 approval_limit_reached`, `details[].reason = "daily"`, `Retry-After` = seconds until the oldest counted item leaves the rolling 24 h window |
+
+  The live defaults leave room for a field app whose orders wait between two owner reviews a day. The check runs in
+  the transaction that inserts the approval, serialized per lineage (`pg_advisory_xact_lock(hash(lineage_id))`, then
+  counts over the index `(lineage_id, environment, status, created_at)`), so concurrent submissions cannot overshoot.
+  A refused write stores nothing: no approval and no final idempotency state, so the client may resend the same
+  `Idempotency-Key` once the queue has room. Reaching the live pending cap raises the owner alert
+  `approval_queue_full` (warning, per lineage; requirement on 05 §3.3).
 
 ### 11.2 Pending-write record
 
@@ -1158,7 +1275,8 @@ CREATE TABLE approval_items (
   idempotency_key_hash bytea NOT NULL,       -- SHA-256(key); key namespace = lineage (§2.4.5)
   idempotency_key_enc bytea NOT NULL,        -- shown to the owner
   request_fingerprint bytea NOT NULL,        -- 03 §15.2 fingerprint
-  payload_enc bytea NOT NULL,                -- frozen normalized /v1 request (purpose approval_payload, AAD = id ‖ payload_sha256)
+  payload_enc bytea NOT NULL,                -- frozen normalized /v1 request; every *_enc column: purpose approval_payload,
+                                             -- binding approval/<id> (02 §9.3) plus the column name (requirement on 02)
   payload_sha256 bytea NOT NULL,             -- canonical JSON (03 §15.2)
   upstream_request_enc bytea NOT NULL,       -- prepared Shamel call(s): path, method, form body (exact bytes)
   upstream_request_sha256 bytea NOT NULL,
@@ -1166,7 +1284,7 @@ CREATE TABLE approval_items (
   status text NOT NULL DEFAULT 'pending',    -- §11.3
   reason text NULL,                          -- rejected_by_owner | expired | cancelled_by_client | token_revoked | scope_revoked
   owner_note text NULL,
-  created_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,     -- + approvals.ttl (168 h, 03 §16)
+  created_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,     -- + approvals.ttl (168 h, 03 §16); test: approvals.sandbox_ttl (24 h)
   decided_at timestamptz NULL, decided_by text NULL,
   approved_upstream_sha256 bytea NULL,       -- executor refuses any other payload (02 §9.10)
   approved_credential_id text NULL,          -- identity bound at approval
@@ -1293,10 +1411,22 @@ candidate vouchers (live `GetVouchers` for the date ± 1 day and customer, match
 
 ### 11.9 Sandbox approvals
 
-Test-token writes follow the same flow against bawaba-mock and appear in the owner's queue marked **sandbox** (so
-agents can build approval handling end to end). Agents may resolve their own sandbox approvals automatically with
-`Bawaba-Mock-Scenario: approve_after_10s | reject_after_10s` (03 §21.3); this exists only for the sandbox and never
-for access requests or live writes. The owner can bulk-reject sandbox approvals.
+Test-token writes follow the same flow against bawaba-mock, so agents can build approval handling end to end. Agent
+tokens default to the sandbox and to `writes_require_approval=true`, so sandbox approvals can be numerous; they are
+kept **apart from live approvals** so that they never dilute the owner's attention:
+
+- **Separate queue.** The dashboard shows them on their own **Sandbox approvals** page and the CLI only with
+  `bawaba approval list --env test`. They never appear in the live list, live badge counts or risk views
+  (requirement on 05 §6.4, §7.3).
+- **No high-severity alerts.** `write_approval_pending` is raised for live items only; sandbox items appear only as a
+  count in the daily digest (requirement on 05 §3.3).
+- **Short life.** Sandbox items expire after `approvals.sandbox_ttl` (24 h) instead of `approvals.ttl` (168 h), and
+  are capped per lineage (§11.1, `test` column).
+- **Self-service resolution.** Agents may resolve their own sandbox approvals automatically with
+  `Bawaba-Mock-Scenario: approve_after_10s | reject_after_10s` (03 §21.3); this exists only for the sandbox and never
+  for access requests or live writes.
+- **Bulk actions.** The owner can bulk-reject or bulk-approve sandbox approvals (all, per token, or older than a
+  given age); bulk approval exists only for sandbox items, which cannot reach Shamel (S9 environment invariant, §12).
 
 ---
 
@@ -1306,7 +1436,7 @@ for access requests or live writes. The owner can bulk-reject sandbox approvals.
 |---|---|---|
 | Prefix | `bwb_test_`, `bwb_pk_test_` | `bwb_live_`, `bwb_pk_live_` |
 | Upstream | tenant's sandbox upstream (`mode: mock`, 01 §11) | a live upstream |
-| Credentials | none, or a mock salesman identity (`cred_sbx_<salesman>`, auto-created from the mock dataset) to exercise salesman scoping | default service account or pinned credential |
+| Credentials | none, or a mock salesman identity (`cred_sbx_<salesman>`, auto-created from the mock dataset, synthetic, no secret stored, 02 §7.5) to exercise salesman scoping | default service account or pinned credential (custody per §6.1) |
 | Who may create | owner; agents (request) | owner on the server only (step-up; `--confirm-live` for agent kind); agents only if they are live themselves (subset rule) |
 | Policy model | identical (scopes, data scopes, hidden fields, approvals, rate limits) | identical |
 
@@ -1333,10 +1463,10 @@ dashboard offers the same as **Promote to live** with the diff preview. A test a
 
 | Rule | Value |
 |---|---|
-| Atoms | Only the 7 business read atoms; never `webhooks:*`, writes or `access_requests:write` (02 §10.7). `customers:read`, `vouchers:read`, `reports:read` additionally require `--acknowledge-public` (dashboard warning: anyone who can load the page can read this data). |
+| Atoms | Only the 7 business read atoms; never `webhooks:*`, writes or `access_requests:write` (02 §10.7). `customers:read`, `vouchers:read`, `reports:read` additionally require `--acknowledge-public` (dashboard warning: anyone who can load the page can read this data). The acknowledgement is required on **every** path that creates or widens a publishable token: owner create, owner update, `--mirror`, and approval of an agent request (§10.5). |
 | Methods | `GET` only; no `/legacy`, no webhooks, no approvals, no `/v1/me/requests` (03 §2.2). |
 | Origins | 1–10 exact origins `https://host[:port]`; `http://localhost[:port]` only for `bwb_pk_test_`; no wildcards, no `null` (02 §10.7, 03 §23.5). |
-| Field hiding | Forced (**PF**): `@cost`, `@gl_accounts`, `@customer_balances`, `@credit_terms`, `@special_prices`, `@national_id`, `@cheques`. Default (**PD**, unhide with `--acknowledge-public`): rest of `@pii`, `@free_text` (§5.3). |
+| Field hiding | Forced (**PF**): `@cost`, `@gl_accounts`, `@customer_balances`, `@credit_terms`, `@special_prices`, `@national_id`, `@cheques`. Default (**PD**, unhide with `--acknowledge-public`): rest of `@pii`, `@free_text` (§5.3). PF and PD are always applied to agent-requested publishable specs; only the owner can un-hide a PD field, by a later update (§10.3). |
 | Rate limits | 600/min (burst 150) per token **and** 120/min per (token, client IP) (03 §23.3), so one visitor cannot exhaust the page's budget. |
 | IP rules | Optional. |
 | `/v1/me` | Reduced view (03 §18.1). |
@@ -1401,10 +1531,15 @@ protects Shamel.
 | `agents.secret_claim_replay_window` | `10m` | 03 §18.3 |
 | `agents.poll_min_interval` | `10s` | warnings only |
 | `approvals.ttl` | `168h` | 03 §16 |
+| `approvals.sandbox_ttl` | `24h` | §11.9 |
+| `approvals.max_pending_per_lineage` | `{live: 50, test: 20}` | §11.1 |
+| `approvals.max_new_per_day_per_lineage` | `{live: 200, test: 100}` | §11.1, rolling 24 h |
 | `approvals.duplicate_window` | `24h` | risk flag |
 | `approvals.claim_reenqueue_after` | `30s` | §11.6 |
 | `approvals.retry_after_unsent` | `30s` doubling | §11.6 step 4 |
-| `config.poll_interval` (bootstrap, 01 §15.2) | `5s` | revocation propagation bound |
+| `config.poll_interval` (bootstrap, 01 §15.2) | `5s` | revocation propagation bound (2 s while Valkey is unavailable, 02 §9.7) |
+| `config.max_staleness` / `config.blind_staleness` (bootstrap, 02 §16) | `6h` / `5m` | §9.4 |
+| `firewall.autosuspend.injection_probe` / `.any_source_kinds` (02 §19) | `allowlisted_source` / `[]` | §2.4.6; `publishable` is rejected in `any_source_kinds` |
 
 ---
 
@@ -1425,9 +1560,11 @@ Proposed additions:
 | `approval_expired` | 409 | replay after the approval expired |
 | `approval_cancelled` | 409 | replay after cancellation (`cancelled_by_client`, `token_revoked`, `scope_revoked`) |
 | `secret_delivery_expired` | 409 | claim after the pickup window (03 currently folds this into `secret_already_claimed`; a distinct code helps agents tell "too late" from "already taken") |
+| `approval_limit_reached` | 429 | a held write would exceed the lineage's pending or daily approval cap (§11.1); `details[].reason` = `pending` \| `daily` |
 
-Subset-rule `details` codes added: `get_all_not_held`, `browser_weaker`, `requester_inactive`. Compile-time (control
-plane only): `scope_not_grantable`, `field_not_hideable`, `unknown_field_path`, `voucher_type_scope_inconsistent`,
+Subset-rule `details` codes added: `get_all_not_held`, `browser_weaker`, `requester_inactive`,
+`public_fields_exposed`. Review flag (control plane, shown to the owner, not an error): `public_exposure`. Owner
+alerts proposed for 05 §3.3: `approval_queue_full`. Compile-time (control plane only): `scope_not_grantable`, `field_not_hideable`, `unknown_field_path`, `voucher_type_scope_inconsistent`,
 `get_all_with_salesman_credential`. Warnings: `rate_limit_approaching` (new), `token_expiring`, `fields_hidden`,
 `parameter_ignored`, `polling_too_frequent` (existing). Combined-endpoint section status `omitted_data_scope` (new).
 
@@ -1471,11 +1608,15 @@ plane only): `scope_not_grantable`, `field_not_hideable`, `unknown_field_path`, 
 6. `GetSalesmen` response shape (Q24), needed to validate `salesmen` allow-set values.
 7. Can an API-only Shamel user be restricted inside Shamel (read-only, no voucher types), as a backstop below
    Bawaba's policy? (complements 02 §20.2 Q5)
+8. `GetCustomerPricesAsRows` (Q25, 03 I-2): can a row have a null or empty `customer_code`, and if so, is it always a
+   general price-class row (with a non-empty `price_class_name`), or can a customer-specific price come back without
+   its customer? Until answered, such rows follow the `@none` rule (§4.4).
 
 ### 17.4 Assumptions
 
 1. One owner (00 §7); "owner" actions are the control plane's, authenticated per 02 §9.8.
 2. Shamel customer codes are account codes usable in `accounts[].account_code` (U §5.9 "customer code (account
    number)"); GL codes cannot be enumerated (Q42).
-3. `CustomerPriceRow` rows without `customer_code` are price-class rows.
+3. `CustomerPriceRow` rows without `customer_code` are **not** assumed to be price-class rows; they are scoped as
+   `@none` for the customer and salesman dimensions (§4.4) until the row model is confirmed (§17.3 question 8).
 4. Mock salesman identities in the sandbox mirror the mock dataset's salesmen (01 §11).
