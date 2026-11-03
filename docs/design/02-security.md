@@ -250,7 +250,7 @@ Every row is covered by the origin-leak suite (§18.3).
 | LV-10 | TLS certificates, SANs and CT logs | A publicly trusted certificate for `origin.<company>.com` appears in CT logs. A raw-IP handshake returns a default certificate naming the host. | Cloudflare Origin CA certificate (not publicly trusted, not CT-logged), or tunnel mode (no origin certificate). The origin TLS server rejects unknown SNI and has no default certificate. Internal CA certificates carry opaque URI SANs (`bawaba://connector/conn_...`), never DNS names or IPs. Shamel's own certificate is seen only by the connector (or the gateway in direct mode). |
 | LV-11 | Timing | Latency reveals auth state, record existence or upstream reachability | Auth happens before any upstream contact. Unknown, revoked and malformed tokens follow one code path. Scope checks happen before the upstream call. A record outside the token's data scope returns the same `not_found` as a non-existent one, after the same upstream fetch. Availability is exposed only as `upstream_unavailable`, `upstream_busy` or `upstream_timeout`. |
 | LV-12 | Connector visibility | Listening ports, banners, discovery protocols on the Shamel LAN | The connector has no listening socket and no discovery protocol. It dials only the tunnel hostname. Its status is visible only in the control plane. Tools never see connector or upstream ids. |
-| LV-13 | Docs, OpenAPI, llms.txt | `servers` pointing upstream, `x-upstream-path`, upstream field names, examples from real captures, product version | Generated from `/v1` types only. Examples come from bawaba-mock data. The backend is called `docs.backend_display_name` (default "accounting system"). The legacy reference is served only to tokens with legacy enabled. CI scans generated docs for forbidden markers. |
+| LV-13 | Docs, OpenAPI, llms.txt | `servers` pointing upstream, `x-upstream-path`, upstream field names, examples from real captures, product version | Generated from `/v1` types only. Examples come from bawaba-mock data. The backend is called `docs.backend_display_name` (default "accounting system"). The legacy reference is served only by the authenticated `GET /v1/docs/legacy` to tokens with legacy enabled, never under the public `/docs` tree (03 §20.5, §18.3 here). CI scans generated docs for forbidden markers. |
 | LV-14 | Logs and usage visible to tools | "Own usage" showing upstream paths, connector ids, upstream latency, raw errors | Tool-visible fields are limited to request id, timestamp, method, `/v1` route template, status, Bawaba error code, total latency and bytes. |
 | LV-15 | Webhook payloads and deliveries | Payload copied from upstream JSON. Delivery source reveals the egress IP. | Rendered by the `/v1` serializer under the subscribing token's policy. Optional egress proxy and SSRF guards (§5.5). |
 | LV-16 | CORS | Upstream `Access-Control-Allow-Origin: *`, or a reflected arbitrary `Origin` | Upstream headers are dropped (OH-1). CORS is emitted only for publishable tokens with an exact-match origin list. Never `*`, never `Access-Control-Allow-Credentials` (§10.7). |
@@ -1097,7 +1097,7 @@ Steps 2 to 8 run against in-memory structures only, so hostile traffic is reject
 | `injection_probe` | CR/LF/NUL or bidi controls in values; encoded traversal, `%`, `\`, `;`, `(` in `/legacy` paths; smuggling-shaped framing; Shamel-native paths at the root (`/Customer/...`); Shamel credential headers on `/legacy` | IP, and (token, IP) when a valid token was used | 3 in 10 min | Ban the IP. The token is **not** suspended by default; see "Token containment" below. |
 | `scanner_paths` | 404 on unknown prefixes (`/.env`, `/wp-admin`, `/phpmyadmin`) | IP | 20 in 10 min | Ban |
 | `rate_abuse` | 429 responses while `Retry-After` is being ignored | IP | 300 in 1 min | Ban |
-| `scope_probe` | 403 `insufficient_scope` | Token | 50 in 10 min | Owner alert and `Bawaba-Warning`. No ban and no throttle: it is usually a buggy tool. |
+| `scope_probe` | 403 `insufficient_scope` | Token | 50 in 10 min | Owner alert and `Bawaba-Warning: repeated_error` (03 §23.4). No ban and no throttle: it is usually a buggy tool. |
 | `enumeration` | 404 `not_found` on single-resource routes | (token, IP) | 200 in 10 min | That (token, IP) pair is throttled to 1 req/s for 10 min; other IPs using the same token are unaffected. Owner alert per token (batched). |
 
 **Token containment.** The token-related signals (`injection_probe`, `scope_probe`, `enumeration`) can be produced
@@ -1256,7 +1256,8 @@ Upstream responses that use gzip are decompressed through a limiter that counts 
 ### 10.9 Security error codes
 
 The API document's catalog owns the messages (`message`, `message_ar`) and `docs_url`. This table fixes the codes and
-statuses that the security layer emits.
+statuses that the security layer emits, including the write-approval and agent-containment codes (§13); every code
+appears in 03 §22.2 with the same status.
 
 | Code | Status | Raised when |
 |---|---|---|
@@ -1276,10 +1277,17 @@ statuses that the security layer emits.
 | `invalid_cursor` | 400 | Cursor fails AEAD or binding |
 | `not_found` / `route_not_found` | 404 | Resource absent or outside the data scope (indistinguishable) / unknown route after authentication |
 | `method_not_allowed` | 405 | – |
+| `cursor_invalidated` | 409 | Cursor used after the token's policy version changed (§9.10) |
+| `approval_rejected`, `approval_expired`, `approval_cancelled` | 409 | Idempotent replay of a held write whose approval was rejected, expired or cancelled (`cancelled_by_client`, `token_revoked`, `scope_revoked`); the write was never sent upstream (03 §15.2, §16; 04 §11.8) |
+| `secret_already_claimed` | 409 | Second claim of an approved token's secret outside the replay window (§13.3) |
+| `secret_delivery_expired` | 409 | Claim after `agents.secret_pickup_window`; the unclaimed secret was destroyed (§13.3) |
 | `payload_too_large`, `uri_too_long`, `headers_too_large` | 413 / 414 / 431 | – |
 | `unsupported_media_type` | 415 | – |
 | `validation_failed`, `upstream_rejected` | 422 | – |
-| `rate_limited` | 429 | – |
+| `duplicate_code` | 422 | Known-pattern business rejection mapped by the classifier (§5.6), therefore 422, not 409 |
+| `rate_limited` | 429 | Per-token bucket (`reads`, `writes` or `upstream`, named in `details[].param`, 03 §23.3), (token, IP) throttle (§10.3) or pre-auth limiter (§10.4) |
+| `access_request_limit_reached` | 429 | Agent token above 20 pending or 50 per day access requests (§13.2) |
+| `approval_limit_reached` | 429 | A held write would exceed the lineage's pending or daily approval cap (`details[].reason` = `pending` \| `daily`; 03 §15.3, 04 §11.1) |
 | `internal_error` | 500 | Bawaba fault (no detail) |
 | `upstream_error`, `upstream_response_too_large` | 502 | §5.6 |
 | `upstream_unavailable`, `upstream_busy`, `service_unavailable` | 503 | §5.6. `service_unavailable` means lockdown or stale policy (§16). |
@@ -1632,7 +1640,10 @@ Retrieval is a `POST` because it changes state; the status `GET` never carries t
   stored secret row is deleted in the same statement that returns it. A retry with the same `Idempotency-Key` within
   `agents.secret_claim_replay_window` (10 min) gets the same body from an idempotency record (purpose `idempotency`,
   bound to the agent's lineage, §9.3); any other later claim is `409 secret_already_claimed`. After the window the row is
-  deleted; the token stays valid and the owner can rotate it. Claims are audited, and a claim from a different IP
+  deleted (`secret.status: expired`), and a claim of a secret that was never claimed returns
+  `409 secret_delivery_expired` (03 §18.3), so an agent can tell "too late" from "already taken". The token stays
+  valid but unusable (nobody holds the secret) until the owner rotates it with owner delivery or revokes it
+  (04 §10.7). Claims are audited, and a claim from a different IP
   than the request raises `token_pickup_anomaly`. Polling the status faster than every 10 s returns
   `Bawaba-Warning: polling_too_frequent`.
 
@@ -1941,6 +1952,14 @@ unit tests. OSS-Fuzz integration comes later.
   - The response header set is a subset of the allowlist.
   - Every error body matches the envelope schema exactly.
   - In connector mode, the gateway's database and audit index contain no canary address (OH-8).
+- **Legacy reference location** (03 §20.5, §24.5): the legacy reference lists upstream-shaped paths and wire names,
+  so it is served only by the authenticated `GET /v1/docs/legacy`.
+  - An anonymous `GET /v1/docs/legacy` returns `401 unauthenticated` with the error envelope and no part of the
+    reference; a valid token without legacy entitlement gets `403 legacy_not_enabled`.
+  - No `/docs` path serves the legacy reference: a crawl of every `/docs` link, both `openapi.{en,ar}.json` files,
+    `llms.txt` and `llms-full.txt` (anonymous and with a legacy-enabled token), plus probes of guessable paths such
+    as `/docs/legacy`, `/docs/v1/legacy` and `/docs/bawaba.legacy.yaml`, finds no content of `bawaba.legacy.yaml`
+    (its paths, operations or schemas) (LV-13).
 
 ### 18.4 Integration and adversarial tests
 
@@ -2086,7 +2105,7 @@ accept (§20.1). The connector's keys are in its own local config.
 | Architecture | **Snapshots** follow 01 §9: one unfiltered, encrypted snapshot per coalesced fetch (AAD `snapshot/<sid>/<chunk_n>`), never exposed directly; token-bound views (AAD `view/<vid>/<token_id>/<policy_version>`) and cursors; S14/S15 applied with the token's current policy on every page; cursors honored only while the token is active and its policy is unchanged (§9.10, 01 §9.7). |
 | Architecture | **Idempotency records** are keyed by token lineage: Valkey `bwb:<t>:idem:<lineage_id>:<sha256(key)>`, AAD `idem/<lineage_id>/<sha256(key)>` (§9.3, §9.10; 03 §15.2; 04 §2.4.5). 01 §6.4 still shows `bwb:<t>:idem:<token>:<key>`; it should use the lineage and the hashed key (`LineageID` is in the compiled policy, 04 §9.1). Views and cursors stay token-bound. |
 | Architecture | **Registry and limits:** `Operation.MaxResponseBytes` by class (§10.6); per-operation upstream budgets of at most 80 s under `server.request_timeout` 90 s; legacy response assembly with spill-to-disk (§10.8). Configuration keys to accept: `security.data_key_file`, `security.audit_epoch`, `security.rotation.*`, `config.blind_staleness`, `http.*` limits of §10.6, `upstreams[].credential_session_mode`. Valkey key `bwb:<t>:credrole:<upstream>:<cred_id>` and the `credrole_changed` event (§7.5). The connector's `hello` advertises its endpoint table; `welcome` carries its credential roles. |
-| API | Error catalog entries (English and Arabic messages, `docs_url`) for every code in §10.9. A code for an expired or invalidated cursor. The public paths list for WAF rule R2. The webhook signature format of §9.9 documented for receivers. The `/v1/media/{id}` presigned contract (§5.4). Public docs must not name the upstream product or version (LV-13). |
+| API | **Resolved in 03, nothing open.** Error catalog entries (English and Arabic messages, `docs_url`) for every code in §10.9 with the same statuses, including the approval and secret-delivery `409`s, `429 approval_limit_reached` and `duplicate_code` as `422` (03 §22.2, §27.1 item 9). Codes for expired and invalidated cursors (`snapshot_expired`, `cursor_invalidated`, `cursor_expired`). The public paths list for WAF rule R2 (03 §6.5). The webhook signature format of §9.9 documented for receivers (03 §17.4). The `/v1/media/{id}` presigned contract (§5.4; 03 §10.6). Public docs do not name the upstream product or version (LV-13; 03 §24.5). The legacy reference only at the authenticated `GET /v1/docs/legacy`, never under `/docs` (03 §20.5), asserted by §18.3. `scope_probe` surfaces to the tool as `Bawaba-Warning: repeated_error` (03 §23.4). Late secret claims return `409 secret_delivery_expired` (03 §18.3). Idempotency keyed by `lineage_id` (03 §15.2), as in §9.3 and §9.10. |
 | Permissions | **Resolved in 04, nothing open.** Atomic expansion of scopes and voucher types into a bitset so the subset rule can be evaluated (04 §3.1, §3.3, §9.1). 04 §10.3 is the authoritative subset rule; its conformance table maps every property of §13.2, including `public_fields_exposed`, the `public_exposure` approval gate (04 §10.5) and agent requests never setting `writes_require_approval=false`. Publishable tokens limited to the 7 business read atoms (04 §13). `access_requests:write` agent-only and never grantable (04 §3.1, §10.3). Per-token IP rules in the policy spec (04 §7; §10.2 here). Auto-suspension per §10.3: never publishable, secret tokens only for probes from inside their allowlist unless opted in (04 §2.4.6). Data-role privileges through `SECURITY DEFINER` functions (04 §10.4, §11.6; §12.4 here). Idempotency namespace by `lineage_id` (04 §2.4.5), adopted in the §9.3 binding and §9.10. `approval_items` encrypted columns and hash names (`payload_sha256`, `upstream_request_sha256`, `approved_upstream_sha256`; 04 §11.2), adopted in §9.3 and §9.10. **Standing:** any change to 04 §10.3 must keep every property of §13.2. |
 | Operations | Backups exclude `master.key` and `data.key` (§9.4, §14). Key backup and restore drills (§9.5), including `bawaba key reissue-data-key` after a restore. The incident runbook commands (§17). The daily security digest with audit anchors (§12.5). Audit encryption (05 §1.4.5) uses epoch DEKs whose key id is the envelope key id, `audit_epoch_keys` retention follows the objects that reference them, and monthly rotation applies to the `audit_seal` key pair (§9.2, §9.6). New alert `token_probe_suspected` (warning, per token) next to `token_auto_suspended`, whose trigger becomes the §10.3 rule. Grants for `audit_epoch_keys` (§12.4). |
 

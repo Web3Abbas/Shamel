@@ -157,7 +157,8 @@ access requests (03 §18.3 `spec`, which adds `name`, `kind`, `environment`, `ex
   "writes_require_approval": true,
   "get_all": false,
   "rate_limit": { "requests_per_minute": 1200, "burst": 300, "writes_per_minute": 60, "writes_burst": 20,
-                  "per_ip_per_minute": null, "mode": "enforce" }
+                  "upstream_units_per_minute": 600, "upstream_burst": 200,
+                  "per_ip_per_minute": null, "upstream_per_ip_per_minute": null, "mode": "enforce" }
 }
 ```
 
@@ -474,7 +475,7 @@ filters on the same field (e.g. `store_id=9` for a token without store 9 → emp
 | `customers.list`, `customers.get` | – | `F salesman_code` (+ Shamel-side for pinned salesmen) | `F code`, `P Hdr code` | `F currency_code` | `F price_class_id` | – | `get_all` per §6.3 |
 | `customer_balances.list`, `customers.balances` | – | `D` | `F customer_code`, `P Hdr customerCode` | `F currency_code` (row) | – | – | `customers.balances` runs the resolution step first (404 if not visible) |
 | `customer_prices.list`, `customers.prices` | – | `D`; null/empty `customer_code` → `@none` | `F customer_code`; null/empty → `@none` | `F currency_code` | `F price_class_name→id` (live `GetPriceClasses`, coalesced; unmapped name → hidden) | – | rows without a customer follow the `@none` rule (see below the table); `customers.prices` returns only rows of the path customer |
-| `customers.overview` | base as `customers.get` | sections as their operations | | | | | a section that would be `X` is absent with `meta.sections.<s> = "omitted_data_scope"` (proposed addition to 03 §14) |
+| `customers.overview` | base as `customers.get` | sections as their operations | | | | | a section that would be `X` is absent with `meta.sections.<s> = "omitted_data_scope"` (adopted in 03 §14) |
 | `items.list`, `items.get` | `Q store_id` | – | – | `S prices[].currency_code`; `M units[].unit_price` | `S prices[].price_class_id`; `M units[].unit_price` | – | `unit_price` cannot be attributed to a class/currency (provisional, 03 §10.1), so it is masked for tokens restricted on either |
 | `items.get?include=stock`, `items.stock` | `S stock.stores[].store_id`, `total_quantity` over visible rows | – | – | – | – | – | store names filtered by the same set |
 | `items.overview` | `stock` as above | `customer_prices` as that op | | `price_list` as items | `price_list` as items | – | |
@@ -561,7 +562,7 @@ derived checks always perform their lookup, write errors are not an existence or
 | Combined endpoints | Each section evaluated as its own operation; base section first (no other upstream contact for invisible records, 03 §14); unavailable sections absent with a status, never partial. |
 | Vouchers | Atomic visibility (no voucher with lines removed, totals never misstated). |
 | Statements | Allowed wholly or denied (`X`); no row filtering under a running balance. |
-| Webhooks | Evaluated at send/read time with the current policy; hidden-only changes suppressed (05 §2.6). **Scope transitions** are rendered from the token's view: a record entering the token's scope is delivered as `*.created`, one leaving it as `*.removed`. The `removed` reason must be one value for both "deleted upstream" and "left scope" (`no_longer_visible`), so a receiver cannot tell that, e.g., a customer was reassigned to another salesman (requirement on 05 §2.2/§2.6 and 03 §17.2, which currently use `not_returned_by_upstream`). |
+| Webhooks | Evaluated at send/read time with the current policy; hidden-only changes suppressed (05 §2.6). **Scope transitions** are rendered from the token's view: a record entering the token's scope is delivered as `*.created`, one leaving it as `*.removed`. The `removed` reason must be one value for both "deleted upstream" and "left scope" (`no_longer_visible`), so a receiver cannot tell that, e.g., a customer was reassigned to another salesman (adopted in 03 §17.2, §17.7 and 05 §2.2/§2.6). |
 | Subscription filters | `store_ids`, `customer_codes`, … naming out-of-scope values are accepted and match nothing. |
 | Errors | Bawaba messages are static catalogue text; `details` name parameters and atoms, never data values (02 LV-19). |
 | Idempotent replays | A replayed stored response is re-masked with the **current** field mask before sending. |
@@ -1055,6 +1056,7 @@ violations(R, A) -> list
   A.reject_browser_origin and ¬R.reject_browser_origin and R.kind ≠ publishable
                                                                  -> browser_weaker
   R.rpm > A.rpm or R.burst > A.burst or R.wpm > A.wpm or R.writes_burst > A.writes_burst
+     or R.upm > A.upm or R.upstream_burst > A.upstream_burst    # upstream units, §14.1
      or (A.mode = enforce and R.mode = warn_only)                -> rate_higher
   R.kind = publishable: R.Atoms ⊄ business read atoms or origins ∉ 1..10 valid   -> kind_not_allowed
   R.kind = publishable and (PD \ H(R)) \ U ≠ ∅                   -> public_fields_exposed(paths)
@@ -1239,7 +1241,8 @@ agent's *current* compiled policy; (8) one transaction: `tokens`, `token_policie
   the secret is cryptographically unrecoverable. Claims are audited; a claim from a different IP than the request
   raises `token_pickup_anomaly` (05 §3.3).
 - **Undelivered:** on window expiry the token stays valid but unusable by anyone (nobody holds the secret); it is
-  flagged `secret_undelivered` and the owner may rotate it with owner delivery or revoke it (02 §13.3).
+  flagged `secret_undelivered` and the owner may rotate it with owner delivery or revoke it (02 §13.3). A claim
+  after the window returns `409 secret_delivery_expired` (03 §18.3).
 
 ### 10.8 Prompt-injection and approval-fatigue controls
 
@@ -1423,7 +1426,7 @@ candidate vouchers (live `GetVouchers` for the date ± 1 day and customer, match
 |---|---|
 | `202` response | Approval resource with `id`, `status`, `expires_at`, `poll_after_seconds` (03 §15.3). |
 | `GET /v1/approvals/{id}`, `GET /v1/approvals?status=…` | Own lineage only; poll every 30 s (`polling_too_frequent` if faster). |
-| Idempotent replay | Resending the original request with the same key returns `202` with the current state while pending, then the final result: `201` body on `succeeded`; the mapped error on `failed`; `504 write_outcome_unknown` while unknown. For `rejected` / `expired` / `cancelled` this document proposes `409 approval_rejected` / `409 approval_expired` / `409 approval_cancelled` (additions to 03 §22.2). |
+| Idempotent replay | Resending the original request with the same key returns `202` with the current state while pending, then the final result: `201` body on `succeeded`; the mapped error on `failed`; `504 write_outcome_unknown` while unknown. For `rejected` / `expired` / `cancelled`: `409 approval_rejected` / `409 approval_expired` / `409 approval_cancelled` (the idempotency record is finalized as `approval_closed`; nothing was sent to Shamel and a new attempt needs a new key; 03 §15.2, §16, §22.2). |
 | Webhook / pull event | `approval.resolved` (03 §17.2) for final states, delivered only to subscriptions of the same lineage; no read atom required (own data); generated by the executor/control plane directly into `webhook_events`, not by a poll stream (requirement on 05 §2.2). |
 
 ### 11.9 Sandbox approvals
@@ -1484,7 +1487,7 @@ dashboard offers the same as **Promote to live** with the diff preview. A test a
 | Methods | `GET` only; no `/legacy`, no webhooks, no approvals, no `/v1/me/requests` (03 §2.2). |
 | Origins | 1–10 exact origins `https://host[:port]`; `http://localhost[:port]` only for `bwb_pk_test_`; no wildcards, no `null` (02 §10.7, 03 §23.5). |
 | Field hiding | Forced (**PF**): `@cost`, `@gl_accounts`, `@customer_balances`, `@credit_terms`, `@special_prices`, `@national_id`, `@cheques`. Default (**PD**, unhide with `--acknowledge-public`): rest of `@pii`, `@free_text` (§5.3). PF and PD are always applied to agent-requested publishable specs; only the owner can un-hide a PD field, by a later update (§10.3). |
-| Rate limits | 600/min (burst 150) per token **and** 120/min per (token, client IP) (03 §23.3), so one visitor cannot exhaust the page's budget. |
+| Rate limits | Reads 600/min (burst 150) per token **and** 120/min per (token, client IP); upstream units 200/min (burst 60) per token **and** 40/min per (token, client IP) (03 §23.3, §14.1), so one visitor cannot exhaust the page's budget or keep the upstream busy with full-list fetches. |
 | IP rules | Optional. |
 | `/v1/me` | Reduced view (03 §18.1). |
 | Trust | Treated as public: the origin lock stops other websites, not forged `Origin` headers (02 §10.7). |
@@ -1495,31 +1498,52 @@ dashboard offers the same as **Promote to live** with the diff preview. A test a
 
 ### 14.1 Model
 
-GCRA per token in one pipelined Valkey call (01 S6), keys `bwb:<t>:rl:<token_id>:r` (reads), `:w` (writes),
-`:ip:<ip>` (publishable per-IP). Defaults are generous and adjustable (00 §8); they are runtime settings
-`limits.defaults.<kind>` (03 §23.3):
+GCRA per token in one pipelined Valkey call (01 S6), keys `bwb:<t>:rl:<token_id>:r` (reads), `:w` (writes), `:u`
+(upstream units), `:ip:<ip>` and `:u:ip:<ip>` (publishable per client IP, reads and upstream units). Defaults are
+generous and adjustable (00 §8); they are runtime settings `limits.defaults.<kind>.{reads,writes,upstream}`
+(03 §23.3):
 
 | Bucket | `tool` | `agent` | `publishable` |
 |---|---|---|---|
-| reads (per 60 s, burst) | 1200, 300 | 600, 150 | 600, 150 per token; 120 per token per client IP |
-| writes (per 60 s, burst) | 60, 20 | 60, 20 | – |
+| reads (requests per 60 s, burst) | 1200, 300 | 600, 150 | 600, 150 per token; 120 per token per client IP |
+| writes (requests per 60 s, burst) | 60, 20 | 60, 20 | – |
+| upstream (upstream units per 60 s, burst) | 600, 200 | 300, 100 | 200, 60 per token; 40 per token per client IP |
 
-Cost: 1 unit per request (cursor pages included); combined endpoints cost their upstream sub-calls; batches cost
-their operation count in the writes bucket (03 §23.3). Owner overrides: `bawaba token update <id> --rate 3000/m
---burst 600 --writes 120/m`. `mode: warn_only` (owner-only, never via agent requests unless the agent has it) turns
-the token's 429s into warnings for trusted internal automation; the global upstream concurrency cap (01 §7.6) still
-protects Shamel.
+Cost (03 §23.3, authoritative):
+
+- **Reads bucket:** 1 unit per read request, including cursor pages and combined endpoints.
+- **Writes bucket:** 1 unit per Shamel write; a batch costs its operation count. Writes (including their reference
+  pre-checks) consume no upstream units.
+- **Upstream-units bucket:** each read additionally costs the sum of the cost classes of the upstream calls its plan
+  makes, with weights `limits.cost_weights` = `{none: 0, small: 1, report: 5, list: 10}`: `none` for cursor pages,
+  `/v1/me` and Bawaba-owned objects; `small` for keyed lookups by a printable-ASCII code, single-key pushdowns and
+  small reference lists; `report` per statement, last-price report or voucher date-range slice; `list` for a full
+  list or table fetch (page 1 of other snapshot lists, customer prices, the item catalog, non-ASCII code lookups,
+  which also warn `expensive_lookup`). Combined endpoints are charged only for the sections this token will receive,
+  so sections omitted for scope (§3.4) or data scope (`omitted_data_scope`, §4.4) cost nothing. The charge is
+  computed at S6 from the route, the token's policy and the request's shape, before coalescing. Each operation's
+  class is in OpenAPI (`x-bawaba-cost`), the weights in `/v1/me` (`rate_limit.upstream.costs`).
+
+Per-token overrides live in the spec's `rate_limit` object (§2.3): `requests_per_minute`/`burst`,
+`writes_per_minute`/`writes_burst`, `upstream_units_per_minute`/`upstream_burst`, and for publishable tokens
+`per_ip_per_minute`/`upstream_per_ip_per_minute`; `null` takes the kind default. Owner overrides: `bawaba token
+update <id> --rate 3000/m --burst 600 --writes 120/m --upstream 1200/m --upstream-burst 400`. `mode: warn_only`
+(owner-only, never via agent requests unless the agent has it) turns the token's 429s into warnings for trusted
+internal automation; the global upstream concurrency cap (01 §7.6) still protects Shamel.
 
 ### 14.2 Inform first
 
-1. Every authenticated response carries `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` for the bucket
-   the route consumes (03 §23.3).
-2. When `RateLimit-Remaining` falls below `limits.warn_ratio` (20 %) of the limit, the response adds
-   `Bawaba-Warning: rate_limit_approaching;remaining=<n>;reset=<s>` (new code, proposed for 03 §23.4 / 05 §4.2).
+1. Every authenticated response carries `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` for the most
+   constrained bucket the request consumed (lowest `remaining / limit` after the charge); `/v1/me` shows every bucket
+   (03 §23.3).
+2. When a bucket falls below `limits.warn_ratio` (20 %) of its limit, the response adds
+   `Bawaba-Warning: rate_limit_approaching;bucket=<reads|writes|upstream>;remaining=<n>;reset=<s>`, naming the bucket
+   (03 §23.4).
 3. Behavioural warnings (`polling_too_frequent`, `use_webhooks`, `duplicate_request`, …) and `/v1/me` hints explain
    *why* a tool is consuming its budget (05 §4).
-4. Only when the bucket is empty: `429 rate_limited` + `Retry-After`. Ignoring `Retry-After` adds `retry_too_fast`
-   and can lead to an IP ban (02 §10.3).
+4. Only when a bucket is empty: `429 rate_limited` + `Retry-After`, with one `details` entry
+   `{code: "bucket_exhausted", param: "reads" | "writes" | "upstream"}`; nothing is charged to the other buckets
+   (03 §23.3). Ignoring `Retry-After` adds `retry_too_fast` and can lead to an IP ban (02 §10.3).
 5. The owner is told: `rate_limited_sustained` and `abusive_tool` e-mails, dashboard flags (05 §3.3, §4.3), and can
    raise, lower or suspend.
 
@@ -1562,28 +1586,29 @@ protects Shamel.
 
 ## 16. Error and warning codes used here
 
-Existing catalogue codes (03 §22.2): `invalid_token`, `token_expired`, `ip_blocked`, `origin_not_allowed`,
+Catalogue codes (03 §22.2): `invalid_token`, `token_expired`, `ip_blocked`, `origin_not_allowed`,
 `secret_token_in_browser`, `insufficient_scope`, `token_kind_not_allowed`, `legacy_not_enabled`,
 `exceeds_own_grant`, `data_scope_filter_required`, `data_scope_unsupported`, `approval_not_supported_in_legacy`,
 `not_found`, `cursor_invalidated`, `approval_not_pending`, `secret_already_claimed`, `reference_not_found`,
-`validation_failed` (details `required_by_data_scope`, `field_hidden`), `rate_limited`,
-`access_request_limit_reached`, `write_outcome_unknown`.
+`validation_failed` (details `required_by_data_scope`, `field_hidden`), `rate_limited` (detail `bucket_exhausted`,
+`param` = `reads` \| `writes` \| `upstream`), `access_request_limit_reached`, `write_outcome_unknown`.
 
-Proposed additions:
+Codes originating in this document, adopted in 03 §22.2 with these names and statuses:
 
 | Code | Status | When |
 |---|---|---|
-| `approval_rejected` | 409 | idempotent replay of a write whose approval was rejected |
+| `approval_rejected` | 409 | idempotent replay of a write whose approval was rejected (§11.8) |
 | `approval_expired` | 409 | replay after the approval expired |
 | `approval_cancelled` | 409 | replay after cancellation (`cancelled_by_client`, `token_revoked`, `scope_revoked`) |
-| `secret_delivery_expired` | 409 | claim after the pickup window (03 currently folds this into `secret_already_claimed`; a distinct code helps agents tell "too late" from "already taken") |
+| `secret_delivery_expired` | 409 | claim after `agents.secret_pickup_window`, when the unclaimed secret was destroyed (§10.7; distinct from `secret_already_claimed`, so agents can tell "too late" from "already taken") |
 | `approval_limit_reached` | 429 | a held write would exceed the lineage's pending or daily approval cap (§11.1); `details[].reason` = `pending` \| `daily` |
 
-Subset-rule `details` codes added: `get_all_not_held`, `browser_weaker`, `requester_inactive`,
+Subset-rule `details` codes (adopted in 03 §18.3, §22.2): `get_all_not_held`, `browser_weaker`, `requester_inactive`,
 `public_fields_exposed`. Review flag (control plane, shown to the owner, not an error): `public_exposure`. Owner
 alerts proposed for 05 §3.3: `approval_queue_full`. Compile-time (control plane only): `scope_not_grantable`, `field_not_hideable`, `unknown_field_path`, `voucher_type_scope_inconsistent`,
-`get_all_with_salesman_credential`. Warnings: `rate_limit_approaching` (new), `token_expiring`, `fields_hidden`,
-`parameter_ignored`, `polling_too_frequent` (existing). Combined-endpoint section status `omitted_data_scope` (new).
+`get_all_with_salesman_credential`. Warnings (03 §23.4): `rate_limit_approaching` (originated here, parameters
+`bucket`, `remaining`, `reset`), `expensive_lookup` (§14.1), `token_expiring`, `fields_hidden`, `parameter_ignored`,
+`polling_too_frequent`. Combined-endpoint section status `omitted_data_scope` (adopted in 03 §14).
 
 ---
 
@@ -1594,9 +1619,10 @@ alerts proposed for 05 §3.3: `approval_queue_full`. Compile-time (control plane
 | To | Requirement |
 |---|---|
 | 01 Architecture | `Operation.Dimensions` gains `voucher_type`; the registry carries the §4.4 enforcement code per (operation, dimension) and occurrence bits per field. S8 short-circuit rule of §4.3/§9.3 (allow-set-only decisions may skip the upstream call; derived decisions must not). Executor claim/finalise as §11.6. |
-| 01 / 03 | Idempotency namespace, approval visibility and webhook ownership keyed by `lineage_id` (§2.4.5) instead of token id. |
+| 01 Architecture (lineage) | Idempotency namespace, approval visibility and webhook ownership keyed by `lineage_id` (§2.4.5) instead of token id: 01 §6.4 / S11 still shows `bwb:<t>:idem:<token>:<key>` and should use `bwb:<t>:idem:<lineage_id>:<sha256(key)>` (03 §15.2, 02 §9.10). **Resolved in 03** (§2.2, §15.2, §16, §17.3). |
+| 01 Architecture (limits) | Upstream-units bucket (§14.1): a third GCRA key `:u` (and `:u:ip:<ip>` for publishable tokens) charged in the same pipelined S6 script, with the cost computed from the route, policy and request shape (03 §23.3). |
 | 02 Security | **Already adopted in the revised 02:** §10.3 here is the authoritative subset rule (02 §13.2); data-role privileges via the `SECURITY DEFINER` functions of §10.4 and §11.6 (02 §12.4); per-token IP rules in the policy spec (02 §10.2); token containment for auto-suspension (02 §10.3, mirrored in §2.4.6). **Also adopted (second pass):** lineage-keyed idempotency record and AAD `idem/<lineage_id>/<sha256(key)>` (02 §9.3, §9.10); `approval/<approval_id>/<column>` AAD (02 §9.3); hash names `payload_sha256` / `upstream_request_sha256` / `approved_upstream_sha256` (02 §9.10); `public_fields_exposed`, the `public_exposure` gate and "agents never set `writes_require_approval=false`" in 02 §13.2. Nothing open. |
-| 03 API | Add `voucher_types` to the DS map (§4.4) and `/v1/me` `data_scopes`; `@none` member semantics, including customer-price rows without `customer_code` (§4.4; 03 §2.4 and §9.4); `omitted_data_scope` section status; `revoke_token` request type and its target rule (§10.3); the §18.3 field table: publishable requests always get the PD hides, and `writes_require_approval: false` in a request is `approval_weaker`; violation codes `get_all_not_held`, `browser_weaker`, `requester_inactive`, `public_fields_exposed`; error codes of §16 (incl. `429 approval_limit_reached` on held writes, 03 §15.3/§16); `orders.status` requires `order_code` for store- and currency-restricted tokens too (03 §12.5 lists customer and salesman only); webhook `*.removed` reason `no_longer_visible` (§4.7); I-2 gains §17.3 question 8. |
+| 03 API | **Resolved in the final 03, nothing open:** `voucher_types` in the DS map and `/v1/me` `data_scopes`, `@none` member semantics including customer-price rows without `customer_code` (03 §2.4 DS-10, §9.4, §18.1); `omitted_data_scope` section status (03 §14); `revoke_token` request type and its target rule, publishable requests always getting the PD hides, `writes_require_approval: false` as `approval_weaker` (03 §18.3); violation codes `get_all_not_held`, `browser_weaker`, `requester_inactive`, `public_fields_exposed` (03 §22.2); the §16 error codes with the same names and statuses, including `409 secret_delivery_expired` and `429 approval_limit_reached` (03 §15.3, §16, §18.3, §22.2); `order_code` required for store-, salesman-, customer- and currency-restricted tokens on `orders.status` (03 §12.5); webhook `*.removed` reason `no_longer_visible` (03 §17.2, §17.7); ISCO I-2 carries §17.3 question 8 (03 §27.3); lineage-keyed idempotency and approval visibility (03 §15.2, §16); `rate_limit_approaching` with `bucket` (03 §23.4). The upstream-units bucket originates in 03 §23.3 and is adopted in §14.1. |
 | 05 Operations | `large_unfiltered_request.records` and `stock.bulk_changed.changed_rows`/`store_ids` per token over visible rows; scope-transition rendering (§4.7); `approval.resolved` events generated outside poll streams; `rate_limit_approaching` warning; `error_code` dimension in usage rollups; **sandbox approvals** on a separate dashboard page and CLI filter, excluded from `write_approval_pending` (live only) and from live badge counts, digest count only (§11.9); new alert `approval_queue_full` (§11.1); access-request review page with the `public_exposure` banner and acknowledgement checkbox, and `--acknowledge-public` on `access-request approve` (§10.5); `token_auto_suspended` / `token_probe_suspected` per the containment rule (§2.4.6); CLI additions `token explain`, `token diff`, `token create --mirror`, `approval resolve`, `approval list --env test`, sandbox bulk approve/reject, `access-request approve --narrow` (exists), `token revoke --cascade`. **The 05 §7.4 example** (`--profile agent-test request-token … --env live`) contradicts the subset rule (a test agent cannot request a live token, 00 §6 "never more than its own token holds"; 02 §13.2; 03 §18.3); it should use a live agent profile or `--env test`. |
 
 ### 17.2 Reconciliation notes
@@ -1609,6 +1635,11 @@ alerts proposed for 05 §3.3: `approval_queue_full`. Compile-time (control plane
 - **Snapshots (resolved):** one unfiltered snapshot per coalesced fetch, read only through token-bound views and
   cursors, policy applied per page (01 §9, 02 §9.10, §4.7 here).
 - **Approval hash names (resolved):** 02 §9.3/§9.10 now use this document's names (`payload_sha256`, `upstream_request_sha256`, `approved_upstream_sha256`), the `approval/<approval_id>/<column>` AAD binding and lineage-keyed idempotency.
+- **Error codes (resolved):** the codes this document proposed (§16) are in 03 §22.2 and 02 §10.9 with the same
+  names and statuses; `duplicate_code` is `422` (02 §5.6, known-pattern business rejection).
+- **Rate-limit cost model (resolved):** this document's earlier "1 unit per request; combined endpoints cost their
+  sub-calls" is replaced by 03 §23.3's reads bucket (1 unit per request, combined endpoints included) plus the
+  per-token upstream-units bucket (§14.1); the subset rule compares the upstream fields too (§10.3, `rate_higher`).
 - **Credential custody:** connector mode keeps credentials sealed to the connectors and the Shamel session on the
   connector (02 §7.5, a 02 designer decision); 01 §7.1 still describes gateway-held sessions. Authorization is
   unaffected either way because tokens bind to `cred_id` (§6.1).

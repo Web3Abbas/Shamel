@@ -1528,10 +1528,10 @@ integration guide to the agent building it.
 
 | Artifact | URL | Content |
 |---|---|---|
-| `llms.txt` | `/docs/llms.txt` | llmstxt.org format: one-paragraph summary (base path, auth header, sandbox first, rules), links to the Markdown pages below and to the OpenAPI JSON |
+| `llms.txt` | `/docs/llms.txt`, alias `/llms.txt` (exact public path, 02 §10.1, 03 §6.5) | llmstxt.org format: one-paragraph summary (base path, auth header, sandbox first, rules), links to the Markdown pages below and to the OpenAPI JSON |
 | `llms-full.txt` | `/docs/llms-full.txt` | All English guides + condensed reference (every operation: method, path, scopes, parameters, response fields, errors, poll interval, webhook alternative) + error and warning catalogues + event catalogue, as one Markdown file (target < 500 KB) |
 | Markdown pages | `/docs/en/…/*.md`, `/docs/ar/…/*.md` | every HTML guide page has a raw Markdown twin |
-| OpenAPI 3.1 | `/docs/v1/openapi.en.json`, `/docs/v1/openapi.ar.json` | with `x-bawaba-scopes`, `x-bawaba-poll-interval`, `x-bawaba-webhook-events`, `x-bawaba-snapshot`, `x-bawaba-warnings`, `x-bawaba-errors` on each operation |
+| OpenAPI 3.1 | `/docs/v1/openapi.en.json`, `/docs/v1/openapi.ar.json` | with `x-bawaba-scopes`, `x-bawaba-poll-interval`, `x-bawaba-webhook-events`, `x-bawaba-snapshot`, `x-bawaba-cost`, `x-bawaba-warnings`, `x-bawaba-errors` on each operation (03 §24.3) |
 | AI integration guide | `/docs/{lang}/guides/ai-integration` | below |
 
 **AI integration guide — outline**
@@ -1553,7 +1553,8 @@ integration guide to the agent building it.
 | Anti-pattern | Harm | Do instead |
 |---|---|---|
 | Polling full lists every few seconds | load on the accounting server, `polling_too_frequent` | webhooks / pull events / `updated_since` |
-| Listing all customers to find one | large transfers | `GET /v1/customers/{code}` or filters |
+| Listing all customers to find one | large transfers; 10 upstream units per page 1 instead of 1 | `GET /v1/customers/{code}` or filters |
+| Ignoring `expensive_lookup` / the upstream-units bucket | `429` on the `upstream` bucket while request counts look low | keyed lookups by ASCII codes, cursors instead of re-fetching page 1, webhooks |
 | N+1 loops (one request per row) | many round trips | list filters, combined endpoints |
 | Ignoring `next_cursor`, re-requesting page 1 with a bigger `limit` | repeated live fetches | follow the cursor within the TTL |
 | One poller per browser tab or per user | multiplies traffic | shared backend poller |
@@ -1588,7 +1589,7 @@ ids, IPs or customer codes ever. Per-token series are opt-in (`metrics.per_token
 | Security | `bawaba_auth_failures_total` | counter · `reason` (missing, malformed, unknown, revoked, expired) |
 | | `bawaba_firewall_blocks_total` | counter · `reason` (deny, ban, not_allowlisted, preauth_budget, token_ip) |
 | | `bawaba_bans_active` | gauge |
-| | `bawaba_rate_limited_total`, `bawaba_warnings_total` | counter · `kind` ; counter · `code` |
+| | `bawaba_rate_limited_total`, `bawaba_warnings_total`, `bawaba_upstream_units_total` | counter · `bucket` (reads, writes, upstream) ; counter · `code` ; counter · `class` (small, report, list) |
 | | `bawaba_origin_guard_blocks_total` | counter · `op` |
 | Upstream | `bawaba_upstream_requests_total` | counter · `upstream`, `shamel_op`, `outcome`, `class` (interactive, write, background) |
 | | `bawaba_upstream_duration_seconds` | histogram · `upstream`, `shamel_op`, `outcome` |
@@ -1598,10 +1599,10 @@ ids, IPs or customer codes ever. Per-token series are opt-in (`metrics.per_token
 | | `bawaba_upstream_logins_total`, `bawaba_upstream_retries_total`, `bawaba_upstream_schema_drift_total` | counters (01 §7) |
 | Tunnel | `bawaba_tunnel_sessions`, `bawaba_tunnel_streams_inflight`, `bawaba_tunnel_reconnects_total`, `bawaba_relay_requests_total`, `bawaba_connector_shamel_reachable` | gauges/counters · `upstream`, `connector` |
 | Coalescing / snapshots | `bawaba_coalesce_total{result}`, `bawaba_snapshot_bytes`, `bawaba_snapshots_created_total`, `bawaba_snapshot_expired_total`, `bawaba_views_active` | 01 §9 |
-| Audit | `bawaba_audit_queue_depth`, `bawaba_audit_events_total{result=stored\|spilled\|rejected\|metadata_only}`, `bawaba_audit_lag_seconds`, `bawaba_audit_wal_bytes`, `bawaba_audit_spool_bytes`, `bawaba_audit_bytes_total{stage=raw\|unique\|stored,class}`, `bawaba_audit_dedup_hits_total{class}`, `bawaba_audit_pg_copy_seconds`, `bawaba_audit_pack_put_seconds`, `bawaba_audit_storage_bytes{store}`, `bawaba_audit_gc_deleted_bytes_total` | |
-| Webhooks | `bawaba_webhook_cycle_seconds{detector}`, `bawaba_webhook_last_success_timestamp{detector}`, `bawaba_webhook_events_total{type}`, `bawaba_webhook_deliveries_total{result}`, `bawaba_webhook_delivery_seconds`, `bawaba_webhook_pending`, `bawaba_webhook_dead` | |
+| Audit | `bawaba_audit_queue_depth`, `bawaba_audit_ring_bytes`, `bawaba_audit_events_total{result=stored\|spilled\|rejected\|metadata_only\|blocked_aggregated}`, `bawaba_audit_lag_seconds`, `bawaba_audit_wal_bytes`, `bawaba_audit_spool_bytes`, `bawaba_audit_bytes_total{stage=raw\|unique\|stored,class}`, `bawaba_audit_dedup_hits_total{class}`, `bawaba_audit_pg_copy_seconds`, `bawaba_audit_pack_put_seconds`, `bawaba_audit_storage_bytes{store}`, `bawaba_audit_gc_deleted_bytes_total` | |
+| Webhooks | `bawaba_webhook_cycle_seconds{detector}`, `bawaba_webhook_last_success_timestamp{detector}`, `bawaba_webhook_events_total{type}`, `bawaba_webhook_deliveries_total{result}`, `bawaba_webhook_delivery_seconds`, `bawaba_webhook_delivery_bytes_total`, `bawaba_webhook_pending`, `bawaba_webhook_dead`, `bawaba_webhook_target_requests_pending` | |
 | Alerts | `bawaba_alerts_fired_total{alert,severity}`, `bawaba_alert_emails_total{result}` | |
-| Runtime | `bawaba_build_info{version,commit}`, `bawaba_config_version`, `bawaba_config_age_seconds`, `bawaba_degraded{function}`, `bawaba_clock_skew_seconds`, `bawaba_valkey_rtt_seconds`, `bawaba_pg_pool_*`, Go and process collectors | |
+| Runtime | `bawaba_build_info{version,commit}`, `bawaba_config_version`, `bawaba_config_age_seconds`, `bawaba_degraded{function}` (incl. `blind`), `bawaba_clock_skew_seconds`, `bawaba_valkey_rtt_seconds`, `bawaba_pg_pool_*`, Go and process collectors | |
 
 Connectors have no listening port; they push their counters (requests, errors, Shamel RTT, version) over the tunnel
 control stream every 30 s and the gateway re-exports them with the `connector` label.
@@ -1639,7 +1640,7 @@ control stream every 30 s and the gateway re-exports them with the `connector` l
 |---|---|---|---|
 | `/healthz` | `public` | constant answer independent of upstream and dependency state (02 LV-17); still answered in lockdown (02 §16); usable by external probes such as Cloudflare Load Balancing | `{"status":"ok"}` |
 | `/healthz` | `ops` (private) | liveness: process up and internal watchdog ticked in the last 10 s; deliberately **no** dependency checks (a PostgreSQL outage must not cause restart loops) | `{"status":"ok"}` |
-| `/readyz` | `ops` (private) | readiness: compiled config loaded and younger than `config.max_staleness`, master key loaded, not draining, clock skew < 30 s, audit not rejecting. PostgreSQL/Valkey failures report `degraded` but stay ready (01 §13), except at startup. **Upstream state is not an input**: when Shamel is down nodes stay in rotation and answer `503 upstream_unavailable` with `Retry-After`. | `{"status":"ready","checks":{"config":"ok","postgres":"ok","valkey":"degraded","audit":"ok","clock":"ok"}}` |
+| `/readyz` | `ops` (private) | readiness: compiled config loaded and younger than `config.max_staleness` (6 h), the plane's own key file loaded and verified (`data.key` on data nodes, 02 §9.4), not draining, clock skew < 30 s, audit not rejecting, and not **blind** for longer than `config.blind_staleness` (5 min: neither PostgreSQL nor Valkey reachable, so no revocation can arrive by any path, 02 §16; the node answers 503 on authenticated routes then, so it should also leave the load balancer). Either PostgreSQL or Valkey failing alone reports `degraded` but stays ready (01 §13), except at startup. **Upstream state is not an input**: when Shamel is down nodes stay in rotation and answer `503 upstream_unavailable` with `Retry-After`. | `{"status":"ready","checks":{"config":"ok","postgres":"ok","valkey":"degraded","audit":"ok","clock":"ok"}}` |
 
 No health endpoint reveals versions, hostnames, upstream reachability or latency; the private ones add only the
 coarse check names above. Upstream and connector health are visible only in the dashboard, CLI and metrics. Load
@@ -1658,13 +1659,15 @@ balancers inside topology C probe the private `/readyz`.
 
 | Table | Grain | Retention | Source |
 |---|---|---|---|
-| `usage_1m` | (tenant, token, op, status_class, env, minute): count, errors, bytes_out, latency buckets (35 exponential buckets 1 ms–120 s, `int4[]`, mergeable by addition), warnings count | 14 d | node aggregators every 10 s (01 §5.6) |
+| `usage_1m` | (tenant, token, op, status_class, error_code, env, minute): count, errors, bytes_out, upstream units charged (03 §23.3), latency buckets (35 exponential buckets 1 ms–120 s, `int4[]`, mergeable by addition), warnings count per code, coalesced followers, cursor pages, writes held for approval, 429 count per bucket, minimum `RateLimit-Remaining` ratio (04 §8 measures) | 14 d | node aggregators every 10 s (01 §5.6) |
 | `usage_1h` | same, hourly | 400 d | rollup job |
 | `usage_1d` | same, daily | 5 y | rollup job |
 | `upstream_1m` / `upstream_1h` | (upstream, shamel_op, outcome, class, minute/hour) | 14 d / 400 d | upstream client |
 
-`tokens.last_used_at` is updated from the flush (max). These tables back the dashboard's usage analytics,
-`bawaba usage`, `/v1/me` and the stale-token flagger.
+Webhook deliveries are recorded in the same tables under the pseudo-operation `webhooks.deliver` (count, bytes out,
+failures as errors), so a token's webhook egress shows next to its request volume (§2.7.4). `error_code` comes from
+the closed catalogue, so its cardinality is bounded. `tokens.last_used_at` is updated from the flush (max). These
+tables back the dashboard's usage analytics, `bawaba usage`, `/v1/me` and the stale-token flagger.
 
 ---
 
@@ -1697,7 +1700,8 @@ The security controls are specified in 02 (§9.8, §12.1, §12.2, §12.5); the d
   `SameSite=Strict`), id rotated at login and step-up, 30 min idle / 12 h absolute, stored hashed server-side,
   revocable with `bawaba owner sessions revoke`.
 - **Step-up** (password, plus TOTP if enabled, within `control.stepup_window` = 5 min) gates the 02 §12.5 list:
-  approving access requests and queued writes, creating or promoting live tokens, firewall edits, connector
+  approving access requests and queued writes, creating or promoting live tokens, (here also) approving webhook
+  target hosts, firewall edits, connector
   kill/confirm, key operations, owner settings and audit decryption (body view, `--decrypt` search, export with
   bodies). The dashboard asks inline and resumes the action.
 - **Rendering of untrusted text** (agent-written reasons, business data in bodies) follows 02 §12.2: escaped, shown
@@ -1721,18 +1725,19 @@ The security controls are specified in 02 (§9.8, §12.1, §12.2, §12.5); the d
 
 | Page | Shows | Actions |
 |---|---|---|
-| **Overview** | live req/min, error rate, p95; upstream health per upstream (breaker, connector sessions, queue); pending access requests and write approvals (badges also in the header); firing alerts; flagged tokens; audit pipeline (lag, spool) and storage vs caps; webhook health | jump to any item |
-| **Tokens** | list with filters (kind, environment, status, preset, flags, last used, unused ≥ 90 d, expiring); detail: scopes, voucher-type writes, data scope, hidden fields, IP allowlist, origins, legacy routes, approval-queue setting, pinned identity, expiry, usage charts, behaviour tab, recent requests | create (wizard with presets; token shown once with copy button), edit policy (diff preview before save), suspend/resume, revoke, rotate (issue new + revoke old after a grace), view in audit |
-| Tokens › Presets | read-only, write-only, custom presets and which tokens use them | create/edit/delete presets |
-| **Access requests** | queue from agent tokens; requested vs requesting-agent's own grants (an agent can never exceed its own), reason, environment | approve (optionally narrowed), reject with reason (visible to the agent) |
-| **Write approvals** | pending writes rendered as business documents (voucher type, customer, lines, totals, currency) plus raw JSON; requesting token; expiry | approve, reject; view executed result and Shamel reference id |
+| **Overview** | live req/min, error rate, p95; upstream health per upstream (breaker, connector sessions, queue); pending access requests, **live** write approvals and webhook target requests (badges also in the header; sandbox approvals are never counted in badges, 04 §11.9); firing alerts; flagged tokens; audit pipeline (lag, spool) and storage vs caps; webhook health | jump to any item |
+| **Tokens** | list with filters (kind, environment, status, preset, flags, last used, unused ≥ 90 d, expiring); detail: scopes, voucher-type writes, data scope, hidden fields, IP allowlist, origins, legacy routes, approval-queue setting, pinned identity, expiry, usage charts, behaviour tab, recent requests | create (wizard with presets; token shown once with copy button), edit policy (diff preview before save), suspend/resume, revoke (optionally cascading to agent-born tokens), rotate (issue new + revoke old after a grace), **promote to live** (`--mirror`, diff preview), policy history diff and "explain decision" (04 §9), view in audit |
+| Tokens › Presets | built-in presets (`read_only`, `write_only`, `full_access`, `sales_dashboard`, `stock_monitor`, 04 §3.5), custom presets and which tokens use them | create/edit/delete presets |
+| **Access requests** | queue from agent tokens; machine-generated diff of requested vs requesting-agent's own grants (an agent can never exceed its own) with the live subset-rule result; the agent's reason shown apart, labelled untrusted; environment. Requests flagged `public_exposure` (publishable token with `customers:read`, `vouchers:read` or `reports:read`) show a bilingual banner above the diff ("Publicly readable data: anyone who can load the page can read these resources" / Arabic), listing atoms, visible fields and origins (04 §10.5) | approve (optionally narrowed, step-up); a `public_exposure` request needs a separate, unticked-by-default acknowledgement checkbox and can never be bulk-approved (widening requests neither); reject with reason (visible to the agent); bulk reject |
+| **Write approvals** (live) | pending **live** writes rendered as business documents (voucher type, customer, lines, totals, currency, live context, risk flags, 04 §11.4) plus raw JSON; requesting token; expiry; outcome-unknown items to reconcile | approve (step-up), reject; resolve outcome-unknown items (`approval resolve`); view executed result and Shamel reference id |
+| **Sandbox approvals** | test-token write approvals only (never mixed into the live list, badges or risk views); expire after `approvals.sandbox_ttl` (24 h) (04 §11.9) | approve, reject, **bulk** approve/reject (all, per token, or older than an age; sandbox only, since these items can reach only bawaba-mock) |
 | **Upstreams & connectors** | upstreams (mode, timezone, concurrency, timeouts), Shamel credentials (passwords never shown; direct-mode base URL masked unless revealed with step-up, 02 §14; last login), connectors (status, version, sessions, last probe, certificate expiry) | edit settings, set credential, test login, calibrate, enroll connector (one-time code + SAS confirmation, 02 §7.3), suspend / kill / revoke connector |
 | **Firewall** | global allow/deny CIDRs, per-token allowlists summary, active bans (auto/manual, reason, expiry, hits), auth-failure heatmap by prefix | add/remove rules, ban/unban, "explain verdict for IP" |
 | **Audit explorer** | search form (§1.10), results table, detail view (metadata, decision trace, timing waterfall, upstream calls, linked follower/cursor rows), body viewer and diff | decrypt body (step-up), deep search, export |
 | **Usage analytics** | requests/errors/latency by token, operation, time; top consumers; warnings by code; behaviour scores | drill into token / audit |
-| **Webhooks** | subscriptions (all tokens), poll streams (state, last cycle, duration, watermark, next run), events browser, deliveries and dead letters | pause/resume/disable subscription, replay deliveries, run detector now, re-baseline stream |
+| **Webhooks** | subscriptions (all tokens), **target requests** and approved target hosts (§2.7.4), poll streams (state, last cycle, duration, watermark, next run, identity-shared or per identity), events browser, deliveries and dead letters, webhook egress per token | approve/reject target requests (step-up), pause/resume/disable subscription, replay deliveries, run detector now, re-baseline stream |
 | **Alerts** | rules (enabled, thresholds, severity), recipients, digest and quiet-hours settings, silences, alert history and firing instances | edit rules, add recipients, silence, send test mail |
-| **System** | nodes (roles, version, config version, load), schema version, key status (key versions per purpose, rotation dates, key backup verified), backups and drills (last/next, sizes), storage (PostgreSQL, blob, caps), partitions, sandbox (seed, dataset version), owner session list, lockdown state | maintenance mode, lockdown on/off, sandbox reset, trigger backup, key operations, revoke sessions |
+| **System** | nodes (roles, version, config version, load, blind/degraded state), schema version, key status (`master.key` and `data.key` ids and check values, KEK and key versions per plane and purpose, `audit_seal` pairs, epoch keys per node, rotation dates, master-key backup verified), audit metadata mode and ingest vs rating, backups and drills (last/next, sizes), storage (PostgreSQL, blob, caps), partitions, sandbox (seed, dataset version), owner session list, lockdown state | maintenance mode, lockdown on/off, sandbox reset, trigger backup, key operations, revoke sessions |
 
 ---
 
@@ -1795,7 +1800,7 @@ scripts. Commands quoted in 02 (§10.3, §12, §13.3, §17) appear here unchange
 
 ```text
 bawaba
-├── init [--reinitialize]                  first-time setup: master key file, install id, DB roles, owner password
+├── init [--reinitialize]                  first-time setup: master.key + data.key (02 §9.4), install id, DB roles, owner password
 ├── migrate up | status | to <version>     schema migrations (bawaba_migrate role, §9.6)
 ├── doctor [--smtp]                   [A]  health checks (§7.5); remote: connectivity, token, clock, limits
 ├── version                           [A]
@@ -1808,24 +1813,38 @@ bawaba
 ├── usage [--token] [--op] [--window 24h|7d|30d] [--by op|status|hour]   [A: own token only]
 ├── api <METHOD> <path> [--data @file] [--header k:v]   [A]  authenticated raw call, pretty JSON, prints warnings
 ├── docs llms | llms-full | openapi [--lang ar|en] | open <page>   [A]
-│   ├── legacy [--out file]          [A]  token-gated legacy passthrough reference (legacy-enabled tokens; owner)
+│   ├── legacy [--out file]          [A]  legacy passthrough reference: GET /v1/docs/legacy with a legacy-enabled
+│   │                                     token (entitled endpoints only); owner mode prints the full reference
 │   └── lint [dir]                        upstream-leak lint of built docs (CI, doctor)
 ├── token
 │   ├── create --name --kind tool|agent|publishable --env live|test [--confirm-live] [--preset] [--scopes …]
 │   │          [--voucher-writes order,receipt] [--data-scope store=1,2 salesman=S01 …] [--hide-fields …]
 │   │          [--ip-allow CIDR…] [--origins https://…] [--legacy route…] [--approval-queue]
-│   │          [--credential <cred_id>] [--expires 2027-06-30] [--rate 1200/m] [--out file]
+│   │          [--credential <cred_id>] [--expires 2027-06-30] [--rate 1200/m] [--writes 60/m]
+│   │          [--upstream-units 600/m] [--out file]          (the three buckets of 03 §23.3)
+│   │          [--acknowledge-public]       (publishable tokens with customers/vouchers/reports read, 04 §13)
+│   ├── create --mirror <test-token-id> --env live --name … [--credential <cred_id>] [--drop-unknown]
+│   │                                      promote a sandbox tool to live (04 §12); the dashboard's "Promote to live"
 │   ├── list [--kind] [--env] [--status] [--flag buggy_pattern|unused] [--expiring 7d] [--sort last_used]
 │   ├── show <id> | update <id> [create flags] | suspend <id> | resume <id>
-│   ├── revoke <id> | --all | --kind agent --all  [--reason …] [--emergency]   (--emergency: 01 §5.4)
+│   ├── diff <id> --from <v> --to <v>      policy version diff (04 §9.6)
+│   ├── explain <id> --op <operation> [--param k=v]   why a request would be allowed, filtered or denied (04 §9.7)
+│   ├── revoke <id> | --all | --kind agent --all  [--reason …] [--emergency] [--cascade]
+│   │                                      (--emergency: 01 §5.4; --cascade: also tokens born from the agent's requests)
 │   └── rotate <id> [--grace 24h]          issue replacement, revoke old after grace
 ├── preset list | show | create | update | delete
 ├── request-token --scopes … [--env test|live] [--reason …] --wait   [A]  agent shortcut (02 §13.3): generates an
-│                                          X25519 key, files the access request, polls (≥ 10 s), decrypts, prints once
+│                                          X25519 key, files the access request, polls (≥ 10 s), decrypts, prints once;
+│                                          --env never exceeds the calling agent's own environment (04 §10.3)
 ├── access-request
-│   ├── list [--status pending] | show <id> | approve <id> [--narrow …] | reject <id> --reason
+│   ├── list [--status pending] | show <id> | reject <id> --reason | reject --all-pending [--token <agent>] --reason
+│   ├── approve <id> [--narrow '<json>'] [--acknowledge-public]   step-up; --acknowledge-public required for
+│   │                                      requests flagged public_exposure (exit 2 without it); never bulk (04 §10.5)
 │   └── [A] create … | list | show <id> | cancel <id> | wait <id> [--timeout 30m]
-├── approval list [--status pending] | show <id> | approve <id> | reject <id> --reason
+├── approval                               live write approvals by default (04 §11)
+│   ├── list [--status pending] [--env live|test] | show <id> | approve <id> | reject <id> --reason
+│   ├── resolve <id> --succeeded --reference-id <ref> | --failed --note …   reconcile outcome_unknown (04 §11.7)
+│   └── bulk approve|reject --env test [--token <id>] [--older-than 2h] [--all]   sandbox approvals only (04 §11.9)
 ├── firewall
 │   ├── allow add <cidr> [--token <id>] [--note] [--expires] | remove <rule-id> | list [--token]
 │   ├── deny  add <cidr> [--token <id>] [--note] [--expires] | remove <rule-id> | list [--token]
@@ -1833,7 +1852,7 @@ bawaba
 │   ├── bans list [--active] [--auto|--manual]
 │   ├── explain <ip> [--token <id>]        which rule or ban decides, and why
 │   └── ip allow|deny|ban|unban …          aliases of the commands above
-├── upstream list | show | create | update | disable | test | calibrate <id>
+├── upstream list | show | create | update | disable | test | calibrate <id> [--scoping]   (--scoping: §2.3)
 │   └── credential list | set <cred_id> | add | remove | test-login | set-default   (alias: identity)
 ├── connector create --upstream <id> --name <n>   (alias: enroll)   one-time enrollment bundle/code (01 §8.2, 02 §7.3)
 │   └── confirm <id> --sas <code> | list | status [<id>] | suspend | resume | kill <id>|--all | revoke <id>
@@ -1851,13 +1870,16 @@ bawaba
 │   ├── stats [--window 7d]                volumes, dedup ratios, storage vs caps
 │   ├── verify-chain [--since …]           integrity chain vs anchors (§1.9)
 │   ├── retention show | set <class> <duration> | reapply [--recompute]
-│   └── gc [--now] ;  rehydrate --since --until ;  blobs reindex [--check] ;  gaps
+│   └── gc [--now] ;  rehydrate --since --until ;  blobs reindex [--check] [--to-index] ;  gaps
 ├── webhook
 │   ├── list | show | pause | resume | disable | delete          (owner: all tokens)
 │   ├── [A] create | list | show | update | delete | test | rotate-secret   (own; webhooks:write / webhooks:read)
 │   ├── rotate-secret --all                (02 §17)
 │   ├── events list [--type] [--since] [--follow] | show <evt>     [A: own pull subscriptions]
 │   ├── deliveries list [--subscription] [--state dead] | show | retry <whd> | replay --subscription --since
+│   │                                      (every re-send is marked: Bawaba-Delivery-Replay, signed replayed_at)
+│   ├── targets list [--pending] | approve <host> --token <id> | reject <request-id> --reason | remove <host> --token <id>
+│   │                                      owner approval of push target hosts per token (§2.7.4; step-up)
 │   └── streams list | status <id> | run-now <id> | rebaseline <id>
 ├── alerts
 │   ├── list [--firing]                    (02 §17) ;  history
@@ -1865,10 +1887,16 @@ bawaba
 │   ├── recipients list | add | remove
 │   ├── silence --alert <id> [--subject …] --for 2h --reason … ;  silences [--remove <id>]
 │   └── test [--severity critical]
-├── key status
-│   ├── export --format paper | --shares 3 --threshold 2 ;  verify --file <backup> [--record]   (02 §9.5)
-│   ├── restore --file <backup>            place the master key file on a new host (§9.3)
-│   └── rotate-master | retire-master <id> | rotate-kek | rotate-dek --purpose <p>|--all | rotate-pepper [--list-affected]
+├── key status                             both key files (ids, kcv), KEK/key versions per plane, audit_seal pairs,
+│   │                                      epoch keys per node, master-key backup verification
+│   ├── export --format paper | --shares 3 --threshold 2 ;  verify --file <backup> [--record]   (02 §9.5; master.key only)
+│   ├── restore --file <backup>            write master.key on a new host (§9.3)
+│   ├── reissue-data-key                   new data.key from the control plane, KEK_data rewrapped (alias of rotate-data-key;
+│   │                                      after a restore or a lost data.key, 02 §9.5)
+│   ├── rotate-master | retire-master <old_key_id> | rotate-data-key
+│   ├── rotate-kek [--plane control|data] | rotate-dek --purpose <p> | --plane <p> | --all
+│   │                                      (--purpose audit_seal rotates the audit sealing pair now instead of monthly)
+│   └── rotate-pepper [--list-affected]
 ├── backup create [--target] | list | verify <id> | prune | blobs sync [--target] [--reverse]
 ├── restore --from <backup-id|path> [--target-dsn …] [--verify-only] ;  restore drill
 ├── sandbox status | reset [--token <id>] | set-seed <n> [--dataset-version <v>]   [A: reset own namespace]
@@ -1882,7 +1910,7 @@ bawaba
 
 ```console
 # Owner, on the server: create a sandbox tool token for an AI-built dashboard
-$ sudo bawaba token create --name sales-dashboard --kind tool --env test --preset read-only \
+$ sudo bawaba token create --name sales-dashboard --kind tool --env test --preset read_only \
     --scopes customers:read,items:read,stock:read --data-scope store=1,2 \
     --hide-fields items.purchase_price --out /root/sales-dashboard.token --json
 {"data":{"id":"tok_01JBX4…","name":"sales-dashboard","kind":"tool","environment":"test",
@@ -1897,12 +1925,20 @@ $ sudo bawaba approval show apr_01JBX5… && sudo bawaba approval approve apr_01
 # Ban an address for a day (documentation range)
 $ sudo bawaba firewall ban 203.0.113.7 --duration 24h --reason "credential stuffing"
 
-# AI agent, remote mode: inspect own usage and advice, then request a live token
+# AI agent (test agent token), remote mode: inspect own usage and advice, then request a sandbox tool token
 $ bawaba --profile agent-test me --json
-$ bawaba --profile agent-test request-token --scopes items:read,stock:read --env live \
-    --reason "Dashboard tested in sandbox; warnings clean for 24 h" --wait --out ~/.config/bawaba/inventory.token
+$ bawaba --profile agent-test request-token --scopes items:read,stock:read --env test \
+    --reason "Inventory dashboard for the sandbox" --wait --out ~/.config/bawaba/inventory-test.token
 $ echo $?    # 0 approved and delivered, 5 rejected, 12 timed out
+
+# Owner, on the server, once the sandbox tool is trusted: promote it to live (diff preview, step-up)
+$ sudo bawaba token create --mirror tok_01JBX6… --env live --name inventory-live --json
 ```
+
+An agent can never request more than its own token holds (00 §6, 04 §10.3): a **test** agent token cannot request a
+live token (`environment_higher`). Live tool tokens come only from the owner (`token create`, `--mirror`, the
+dashboard's "Promote to live") or from a **live** agent token whose own grant covers the request; the AI integration
+guide (§4.6) teaches exactly this flow.
 
 ### 7.5 `bawaba doctor`
 
@@ -1910,12 +1946,13 @@ Each check returns `{id, status: ok|warn|fail, message, fix}`; exit 0/10/11.
 
 | Group | Checks (local) |
 |---|---|
-| Keys | master key file checks of 02 §9.4; key backup verified (`key verify --file --record`) since the last master-key rotation; no KEK left in `retired` past its destroy date |
+| Keys | key-file checks of 02 §9.4 for each plane: `master.key` readable only by the control-plane unit, `data.key` only by the data-plane unit, the data plane cannot read `master.key`, no unit receives both; master-key backup verified (`key verify --file --record`) since the last master-key rotation; no KEK left in `retired` past its destroy date; current `audit_seal` pair younger than `security.rotation.audit_seal` + 7 d; every live data node inserted an epoch key within 2 × `security.audit_epoch` |
 | Config | file validates; control listener loopback; secrets only via files; edge mode consistent with listeners |
 | PostgreSQL | reachable; schema version within binary range; role separation (data role cannot read config secrets or audit content); partitions exist 7 days ahead |
 | Valkey | reachable; AOF `everysec`; `maxmemory-policy volatile-ttl`; ACL users per role (01 §13.2) |
 | Blob store | write/read/delete probe object; S3 write-only credentials on data nodes (topology C) |
-| Audit | WAL/spool free space and usage vs cap; lag; storage vs caps; last hourly anchor written and verified |
+| Audit | WAL/spool free space and usage vs cap; lag; storage vs caps; ingest vs `audit.capacity.pg_rows_per_second` (§1.12); last hourly anchor written and verified |
+| Webhooks | egress proxy (if set) reachable and accepting `CONNECT` to IP literals (§2.7.3); pending target requests |
 | Upstreams | each upstream reachable through the gateway (status only, no address printed); connector sessions; certificate expiry |
 | Ops | clock skew; SMTP reachable (optional `--smtp`); last backup and drill ages; TLS certificate expiry; docs leak lint of the embedded docs |
 | Remote mode | DNS/TLS to the gateway, token valid, scopes, clock vs `Date` header, rate-limit headroom |
@@ -1928,28 +1965,31 @@ Each check returns `{id, status: ok|warn|fail, message, fix}`; exit 0/10/11.
 
 | Source | Location | Notes |
 |---|---|---|
-| OpenAPI 3.1 (English, source of truth) | `api/openapi/bawaba-v1.yaml` | operations carry `x-bawaba-*` extensions (§4.6); examples use `bawaba-mock` data |
-| Arabic overlay | `api/openapi/i18n/ar.yaml` | map of JSON Pointer → translated `summary`/`description`/`title`; merged at build into `openapi.ar.json` |
-| Guides | `docs/user/{en,ar}/*.md` | quickstart, authentication & tokens, scopes & permissions, pagination & snapshots, rate limits & warnings, errors, webhooks (with signature verification in Go/Node.js/Python/C#/PHP + test vectors), writes & idempotency, approvals, sandbox, AI integration guide, changelog, glossary |
-| Error catalogue | `internal/apierr` | code, status, `message`/`message_ar`, description and remediation in both languages |
-| Warning and event catalogues | `internal/advice`, `internal/webhooks/events` | generate `/docs/{lang}/warnings/<code>` and `/docs/{lang}/events/<type>` |
+| OpenAPI 3.1 (English, source of truth) | `api/openapi/bawaba.v1.yaml` + `components/` (layout of 03 §24.2) | operations carry `x-bawaba-*` extensions (§4.6, 03 §24.3); examples are generated from `bawaba-mock` data (`api/openapi/examples/`) |
+| Arabic overlay | `api/openapi/i18n/ar.yaml` | Arabic summaries and descriptions keyed by operationId and schema pointer; merged at build into `openapi.ar.json` |
+| Guides | `docs/product/{en,ar}/*.md` | quickstart, authentication & tokens, scopes & permissions, pagination & snapshots, rate limits & warnings, errors, webhooks (with signature verification in Go/Node.js/Python/C#/PHP + test vectors), writes & idempotency, approvals, sandbox, AI integration guide, changelog, glossary |
+| Error catalogue | `api/openapi/errors.yaml` (generates `internal/apierr`) | code, status, `message`/`message_ar`, retry class, description and remediation in both languages |
+| Warning and event catalogues | `api/openapi/warnings.yaml`, `api/openapi/events.yaml` (generate `internal/advice` and `internal/webhooks/events` constants) | generate `/docs/{lang}/warnings/<code>` and `/docs/{lang}/events/<type>` |
+| Legacy reference | `api/openapi/bawaba.legacy.yaml` | never part of the public site; served only by `GET /v1/docs/legacy` (§8.4) |
 | Changelog | `api/openapi/CHANGELOG.yaml` | entries: date, API version, type (added / changed / deprecated / fixed), operations |
 
-`tools/docsgen` (run by `make docs` and CI) renders guides with goldmark, generates catalogue pages, merges
-translations, builds `llms.txt` / `llms-full.txt`, validates examples against schemas, and writes everything to
-`internal/docs/dist/`, embedded with `go:embed`. **Each binary serves exactly the docs of the API it implements** —
-docs cannot drift from the running gateway.
+`cmd/bawaba-docs` (03 §24.5; run by `make docs` and CI) renders guides with goldmark, generates catalogue pages,
+merges translations, builds `llms.txt` / `llms-full.txt`, validates examples against schemas, and writes everything
+to `internal/docs/dist/`, embedded with `go:embed`. **Each binary serves exactly the docs of the API it implements**
+— docs cannot drift from the running gateway.
 
 ### 8.2 API reference renderer (decision)
 
 **Scalar API Reference, self-hosted**: the pinned standalone bundle is vendored into `internal/docs/dist/assets/`
 and served from `/docs/assets/` with Subresource Integrity; its CDN fonts, telemetry and request proxy are disabled
 in configuration, and the page CSP (`connect-src 'self'`) blocks any external origin anyway. Chosen over Redoc for
-first-class OpenAPI 3.1, built-in code samples in many languages (useful to both humans and agents) and an optional
-"try it" client; RTL is handled with a small stylesheet override (prose RTL, code and JSON LTR). "Try it" is
-restricted to the same origin and the page tells readers to use `bwb_test_` tokens; it can be turned off
-(`docs.try_it: false`). For no-JS readers and LLMs, docsgen also emits a static Markdown reference (one page per
-resource) from the same spec.
+first-class OpenAPI 3.1 and built-in code samples in many languages (useful to both humans and agents); RTL is
+handled with a small stylesheet override (prose RTL, code and JSON LTR). **Scalar's "try it" client is disabled**
+(03 §24.5), with no configuration switch: a secret token sent from the docs page would be refused anyway
+(`403 secret_token_in_browser`, `tokens.reject_browser_origin_default: true`), and a console on the public API
+origin would teach owners and agents to paste `bwb_live_` tokens into a web page. Every operation shows `curl` and
+code-sample requests instead. For no-JS readers and LLMs, `cmd/bawaba-docs` also emits a static Markdown reference
+(one page per resource) from the same spec.
 
 ### 8.3 Site map (public listener, `Public` operations, 01 S4)
 
@@ -1963,20 +2003,26 @@ resource) from the same spec.
 | `/docs/{lang}/warnings/<code>`, `/docs/warnings/<code>` | warning pages |
 | `/docs/{lang}/events/<type>` | webhook event pages with payload schema and example |
 | `/docs/v1/openapi.{en,ar}.{json,yaml}`, `/docs/openapi.json` (latest major, English) | specs |
-| `/docs/llms.txt`, `/docs/llms-full.txt` | AI entry points (no root `/llms.txt`: the public prefix allowlist is `/v1/`, `/legacy/`, `/docs`, `/healthz`, 02 §10.1) |
-| `/docs/{lang}/changelog` | API changelog |
+| `/docs/llms.txt`, `/docs/llms-full.txt` | AI entry points |
+| `/llms.txt` | alias of `/docs/llms.txt`; one of the two exact public paths outside the prefixes (`/llms.txt`, `/healthz`; prefixes `/v1/`, `/legacy/`, `/docs`; 02 §10.1, 03 §6.5) |
+| `/docs/changelog`, `/docs/{lang}/changelog` | API changelog (the language-neutral form negotiates) |
 
-Docs responses: `Cache-Control: public, max-age=300` with `ETag` (static build artifacts, not business data),
-strict CSP, `Bawaba-Request-Id`, metadata-only audit rows. `docs.public: true` (default, 02 §19) or `false` (requires a
-valid Bearer token; useful if the owner wants the API surface private).
+Everything under `/docs` (and `/llms.txt`) is public and cacheable, so nothing upstream-shaped is served there: the
+legacy passthrough reference is the authenticated operation `GET /v1/docs/legacy` (§8.4). Docs responses:
+`Cache-Control: public, max-age=300` with `ETag` (static build artifacts, not business data), strict CSP,
+`Bawaba-Request-Id`, metadata-only audit rows. `docs.public: true` (default, 02 §19) or `false` (requires any valid
+Bearer token; useful if the owner wants the API surface private).
 
 ### 8.4 Never revealing upstream details
 
 - Public docs describe Bawaba as the company's accounting API (the backend is called
   `docs.backend_display_name`, default "accounting system", 02 LV-13) and **never name the upstream product,
   vendor, hosts, paths, field names or quirks**. The only material that necessarily mirrors Shamel — the `/legacy`
-  passthrough — is documented in a **token-gated** section (`GET /v1/docs/legacy`, Bearer token with legacy enabled;
-  `bawaba docs legacy` for the owner), never under public `/docs`.
+  passthrough — is served only by the authenticated operation **`GET /v1/docs/legacy`** (03 §20.5): kinds `tool`
+  and `agent` with legacy enabled (`403 legacy_not_enabled` otherwise, anonymous `401`), the OpenAPI document
+  restricted to the endpoints the calling token is entitled to, `Cache-Control: no-store`, upstream-units cost
+  `none`. `bawaba docs legacy` calls it in agent mode and prints the full reference in owner mode. Nothing legacy is
+  ever under public `/docs`; the origin-leak suite asserts the anonymous `401`.
 - **Build-time lint** (`bawaba docs lint`, CI-blocking): denylist of upstream product/vendor names in Latin and
   Arabic script, Shamel path segments and action names (`/Customer/`, `GetCustomers`, `Post2`, …), Shamel wire field
   names and misspellings (`sale_parice`, `orgnization`, `lastupdatedate`, `obj=`, …), server technology strings,
@@ -2005,36 +2051,41 @@ valid Bearer token; useful if the owner wants the API surface private).
 
 | Asset | Method | Encryption | Frequency |
 |---|---|---|---|
-| PostgreSQL — configuration and state (tenants, upstreams, encrypted credentials, hashed tokens, policies, compiled config, `crypto_keks`/`crypto_keys` (wrapped), approvals, access requests, webhooks, usage, alerts, `audit_writes`, `admin_events`, `audit_blobs`, `audit_segments`, `audit_anchors`, open audit partitions of the last 2 days) | `bawaba backup create`: `pg_dump` directory format (parallel), excluding closed audit partitions | the dump already holds only ciphertext columns and keyed hashes (02 §14); the archive is additionally encrypted with a random per-archive key (AES-256-GCM, 64 KiB segments) **wrapped by the master key** and stored in the manifest with the master key id; per-file SHA-256 in a MAC-protected manifest | daily (`backup.schedule`, `41 2 * * *`) |
+| PostgreSQL — configuration and state (tenants, upstreams, encrypted credentials, hashed tokens, policies, compiled config, `crypto_keks`/`crypto_keys` (wrapped), `crypto_meta`, `audit_epoch_keys` (HPKE-sealed), approvals, access requests, webhooks, usage, alerts, `audit_writes`, `admin_events`, `audit_blobs`, `audit_segments`, `audit_anchors`, open audit partitions of the last 2 days) | `bawaba backup create` (runs in the control plane, the only process holding MK): `pg_dump` directory format (parallel), excluding closed audit partitions | the dump already holds only ciphertext columns and keyed hashes (02 §14); the archive is additionally encrypted with a random per-archive key (AES-256-GCM, 64 KiB segments) **wrapped by `master.key`** and stored in the manifest with the master key id; per-file SHA-256 in a MAC-protected manifest | daily (`backup.schedule`, `41 2 * * *`) |
 | PostgreSQL — continuous (recommended in production) | WAL archiving + PITR via pgBackRest / WAL-G, or the managed provider's PITR (documented, not reimplemented) | repository encryption of the chosen tool | continuous |
 | Audit metadata (closed days) | **cold segments in the blob store** (§1.8) are the backup unit; closed partitions are therefore not dumped | already encrypted | daily, as days close |
 | Blob store (packs + segments) | `bawaba backup blobs sync`: copies packs/segments not yet present at the target (immutable, content-addressed → incremental by name); target deletions delayed by `deleted_retention` (30 d) | already encrypted; copied as-is | hourly |
 | Bootstrap config | `/etc/bawaba/bawaba.yaml`, public certificates, systemd/Compose files — included in the daily archive. **Excluded** (02 §14): TLS private keys and `cloudflared` credentials, which are re-issued on restore (§9.3) | inside the encrypted archive | daily |
-| Master key file | **never** included; `bawaba backup` refuses paths matching the key file (02 §9.4) | — | key backup (§9.2) |
+| Key files `master.key`, `data.key` | **never** included; `bawaba backup` refuses paths matching either key file (02 §9.4, §14) | — | `master.key`: key backup (§9.2); `data.key`: none, re-issued after a restore |
 | Valkey | not backed up: ephemeral by design (snapshots, coalescing, rate limits); queues are re-derived from PostgreSQL (§2.5); idempotency records are backstopped by `audit_writes` (§1.3.4) | — | — |
 
 - **Targets**: `backup.targets` (filesystem path and/or S3-compatible bucket). An **off-site** target is required for
   topology B (office box) and recommended for all; enable S3 Object Lock / versioning on the bucket for ransomware
   resistance. Backup credentials on the server are write-only where the backend supports it.
 - **Retention (GFS)**: 7 daily, 4 weekly, 12 monthly archives; blob target keeps deleted packs 30 days.
-- A stolen backup is useless without the master key (00 §4): the archive key is wrapped by it, and sensitive columns
-  are additionally envelope-encrypted inside the dump. Wrapping the archive key directly with the master key (rather
-  than with a key stored in the database) is deliberate: the database being restored cannot hold the key that
-  decrypts it. Consequence: after a master-key rotation the retired key must stay in the key backup until the last
-  archive made under it has aged out (12 months with the default retention).
+- A stolen backup is useless without the master key (00 §4): the archive key is wrapped by it, sensitive columns
+  are additionally envelope-encrypted inside the dump (under KEKs wrapped by MK and DK, neither of which is in the
+  backup), and audit bodies need the `audit_seal` private keys (under KEK_control). Wrapping the archive key directly
+  with the master key (rather than with a key stored in the database) is deliberate: the database being restored
+  cannot hold the key that decrypts it. Consequence: after a master-key rotation the retired key must stay in the
+  key backup until the last archive made under it has aged out (12 months with the default retention).
 - `backup_runs(id bkp_, started_at, finished_at, target, kind, bytes, sha256, status, error)`; `backup_failed` and
   `backup_stale` alerts (§3.3).
 
 ### 9.2 Master key backup (separately from data backups)
 
-Losing the master key makes every backup and the live database unrecoverable in the parts that matter: API tokens
-stop validating (the pepper is protected by it), Shamel credentials and the internal CA key cannot be decrypted, audit
-bodies are lost. Losing *only* backups is recoverable; losing the key is not. The mechanism is 02 §9.5; operations
-adds tracking:
+Of the two key files (02 §9.2) only **`master.key` (MK)** needs a backup. `data.key` (DK) is re-issuable from MK at
+any time (`bawaba key reissue-data-key`), because KEK_data is wrapped under both. Losing MK makes every backup
+unrecoverable (the archive key is wrapped by it) and, once no running host still holds DK, the live database too:
+without MK, KEK_control (internal CA key, TOTP seed, admin chain, `smtp_password`, and the `audit_seal` private
+keys that open every audit epoch key) can never be unwrapped, so stored audit bodies and metadata are lost and no
+connector certificate can be issued; KEK_data (token pepper, Shamel credentials, webhook secrets) survives only in
+the memory and `data.key` of still-running data-plane hosts. Losing *only* backups is recoverable; losing MK is not.
+The mechanism is 02 §9.5; operations adds tracking:
 
 - `bawaba key export --format paper` (base32 groups with per-line checksums) or `--shares 3 --threshold 2` (Shamir)
-  produces the key backup. Two copies in separate places (a safe and the owner's password manager), never on the same
-  medium, bucket, server or mailbox as data backups.
+  produces the backup of `master.key`. Two copies in separate places (a safe and the owner's password manager), never
+  on the same medium, bucket, server or mailbox as data backups. `data.key` is never exported.
 - `bawaba key verify --file <backup> --record` checks the backup against `kcv` and records the verification date;
   until that happens after `init` or `key rotate-master`, `key_backup_unverified` (high) fires and `doctor` warns.
 - After `key rotate-master` the backup must contain both keys until `key retire-master` *and* until the last data
