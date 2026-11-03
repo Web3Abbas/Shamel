@@ -263,3 +263,41 @@ table.dec td{font-size:8.2pt}
 .doc{border:1px solid var(--line);border-left:1.2mm solid var(--brand-3);border-radius:2mm;padding:2.6mm 3.2mm;display:flex;flex-direction:column;gap:.6mm}
 .doc b{font-size:9pt}
 .doc span{font-size:7.6pt;color:var(--muted)}
+#sec-layers .ly{padding:1.5mm 4mm}
+#sec-layers .ly .ld{font-size:7.8pt}
+#sec-layers .card ul.clean{font-size:7.8pt}
+#sec-layers .card ul.clean li{margin-bottom:.8mm}
+#sec-layers .card{padding:3mm 4mm}
+#sec-layers .lead{margin-bottom:4mm}
+#sec-origin .chip{font-size:6.8pt;margin-bottom:.9mm;padding:.5mm 1.8mm}
+#sec-origin .code{font-size:7.1pt;padding:2.6mm 3.2mm}
+.tl .m h4{font-size:9.6pt;margin-bottom:1mm}
+.tl .m p{margin-bottom:1.5mm}
+.tl .gate{font-size:7pt;color:var(--ink-2);background:var(--soft);border-radius:1.5mm;padding:1.4mm 1.8mm;line-height:1.35}
+.tl .gate code{font-size:6.6pt}
+.gantt{display:flex;flex-direction:column;gap:1.6mm}
+.gr{display:grid;grid-template-columns:9mm 1fr 18mm;align-items:center;gap:2.5mm}
+.gl{font-weight:800;font-size:8.6pt;color:var(--brand)}
+.gv{font-size:7.4pt;color:var(--muted);text-align:right}
+.gt{position:relative;height:6mm;background:var(--soft);border-radius:1.2mm}
+.gt i{position:absolute;top:0;bottom:0;border-radius:1.2mm}
+.gt i.g0{background:#9FC3C8}.gt i.g1{background:var(--brand-2)}.gt i.g2{background:var(--accent)}.gt i.g3{background:#B7A7F0}.gt i.g4{background:var(--brand)}
+.gt b{position:absolute;top:-.2mm;transform:translateX(-50%);font-size:6.6pt;color:#fff;background:var(--deep);border-radius:1mm;padding:.4mm 1.2mm;line-height:1.2;margin-top:1.2mm}
+table.isco td.arc{font-family:"IBM Plex Sans Arabic",sans-serif;direction:rtl;text-align:right;font-size:8.4pt}
+table.isco td:first-child{font-family:"JetBrains Mono",monospace;font-size:7.6pt;color:var(--brand)}
+.igrid{gap:2.4mm}
+.ig{display:flex;align-items:center;gap:2.4mm;border:1px solid var(--line);border-radius:2mm;padding:2mm 2.6mm}
+.ig b{font-size:13pt;font-weight:800;color:var(--accent-2);min-width:5mm;text-align:center}
+.ig span{font-size:7.6pt;color:var(--ink-2);line-height:1.3}
+.ep .el.m2r{color:#8A5A1F}
+.ep .el.tiny-note{font-family:Inter,sans-serif;font-size:6.6pt;color:var(--muted);white-space:normal}
+.ep .el.tiny-note code{font-size:6.2pt}
+#api h3.mt4{margin-top:3mm}
+#api .grid.mb4{margin-bottom:3mm}
+#perf .card ul.clean{font-size:7.8pt}
+#perf .card ul.clean li{margin-bottom:.9mm}
+#perf .card{padding:3mm 4mm}
+#perf .stat{padding:3mm}
+#perf .stat .l{font-size:7.8pt}
+#perf table.t{font-size:7.5pt!important}
+#perf .lead{margin-bottom:4mm}

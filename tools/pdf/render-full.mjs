@@ -155,7 +155,8 @@ table{border-collapse:collapse;width:100%;font-size:8.2pt;line-height:1.4}
 thead{display:table-header-group}
 tr{break-inside:avoid}
 th{background:var(--brand);color:#fff;text-align:left;font-weight:600;padding:1.6mm 2mm;border:1px solid var(--brand)}
-td{padding:1.4mm 2mm;border:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
+td{padding:1.4mm 2mm;border:1px solid var(--line);vertical-align:top;overflow-wrap:break-word}
+th{overflow-wrap:break-word}
 tbody tr:nth-child(even) td{background:#F8FAFA}
 td code,th code{font-size:7.6pt;word-break:normal;overflow-wrap:anywhere}
 th code{background:rgba(255,255,255,.15);color:#fff}

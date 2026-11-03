@@ -8,12 +8,12 @@
     <div class="card dark">
       <div class="tag gold">Local owner mode</div>
       <h4 class="mt2">On the server · all commands</h4>
-      <p class="small muted">Root-only Unix socket (<code style="background:rgba(255,255,255,.12);color:#fff">sudo bawaba …</code>). Approvals, firewall rules, live tokens, keys, audit decryption. These commands don’t exist anywhere else.</p>
+      <p class="small muted">Root-only Unix socket (<code style="background:rgba(255,255,255,.12);color:#fff">sudo bawaba …</code>) or <code style="background:rgba(255,255,255,.12);color:#fff">bawaba login</code> with password + TOTP. Approvals, firewall rules, live tokens, keys, audit decryption. None of these exist in remote mode.</p>
     </div>
     <div class="card teal">
       <div class="tag">Remote agent mode</div>
       <h4 class="mt2">Anywhere · agent token over HTTPS</h4>
-      <p class="small muted">Only agent-safe commands: read docs and the OpenAPI spec, check your own token and usage, request access, make test calls, manage the agent’s own webhooks.</p>
+      <p class="small muted">Only agent-safe commands: read docs and the OpenAPI spec, check its own token and usage, request access, make API calls within its own scopes, manage its own webhooks (if granted).</p>
     </div>
   </div>
 
@@ -23,27 +23,27 @@
     --scopes customers:read,stock:read \
     --env test --reason "stock dashboard" \
     --wait
-<span class="ok">✓ request ar_19 filed · pending owner</span>
+<span class="ok">✓ request areq_19 filed · pending owner</span>
 
 <span class="c"># owner, on the server</span>
 <span class="p">$</span> sudo bawaba access-request list
-  ar_19  dash-builder  customers:read
+  areq_19  dash-builder  customers:read
          stock:read    test
-<span class="p">$</span> sudo bawaba access-request approve ar_19
+<span class="p">$</span> sudo bawaba access-request approve areq_19
 <span class="ok">✓ approved · secret can be collected once</span></div>
     <div class="term"><div class="bar"><i></i><i></i><i></i></div><span class="c"># owner, on the server</span>
-<span class="p">$</span> sudo bawaba token create \
+<span class="p">$</span> sudo bawaba token create --kind tool \
     --name sales-dashboard --env live \
-    --preset read-only --data-scope store=1,2 \
+    --preset read_only --data-scope store=1,2 \
     --hide-fields items.purchase_price \
     --ip-allow 203.0.113.0/28 --json
-<span class="s">{"id":"tok_8k2","secret":"bwb_live_…"}</span>
+<span class="s">{"data":{"id":"tok_01JBX4…","token":"bwb_live_…"},"meta":{}}</span>
 
 <span class="p">$</span> sudo bawaba firewall explain 198.51.100.7
   <span class="err">banned</span> · auto: auth_failure · 24h
 
 <span class="p">$</span> sudo bawaba audit search \
-    --token tok_8k2 --since 1h</div>
+    --token tok_01JBX4… --since 1h</div>
   </div>
 
   <h3>Dashboard pages</h3>
@@ -51,12 +51,12 @@
     <div class="pg"><b>Overview</b><span>traffic, errors, latency, Shamel health, pending items</span></div>
     <div class="pg"><b>Tokens &amp; presets</b><span>create, scope, hide fields, IP allowlists, revoke</span></div>
     <div class="pg hot"><b>Access requests</b><span>AI requests vs. the agent’s own rights; approve or narrow</span></div>
-    <div class="pg hot"><b>Write approvals</b><span>pending invoices shown as real documents</span></div>
+    <div class="pg hot"><b>Write approvals</b><span>pending writes shown as real documents; sandbox writes on their own page</span></div>
     <div class="pg"><b>Upstreams &amp; Connectors</b><span>enroll, confirm, suspend, kill</span></div>
     <div class="pg"><b>Firewall</b><span>allow/deny rules, bans, “explain this IP”</span></div>
     <div class="pg"><b>Audit explorer</b><span>search, decision trace, decrypt, diff</span></div>
     <div class="pg"><b>Usage analytics</b><span>per token and endpoint, warnings, behaviour scores</span></div>
-    <div class="pg"><b>Webhooks</b><span>subscriptions, polling streams, dead letters</span></div>
+    <div class="pg"><b>Webhooks</b><span>subscriptions, target-host approvals, poll streams, dead letters</span></div>
     <div class="pg"><b>Alerts</b><span>rules, thresholds, recipients, silences</span></div>
     <div class="pg"><b>System</b><span>nodes, keys, backups, restore drills</span></div>
     <div class="pg ghost"><b>Built simply</b><span>server-rendered HTML + htmx, no npm, strict CSP</span></div>
@@ -68,7 +68,7 @@
 <section class="page" id="deploy">
   <div class="kicker"><span class="section-no">16</span>Deployment</div>
   <h2 class="page-title">Three ways to run it, one codebase</h2>
-  <p class="lead">Hosting is still to be decided, so Bawaba ships as Docker Compose bundles and standalone binaries. The gateway runs on Linux; the Connector also runs as a Windows service, since Shamel usually lives on a Windows server.</p>
+  <p class="lead">Hosting is still to be decided, so Bawaba ships as Docker Compose bundles and standalone binaries. The gateway runs on Linux; the Connector also runs as a Windows service, since Shamel likely runs on a Windows server.</p>
 
   <div class="grid g3 mb4">
     <div class="card topo rec">
@@ -76,7 +76,7 @@
       <h3 class="mt2">A · Cloud VPS + Connector</h3>
       <svg class="dg" viewBox="0 0 200 110" aria-hidden="true">
         <rect x="4" y="8" width="60" height="26" rx="6" fill="#FBF6EE" stroke="#E9CFA8"/><text x="34" y="24" text-anchor="middle" style="font-size:8px;font-weight:700;fill:#16232A">Cloudflare</text>
-        <rect x="104" y="4" width="92" height="40" rx="7" fill="#0F4C5C"/><text x="150" y="20" text-anchor="middle" style="font-size:8px;font-weight:700;fill:#fff">VPS</text><text x="150" y="32" text-anchor="middle" style="font-size:6.4px;fill:#BFD6D9">gateway · PG · Valkey</text>
+        <rect x="104" y="4" width="92" height="40" rx="7" fill="#0F4C5C"/><text x="150" y="20" text-anchor="middle" style="font-size:8px;font-weight:700;fill:#fff">VPS</text><text x="150" y="32" text-anchor="middle" style="font-size:6.4px;fill:#BFD6D9">data + control · PG · Valkey</text>
         <path d="M64 21 L104 21" stroke="#1F6F7F" stroke-width="1.2"/>
         <rect x="4" y="66" width="192" height="40" rx="7" fill="#F6FAFA" stroke="#9FC3C8" stroke-dasharray="3 2"/>
         <text x="190" y="78" text-anchor="end" style="font-size:6.4px;fill:#5B6B73;font-weight:700">OFFICE · NO INBOUND PORTS</text>
@@ -85,7 +85,7 @@
         <path d="M84 92 L116 92" stroke="#1F6F7F" stroke-width="1"/>
         <path d="M40 83 L34 34" stroke="#C9803A" stroke-width="1.4" stroke-dasharray="3 2"/>
       </svg>
-      <ul class="clean small mt2"><li>Two layers of hiding: Cloudflare hides the VPS, the tunnel hides Shamel</li><li>No changes to the office network</li><li>Easy to back up and scale up</li></ul>
+      <ul class="clean small mt2"><li>Two layers of hiding: Cloudflare hides the VPS, the tunnel hides Shamel</li><li>Shamel passwords stay at the office, with the Connector</li><li>No office network changes; easy to back up</li></ul>
     </div>
     <div class="card topo">
       <div class="tag grey">Simple</div>
@@ -94,29 +94,29 @@
         <rect x="4" y="8" width="60" height="26" rx="6" fill="#FBF6EE" stroke="#E9CFA8"/><text x="34" y="24" text-anchor="middle" style="font-size:8px;font-weight:700;fill:#16232A">Cloudflare</text>
         <rect x="4" y="50" width="192" height="56" rx="7" fill="#F6FAFA" stroke="#9FC3C8" stroke-dasharray="3 2"/>
         <text x="12" y="62" style="font-size:6.4px;fill:#5B6B73;font-weight:700">OFFICE LAN</text>
-        <rect x="14" y="70" width="96" height="30" rx="6" fill="#0F4C5C"/><text x="62" y="83" text-anchor="middle" style="font-size:7.4px;fill:#fff;font-weight:700">Bawaba box</text><text x="62" y="94" text-anchor="middle" style="font-size:6.2px;fill:#BFD6D9">all-in-one</text>
+        <rect x="14" y="70" width="96" height="30" rx="6" fill="#0F4C5C"/><text x="62" y="83" text-anchor="middle" style="font-size:7.4px;fill:#fff;font-weight:700">Bawaba box</text><text x="62" y="94" text-anchor="middle" style="font-size:6.2px;fill:#BFD6D9">all-in-one (2 processes)</text>
         <rect x="130" y="70" width="58" height="30" rx="6" fill="#fff" stroke="#9FC3C8"/><text x="159" y="89" text-anchor="middle" style="font-size:7.4px;fill:#16232A">Shamel</text>
         <path d="M110 85 L130 85" stroke="#1F6F7F" stroke-width="1"/>
         <path d="M40 70 L34 34" stroke="#1F6F7F" stroke-width="1.2"/>
         <text x="92" y="26" style="font-size:6.6px;fill:#5B6B73">via Cloudflare Tunnel:</text><text x="92" y="36" style="font-size:6.6px;fill:#5B6B73">no open ports</text>
       </svg>
-      <ul class="clean small mt2"><li>Everything on one Linux machine next to Shamel</li><li>Exposed only through a Cloudflare Tunnel</li><li>Good when you have a spare server</li></ul>
+      <ul class="clean small mt2"><li>Everything on one Linux machine next to Shamel</li><li>Exposed only through a Cloudflare Tunnel</li><li>Depends on office power and internet; needs an off-site backup</li></ul>
     </div>
     <div class="card topo">
       <div class="tag">Scale</div>
       <h3 class="mt2">C · Scaled-out cluster</h3>
       <svg class="dg" viewBox="0 0 200 110" aria-hidden="true">
         <rect x="4" y="8" width="60" height="26" rx="6" fill="#FBF6EE" stroke="#E9CFA8"/><text x="34" y="24" text-anchor="middle" style="font-size:8px;font-weight:700;fill:#16232A">Cloudflare</text>
-        <rect x="80" y="8" width="44" height="26" rx="6" fill="#fff" stroke="#9FC3C8"/><text x="102" y="24" text-anchor="middle" style="font-size:7px;fill:#16232A">LB</text>
-        <path d="M64 21 L80 21" stroke="#1F6F7F" stroke-width="1.2"/>
+        <rect x="76" y="8" width="52" height="26" rx="6" fill="#fff" stroke="#9FC3C8"/><text x="102" y="24" text-anchor="middle" style="font-size:6.6px;fill:#16232A">Tunnel ×N</text>
+        <path d="M64 21 L76 21" stroke="#1F6F7F" stroke-width="1.2"/>
         <rect x="140" y="4" width="54" height="16" rx="4" fill="#0F4C5C"/><text x="167" y="15" text-anchor="middle" style="font-size:6.6px;fill:#fff">node 1</text>
         <rect x="140" y="24" width="54" height="16" rx="4" fill="#0F4C5C"/><text x="167" y="35" text-anchor="middle" style="font-size:6.6px;fill:#fff">node 2</text>
         <rect x="140" y="44" width="54" height="16" rx="4" fill="#0F4C5C"/><text x="167" y="55" text-anchor="middle" style="font-size:6.6px;fill:#fff">node N</text>
-        <path d="M124 21 L140 12 M124 21 L140 32 M124 21 L140 52" stroke="#1F6F7F" stroke-width="1"/>
+        <path d="M128 21 L140 12 M128 21 L140 32 M128 21 L140 52" stroke="#1F6F7F" stroke-width="1"/>
         <rect x="4" y="74" width="92" height="30" rx="6" fill="#E8F2F3" stroke="#9FC3C8"/><text x="50" y="87" text-anchor="middle" style="font-size:7px;fill:#16232A;font-weight:700">managed</text><text x="50" y="98" text-anchor="middle" style="font-size:6.4px;fill:#5B6B73">Postgres · Valkey · S3</text>
         <rect x="108" y="74" width="88" height="30" rx="6" fill="#FBF6EE" stroke="#E0A458" stroke-dasharray="3 2"/><text x="152" y="87" text-anchor="middle" style="font-size:7px;fill:#16232A;font-weight:700">control node</text><text x="152" y="98" text-anchor="middle" style="font-size:6.4px;fill:#5B6B73">SSH only</text>
       </svg>
-      <ul class="clean small mt2"><li>Identical stateless data nodes; scale by CPU</li><li>Separate small control node, not behind the LB</li><li>Rolling upgrades with draining</li></ul>
+      <ul class="clean small mt2"><li>Identical stateless data nodes; scale by CPU</li><li>Separate small control node, reached only by SSH</li><li>Rolling upgrades with draining</li></ul>
     </div>
   </div>
 
@@ -132,8 +132,8 @@
 
   <div class="grid g3">
     <div class="card soft"><h4>Backups</h4><p class="tiny muted">Encrypted PostgreSQL archives (7 daily, 4 weekly, 12 monthly) and incremental blob sync. Monthly restore drills are tracked.</p></div>
-    <div class="card soft"><h4>Master key backup</h4><p class="tiny muted">Kept <b>separately</b> from data backups: paper export or 2-of-3 shares. Bawaba nags you until a backup is verified.</p></div>
-    <div class="card soft"><h4>Upgrades</h4><p class="tiny muted">Versioned schema migrations; gateway nodes drain and restart one at a time with zero downtime.</p></div>
+    <div class="card soft"><h4>Master key backup</h4><p class="tiny muted">Only <code>master.key</code> needs one (<code>data.key</code> is re-issued from it): paper export or 2-of-3 shares, kept apart from data backups.</p></div>
+    <div class="card soft"><h4>Upgrades</h4><p class="tiny muted">Expand/contract migrations; cluster nodes drain one at a time with zero downtime (a plain single-box restart costs seconds).</p></div>
   </div>
 
   <h3 class="mt6">Which one?</h3>

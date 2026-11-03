@@ -1,0 +1,87 @@
+<!-- ============ PAGE: MILESTONES ============ -->
+<section class="page" id="milestones">
+  <div class="kicker"><span class="section-no">17</span>Delivery plan</div>
+  <h2 class="page-title">Reads first, then writes, then scale</h2>
+  <p class="lead">As you asked, everything that <b>reads</b> data comes first. AI agents can start building against the sandbox partway through M1, your first tools go live in a restricted pilot, and writes and webhooks follow in parallel.</p>
+
+  <div class="tl mb4">
+    <div class="m"><div class="dot">M0</div><h4>Foundations</h4><p class="tiny muted">Repo, CI with the leak suite, config, two key files, Postgres/Valkey/blob wiring, mock Shamel with Arabic data, OpenAPI skeleton, Docker bundles</p><div class="gate"><b>Exit:</b> <code>GET /v1/currencies</code> through all 17 pipeline stages</div></div>
+    <div class="m now"><div class="dot">M1</div><h4>Read API</h4><p class="tiny muted">Every read endpoint, tokens &amp; permissions, firewall, origin hiding, snapshots, Arabic search, full audit, Connector, CLI, dashboard, docs, alerts</p><div class="gate"><b>Exit:</b> leak suite clean, pentest round 1 with no open critical/high</div></div>
+    <div class="m"><div class="dot">M2</div><h4>Writes</h4><p class="tiny muted">Write endpoints for all 13 voucher types, idempotency, approval queue, batches, legacy writes, AI access requests</p><div class="gate"><b>Exit:</b> 0 duplicates in 10,000 fault-injected writes</div></div>
+    <div class="m"><div class="dot">M3</div><h4>Expansions</h4><p class="tiny muted">Webhooks engine and API, usage analytics UI, remaining alerts, Grafana bundles</p><div class="gate"><b>Exit:</b> no polling without subscribers; no lost events</div></div>
+    <div class="m"><div class="dot">M4</div><h4>Hardening</h4><p class="tiny muted">Load tests against the targets, chaos tests for every failure mode, cluster topology, pentest round 2, restore drills</p><div class="gate"><b>Exit:</b> all performance targets met on the reference node</div></div>
+  </div>
+
+  <h3>Milestone 1 ships in three steps</h3>
+  <div class="grid g3 mb4">
+    <div class="card teal"><div class="tag">Step 1</div><h4 class="mt2">Sandbox reads (α)</h4><p class="tiny muted">AI agents start building your read tools with <code>bwb_test_</code> tokens against fake data.</p></div>
+    <div class="card sand"><div class="tag gold">Step 2</div><h4 class="mt2">Live read pilot (β)</h4><p class="tiny muted">Your first tools on real data, with live tokens locked to your own IP addresses, for at least 14 days.</p></div>
+    <div class="card dark"><div class="tag mint">Step 3</div><h4 class="mt2">All reads live (GA)</h4><p class="tiny muted">After the pilot and the first pentest. The API contract is frozen at version 1.0.0.</p></div>
+  </div>
+
+  <h3>Rough calendar (3 senior engineers)</h3>
+  <div class="gantt mb2">
+    <div class="gr"><span class="gl">M0</span><div class="gt"><i style="left:0%;width:11.3%" class="g0"></i></div><span class="gv">wk 0–7</span></div>
+    <div class="gr"><span class="gl">M1</span><div class="gt"><i style="left:11.3%;width:50%" class="g1"></i><b style="left:33.9%">α</b><b style="left:50%">β</b><b style="left:61.3%">GA</b></div><span class="gv">wk 7–38</span></div>
+    <div class="gr"><span class="gl">M2</span><div class="gt"><i style="left:61.3%;width:24.2%" class="g2"></i></div><span class="gv">wk 38–53</span></div>
+    <div class="gr"><span class="gl">M3</span><div class="gt"><i style="left:61.3%;width:27.4%" class="g3"></i></div><span class="gv">wk 38–55</span></div>
+    <div class="gr"><span class="gl">M4</span><div class="gt"><i style="left:88.7%;width:11.3%" class="g4"></i></div><span class="gv">wk 55–62</span></div>
+  </div>
+  <p class="tiny muted mb4">About 154 engineer-weeks (184 with 20 % contingency, ±25 %): roughly 14 months with 3 engineers or 11 months with 4. The estimate assumes a human team and <b>no</b> AI speed-up; AI agents can shorten the coding, but not the reviews, security testing or live verification. It should be re-baselined after M0.</p>
+
+  <div class="grid g2">
+    <div class="callout teal"><div class="ci">?</div><div class="tiny"><b>ISCO answers gate some steps.</b> Connectivity, sessions and limits (set A) gate the live pilot; read semantics (B) gate M1 GA; write semantics (C) gate live writes per voucher type; change detection (D) gates webhooks.</div></div>
+    <div class="callout"><div class="ci">✓</div><div class="tiny"><b>Decisions still needed from you:</b> hosting, domain, Cloudflare account and SMTP before the pilot; whether any existing integration needs the legacy mode; team size.</div></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: ISCO QUESTIONS ============ -->
+<section class="page" id="isco">
+  <div class="kicker"><span class="section-no">18</span>Questions for ISCO</div>
+  <h2 class="page-title">55 questions, ready to send</h2>
+  <p class="lead">The manual leaves real gaps, such as how long a Shamel session lasts, what <code>GetSalesmen</code> returns, and whether HTTPS is supported. The design works around each one safely, but ISCO’s answers will settle them. <code>08-isco-questions.md</code> has a polite cover letter and every question in <b>Arabic and English</b>, each with a “why we ask” line.</p>
+
+  <h3>The 10 priority questions</h3>
+  <table class="t compact isco mb4">
+    <thead><tr><th style="width:11%">Id</th><th style="width:44%">Topic</th><th style="text-align:right">الموضوع</th></tr></thead>
+    <tbody>
+      <tr><td>ISCO-01</td><td>Session token lifetime and concurrent sessions per user</td><td class="arc">مدة صلاحية رمز الجلسة والجلسات المتزامنة للمستخدم</td></tr>
+      <tr><td>ISCO-05</td><td>HTTPS / TLS support</td><td class="arc">دعم HTTPS وTLS</td></tr>
+      <tr><td>ISCO-18</td><td>Error format, stable error codes, expired-token signal</td><td class="arc">صيغة استجابات الأخطاء ورموز الأخطاء الثابتة</td></tr>
+      <tr><td>ISCO-20</td><td>Rate and concurrency limits, recommended parallel calls</td><td class="arc">حدود معدل الطلبات والطلبات المتزامنة</td></tr>
+      <tr><td>ISCO-21</td><td>Pagination, truncation and large responses</td><td class="arc">تقسيم النتائج إلى صفحات والاستجابات الكبيرة</td></tr>
+      <tr><td>ISCO-22</td><td>Meaning of <code>lastupdatedate</code></td><td class="arc">دلالة المعامل lastupdatedate</td></tr>
+      <tr><td>ISCO-26</td><td>Response of <code>/Files/GetSalesmen</code></td><td class="arc">استجابة GetSalesmen</td></tr>
+      <tr><td>ISCO-43</td><td>Duplicate prevention and outcome of failed writes</td><td class="arc">منع التكرار ونتيجة عمليات الإدخال الفاشلة</td></tr>
+      <tr><td>ISCO-50</td><td>Shamel version, API versioning, change notices</td><td class="arc">إصدار الشامل وإدارة إصدارات الواجهة البرمجية</td></tr>
+      <tr><td>ISCO-53</td><td>Licensing: internal layer now, commercial use later</td><td class="arc">الترخيص: طبقة التكامل الداخلية حالياً والاستخدام التجاري مستقبلاً</td></tr>
+    </tbody>
+  </table>
+
+  <h3>All 16 topic groups</h3>
+  <div class="grid g4 igrid mb4">
+    <div class="ig"><b>4</b><span>Authentication &amp; sessions</span></div>
+    <div class="ig"><b>8</b><span>Transport security &amp; IIS hosting</span></div>
+    <div class="ig"><b>6</b><span>Request &amp; response conventions</span></div>
+    <div class="ig"><b>2</b><span>Errors</span></div>
+    <div class="ig"><b>2</b><span>Load, limits &amp; large responses</span></div>
+    <div class="ig"><b>3</b><span>Incremental sync &amp; change detection</span></div>
+    <div class="ig"><b>1</b><span>Salesman scoping</span></div>
+    <div class="ig"><b>4</b><span>Master data</span></div>
+    <div class="ig"><b>4</b><span>Customers</span></div>
+    <div class="ig"><b>3</b><span>Items, stock &amp; catalog</span></div>
+    <div class="ig"><b>3</b><span>Reports</span></div>
+    <div class="ig"><b>3</b><span>Vouchers: reading</span></div>
+    <div class="ig"><b>7</b><span>Writes</span></div>
+    <div class="ig"><b>1</b><span>Enumerations</span></div>
+    <div class="ig"><b>3</b><span>Versions, test environment &amp; roadmap</span></div>
+    <div class="ig"><b>1</b><span>Licensing &amp; commercial use</span></div>
+  </div>
+
+  <div class="grid g2">
+    <div class="callout"><div class="ci">!</div><div class="tiny"><b>Before you send it:</b> fill in your company name, confirm ISCO’s official Arabic name, and decide whether to mention possible commercial use later (ISCO-53 c). A few “why we ask” lines mention internal limits you may want to trim.</div></div>
+    <div class="callout teal"><div class="ci">↺</div><div class="tiny"><b>When answers arrive:</b> record them in the document. Each question links back to the design sections it affects, so the matching defaults can be updated.</div></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>

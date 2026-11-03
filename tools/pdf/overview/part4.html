@@ -21,7 +21,7 @@
         <text x="204" y="52" text-anchor="middle" class="b" style="fill:#C9803A;font-weight:700">1 live call</text>
         <rect x="226" y="44" width="50" height="30" rx="7" fill="#fff" stroke="#9FC3C8"/><text x="251" y="62" text-anchor="middle" class="a">Shamel</text>
       </svg>
-      <p class="tiny muted">Only merged when the Shamel identity and the request are identical, so one token can never receive data meant for another.</p>
+      <p class="tiny muted">Merged only when the Shamel login and the Shamel call are identical; each token’s own permissions are applied afterwards, so sharing never widens what it sees.</p>
     </div>
     <div class="card">
       <h4>Pagination snapshots</h4>
@@ -31,12 +31,12 @@
         <path d="M74 24 L124 24" stroke="#C9803A" stroke-width="2"/><text x="99" y="18" text-anchor="middle" class="b" style="fill:#C9803A;font-weight:700">live fetch</text>
         <rect x="124" y="10" width="64" height="28" rx="7" fill="#fff" stroke="#9FC3C8"/><text x="156" y="28" text-anchor="middle" class="a">Shamel</text>
         <path d="M156 38 L156 56" stroke="#1F6F7F" stroke-width="1.2"/>
-        <rect x="96" y="56" width="120" height="26" rx="8" fill="#0F4C5C"/><text x="156" y="68" text-anchor="middle" style="font-size:7.6px;fill:#fff;font-weight:700">Snapshot · 60 s</text><text x="156" y="77" text-anchor="middle" style="font-size:6.4px;fill:#BFD6D9">encrypted · per token · after scoping</text>
+        <rect x="70" y="56" width="172" height="26" rx="8" fill="#0F4C5C"/><text x="156" y="68" text-anchor="middle" style="font-size:7.6px;fill:#fff;font-weight:700">Snapshot · 60 s</text><text x="156" y="77" text-anchor="middle" style="font-size:6.2px;fill:#BFD6D9">encrypted · one shared copy · per-token views</text>
         <rect x="4" y="90" width="58" height="22" rx="6" fill="#E8F2F3" stroke="#9FC3C8"/><text x="33" y="104" text-anchor="middle" class="a">Page 2</text>
         <rect x="70" y="90" width="58" height="22" rx="6" fill="#E8F2F3" stroke="#9FC3C8"/><text x="99" y="104" text-anchor="middle" class="a">Page 3</text>
         <rect x="136" y="90" width="58" height="22" rx="6" fill="#E8F2F3" stroke="#9FC3C8"/><text x="165" y="104" text-anchor="middle" class="a">Page N</text>
         <path d="M33 90 C33 84,96 78,100 76 M99 90 L120 82 M165 90 L170 82" stroke="#1F6F7F" stroke-width="1" fill="none" stroke-dasharray="3 2"/>
-        <text x="210" y="102" class="b">no Shamel call</text>
+        <text x="200" y="104" class="b">no Shamel call</text>
       </svg>
       <p class="tiny muted">Shamel returns whole lists at once; Bawaba pages, filters, sorts and searches that one fetch, with Arabic-aware search.</p>
     </div>
@@ -44,10 +44,10 @@
 
   <h3>Targets</h3>
   <div class="grid g4 mb4">
-    <div class="stat"><div class="n">≤5<small> ms</small></div><div class="l">p99 gateway overhead, excluding Shamel’s own time</div></div>
-    <div class="stat"><div class="n">5k<small>+</small></div><div class="l">reads/s per 4-vCPU node, full audit on</div></div>
+    <div class="stat"><div class="n">≤5<small> ms</small></div><div class="l">p99 overhead for small responses, excluding Shamel and queue time</div></div>
+    <div class="stat"><div class="n">5k<small>+</small></div><div class="l">small reads/s per 4-vCPU node, full audit on (Shamel time excluded)</div></div>
     <div class="stat"><div class="n">10k<small>+</small></div><div class="l">cursor-page reads/s per node</div></div>
-    <div class="stat"><div class="n">85<small>%</small></div><div class="l">of linear scaling up to 8 nodes</div></div>
+    <div class="stat"><div class="n">≥85<small>%</small></div><div class="l">of linear scaling up to 8 nodes</div></div>
   </div>
 
   <div class="grid g2 mb4">
@@ -55,7 +55,7 @@
       <h4>Why hardware stays the only limit</h4>
       <ul class="clean small">
         <li>Stateless Go nodes: add nodes to scale, no sticky sessions</li>
-        <li>Streaming JSON: huge lists are processed record by record, so memory doesn’t grow with list size</li>
+        <li>Streaming JSON: huge lists are processed record by record, never held as one big object; memory stays a fraction of the list size and is capped per node</li>
         <li>Permissions compiled in memory and audit written in background batches: no database round-trip on reads</li>
       </ul>
     </div>
@@ -75,8 +75,8 @@
     <tbody>
       <tr><td>Shamel down</td><td>Circuit breaker opens; webhook polling pauses; logins back off</td><td><code>503 upstream_unavailable</code> + <code>Retry-After</code></td><td>after 60 s</td></tr>
       <tr><td>Shamel slow</td><td>Requests queue; background work is throttled first</td><td><code>503 upstream_busy</code> / <code>504</code> + warning</td><td>after 5 min</td></tr>
-      <tr><td>Connector offline</td><td>Fast-fail; Connector reconnects with backoff</td><td><code>503 upstream_unavailable</code></td><td>yes</td></tr>
-      <tr><td>Database down</td><td>Reads continue on the last compiled config (up to 6 h), then fail closed; writes fail closed</td><td>reads mostly unaffected</td><td>yes</td></tr>
+      <tr><td>All Connectors offline</td><td>2 s grace, then fast-fail; Connectors reconnect with backoff (losing one fails over in ~2 s)</td><td><code>503 upstream_unavailable</code> + <code>Retry-After</code></td><td>after 2 min</td></tr>
+      <tr><td>PostgreSQL down</td><td>Reads continue on the last compiled config (up to 6 h), then fail closed; writes fail closed</td><td>reads OK; writes <code>503</code></td><td>after 60 s</td></tr>
     </tbody>
   </table>
   <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
@@ -92,14 +92,14 @@
   <p class="tiny muted mb2">Estimated steady-state size of the audit log, all stores combined.</p>
   <div class="hbars">
     <div class="hb"><div class="hl">Raw, no optimisation</div><div class="ht"><div class="bar grey" style="width:100%"></div><span class="hv">≈ 8.3 TB</span></div></div>
-    <div class="hb"><div class="hl">Compression only (zstd)</div><div class="ht"><div class="bar grey" style="width:19.3%"></div><span class="hv">≈ 1.6 TB</span></div></div>
-    <div class="hb"><div class="hl"><b>Bawaba</b> (dedup + chunking + dictionaries)</div><div class="ht"><div class="bar brand" style="width:3.6%"></div><span class="hv"><b>≈ 0.3 TB</b> · 28× smaller</span></div></div>
+    <div class="hb"><div class="hl">Compression only (zstd)</div><div class="ht"><div class="bar grey" style="width:20.5%"></div><span class="hv">≈ 1.7 TB</span></div></div>
+    <div class="hb"><div class="hl"><b>Bawaba</b> (dedup + chunking + dictionaries)</div><div class="ht"><div class="bar brand" style="width:3.7%"></div><span class="hv"><b>≈ 0.31 TB</b> · 27× smaller</span></div></div>
   </div>
-  <p class="tiny muted mt2">Per day, response bodies: 85.8 GB raw → 11.7 GB compressed → <b>1.41 GB</b> stored (61× smaller). Polling the same 1 MB list 1,680 times a day costs 1.7 GB raw but only about 4–8 MB stored.</p>
+  <p class="tiny muted mt2">Per day, bodies: 85.8 GB raw → 12.45 GB compressed → <b>1.41 GB</b> stored (≈ 61× smaller). Polling the same 1 MB list 1,680 times a day costs 1.7 GB raw but only about 4–8 MB stored.</p>
 
   <h3 class="mt4">How a response is stored</h3>
   <div class="steps fit mb4">
-    <div class="step"><div class="b"><div class="k">1</div><div class="t">Canonicalize</div><div class="d">stable JSON form</div></div></div>
+    <div class="step"><div class="b"><div class="k">1</div><div class="t">Strip framing</div><div class="d">bytes kept exactly as sent</div></div></div>
     <div class="step"><div class="b"><div class="k">2</div><div class="t">Chunk</div><div class="d">record-aligned for big lists</div></div></div>
     <div class="step hot"><div class="b"><div class="k">3</div><div class="t">Keyed hash</div><div class="d">HMAC id, no content guessing</div></div></div>
     <div class="step hot"><div class="b"><div class="k">4</div><div class="t">Seen before?</div><div class="d">store a reference only</div></div></div>
@@ -118,16 +118,16 @@
           <tr><td>Sandbox bodies</td><td>14 days</td><td>blob store, encrypted</td></tr>
         </tbody>
       </table>
-      <p class="tiny muted mt2">All retention periods are adjustable. Size caps raise alerts at 70 / 85 / 95 %; at the hard cap only the oldest read bodies are trimmed (and recorded as a gap), never writes or metadata.</p>
+      <p class="tiny muted mt2">All retention periods are adjustable. Size caps raise alerts at 70 / 85 / 95 %; at the hard cap only the oldest read (and rejected/sandbox) bodies are trimmed, recorded as a gap, never writes or metadata.</p>
     </div>
     <div class="grid" style="gap:3mm;align-content:start">
-      <div class="callout teal"><div class="ci">✓</div><div class="tiny"><b>Never silently dropped.</b> If storage falls behind, records spool to an encrypted local disk buffer; if that fills, Bawaba fails closed rather than skipping the audit.</div></div>
+      <div class="callout teal"><div class="ci">✓</div><div class="tiny"><b>Never silently dropped.</b> If storage falls behind, records spool to an encrypted local disk buffer; if that fills, Bawaba by default fails closed rather than skipping the audit.</div></div>
       <div class="callout"><div class="ci">⚿</div><div class="tiny"><b>Readable only by you.</b> Searching and decrypting happen only in the control plane; every view or export is audited too.</div></div>
     </div>
   </div>
   <div class="grid g4 mt4">
     <div class="stat"><div class="n">61<small>×</small></div><div class="l">smaller daily body storage than raw</div></div>
-    <div class="stat"><div class="n">28<small>×</small></div><div class="l">smaller total audit at steady state</div></div>
+    <div class="stat"><div class="n">27<small>×</small></div><div class="l">smaller total audit at steady state</div></div>
     <div class="stat"><div class="n">2<small> yrs</small></div><div class="l">of full write history (invoices, vouchers) by default</div></div>
     <div class="stat"><div class="n">0</div><div class="l">records skipped silently: Bawaba fails closed instead</div></div>
   </div>
@@ -146,13 +146,13 @@
       <div class="mt2">
         <span class="chip">customer.created</span><span class="chip">customer.updated</span><span class="chip">customer.removed</span><span class="chip gold">customer.balance_changed</span>
         <span class="chip">item.created</span><span class="chip">item.updated</span><span class="chip">item.removed</span><span class="chip gold">stock.changed</span>
-        <span class="chip">voucher.created</span><span class="chip">voucher.updated</span><span class="chip">voucher.removed</span><span class="chip gold">order.status_changed</span>
+        <span class="chip">voucher.created</span><span class="chip">voucher.updated</span><span class="chip">voucher.removed</span><span class="chip gold">order.status_changed</span><span class="chip gold">approval.resolved</span>
       </div>
       <ul class="clean small mt2">
         <li>Signed with HMAC-SHA256 (<code>Bawaba-Signature</code>), with a timestamp to block replays</li>
         <li>Retries with backoff for about 38 hours, then a dead-letter queue you can replay</li>
         <li>Filtered by the subscribing token’s current permissions and hidden fields</li>
-        <li>Optional pull mode for tools without a public endpoint</li>
+        <li>Push targets must be hosts you approved; optional pull mode for tools without a public endpoint</li>
       </ul>
     </div>
     <div class="card">
@@ -165,21 +165,23 @@
           <tr><td>Order status</td><td>Status checks for tracked orders</td></tr>
         </tbody>
       </table>
-      <p class="tiny muted mt2">Only one node polls each stream (leader lease), so adding nodes never multiplies the load on Shamel.</p>
+      <p class="tiny muted mt2">Only one node polls each stream, so adding nodes never multiplies the load on Shamel. Not everything is seen within 5 min: back-dated vouchers within 1 h, older voucher edits within 24 h, deletions within 48 h; edits to vouchers older than 35 days are not detected.</p>
     </div>
   </div>
 
   <h3>“Inform the AI” instead of only blocking it</h3>
   <div class="grid g-1-2 mb4">
-    <div class="term"><div class="bar"><i></i><i></i><i></i></div><span class="c"># guidance on every response</span>
+    <div class="term"><div class="bar"><i></i><i></i><i></i></div><span class="c"># a tool polling too fast</span>
 <span class="k">HTTP/1.1 200 OK</span>
+<span class="c"># tightest of 3 buckets: upstream units</span>
 RateLimit-Limit: 600
-RateLimit-Remaining: 412
+RateLimit-Remaining: 420
 RateLimit-Reset: 18
 <span class="s">Bawaba-Warning:</span>
   polling_too_frequent;
   observed=8;recommended=60,
-  use_webhooks</div>
+  use_webhooks;
+  events="customer.updated"</div>
     <table class="t compact" style="font-size:7.8pt">
       <thead><tr><th style="width:40%">Warning</th><th>Sent when a tool…</th></tr></thead>
       <tbody>
@@ -187,7 +189,7 @@ RateLimit-Reset: 18
         <tr><td><code>use_webhooks</code></td><td>polls for changes that a webhook event already covers</td></tr>
         <tr><td><code>use_updated_since</code></td><td>re-downloads full lists instead of asking for changes</td></tr>
         <tr><td><code>use_cursor_snapshot</code></td><td>re-fetches page 1 instead of following the cursor</td></tr>
-        <tr><td><code>large_unfiltered_request</code></td><td>pulls more than 5,000 rows with no filter</td></tr>
+        <tr><td><code>large_unfiltered_request</code></td><td>asks for an unfiltered list of over 5,000 visible records</td></tr>
         <tr><td><code>duplicate_request</code></td><td>fires the same call 3+ times within 2 seconds</td></tr>
         <tr><td><code>retry_too_fast</code></td><td>retries before <code>Retry-After</code> has passed</td></tr>
       </tbody>
@@ -195,7 +197,7 @@ RateLimit-Reset: 18
   </div>
   <div class="grid g3">
     <div class="card soft"><h4>Docs written for AI</h4><p class="tiny muted"><code>llms.txt</code>, an AI integration guide with rules of thumb, and recommended polling intervals in the OpenAPI spec.</p></div>
-    <div class="card soft"><h4>You get told too</h4><p class="tiny muted">A misbehaving tool raises an <code>abusive_tool</code> e-mail and a dashboard flag, before anything breaks.</p></div>
+    <div class="card soft"><h4>You get told too</h4><p class="tiny muted">A misbehaving tool gets a dashboard flag first, then an <code>abusive_tool</code> e-mail if it keeps going.</p></div>
     <div class="card soft"><h4>Safety net stays</h4><p class="tiny muted">Generous per-token limits and the global Shamel cap still apply, as a last resort.</p></div>
   </div>
   <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>

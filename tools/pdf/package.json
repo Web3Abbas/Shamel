@@ -4,8 +4,8 @@
   "description": "Builds the Bawaba design PDFs (visual overview + full reference) from docs/",
   "type": "module",
   "scripts": {
-    "overview": "python3 overview/build.py && node render-overview.mjs overview/overview.html ../../docs/pdf/Bawaba-Visual-Overview.pdf",
-    "reference": "node render-full.mjs --out ../../docs/pdf/Bawaba-Design-Reference.pdf --title Bawaba --subtitle \"Secure gateway for the Shamel Pro API\" --version \"0.1 (draft)\" --date 2026-11-03 ../../docs/design/README.md ../../docs/design/00-decisions.md ../../docs/design/01-architecture.md ../../docs/design/02-security.md ../../docs/design/03-api.md ../../docs/design/04-permissions-and-tokens.md ../../docs/design/05-operations.md ../../docs/design/07-milestones.md ../../docs/design/08-isco-questions.md ../../docs/upstream/shamel-api.md",
+    "overview": "mkdir -p ../../docs/pdf && python3 overview/build.py && node render-overview.mjs overview/overview.html ../../docs/pdf/Bawaba-Visual-Overview.pdf",
+    "reference": "mkdir -p ../../docs/pdf && node render-full.mjs --out ../../docs/pdf/Bawaba-Design-Reference.pdf --title Bawaba --subtitle \"Secure gateway for the Shamel Pro API\" --version \"0.2 (reviewed draft)\" --date 2026-11-03 ../../docs/design/README.md ../../docs/design/00-decisions.md ../../docs/design/01-architecture.md ../../docs/design/02-security.md ../../docs/design/03-api.md ../../docs/design/04-permissions-and-tokens.md ../../docs/design/05-operations.md ../../docs/design/07-milestones.md ../../docs/design/08-isco-questions.md ../../docs/upstream/shamel-api.md",
     "build": "npm run overview && npm run reference"
   },
   "dependencies": {
