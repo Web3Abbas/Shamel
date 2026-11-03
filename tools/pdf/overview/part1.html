@@ -1,0 +1,192 @@
+<!-- ============ PAGE: COVER ============ -->
+<section class="page cover">
+  <div class="pattern"></div>
+  <svg class="arch" viewBox="0 0 200 240" aria-hidden="true">
+    <defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E0A458"/><stop offset="1" stop-color="#C9803A"/></linearGradient></defs>
+    <path d="M20 240 V110 A80 80 0 0 1 180 110 V240" fill="none" stroke="url(#cg)" stroke-width="14"/>
+    <path d="M50 240 V118 A50 50 0 0 1 150 118 V240" fill="none" stroke="#7FB7BE" stroke-width="6" opacity=".9"/>
+    <path d="M100 40 l10 18 h-20z" fill="#E0A458"/>
+    <rect x="88" y="150" width="24" height="90" rx="4" fill="#7FB7BE" opacity=".35"/>
+  </svg>
+  <div class="inner">
+    <div class="kicker">Visual design overview</div>
+    <h1>Bawaba</h1>
+    <div class="arname">بوابة</div>
+    <div class="sub">A secure, high-performance gateway in front of the Shamel Pro accounting API: unlimited scoped tokens, fine-grained permissions, a firewall that keeps Shamel invisible, and an API that AI agents can build on safely.</div>
+    <div class="meta">
+      <div><b>Version</b>0.1 — draft for review</div>
+      <div><b>Date</b>3 November 2026</div>
+      <div><b>Companion</b>Full design reference (PDF)</div>
+    </div>
+  </div>
+  <div class="band"></div>
+</section>
+
+<!-- ============ PAGE: AT A GLANCE ============ -->
+<section class="page" id="glance">
+  <div class="kicker"><span class="section-no">01</span>At a glance</div>
+  <h2 class="page-title">One secure door in front of Shamel</h2>
+  <p class="lead">Today every integration logs into Shamel with a real Shamel username and password and can see whatever that user sees. Bawaba becomes the <b>only</b> way in: each tool gets its own token with exactly the access it needs, and Shamel itself disappears from the internet.</p>
+
+  <div class="quote mb4">“Make as many API tokens as I want, more security and permissions, expand the API, better documentation — and a firewall so no hacker can get to Shamel or even find it.”</div>
+
+  <div class="grid g4 mb4">
+    <div class="stat"><div class="n">∞</div><div class="l">API tokens, each with its own permissions, IP allowlist and usage stats</div></div>
+    <div class="stat"><div class="n">0</div><div class="l">open ports needed at the Shamel site when the Connector is used</div></div>
+    <div class="stat"><div class="n">100<small>%</small></div><div class="l">of requests and responses kept in an encrypted audit log</div></div>
+    <div class="stat"><div class="n">30<small>+</small></div><div class="l">Shamel endpoints re-exposed as one clean, documented <code>/v1</code> API</div></div>
+  </div>
+
+  <div class="grid g3 grow">
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div><h4>Origin-hiding firewall</h4><p class="small muted">Shamel’s IP, host, version and raw errors never leave Bawaba. Cloudflare in front, an outbound-only Connector behind.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg></div><h4>Tokens &amp; permissions</h4><p class="small muted">Scopes per resource, per voucher type, data scoping (stores, salesmen, customers…) and field hiding. Read-only and write-only presets.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 8V4M9 13h.01M15 13h.01M9 16h6"/></svg></div><h4>Safe for AI builders</h4><p class="small muted">AI agents only ever talk to Bawaba. They can <i>request</i> access; nothing goes live until you approve it on the server. Sandbox with fake data.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h12v16H6a2 2 0 0 0-2 2z"/><path d="M8 7h6M8 11h6"/></svg></div><h4>A better API</h4><p class="small muted">Clean <code>/v1</code> REST with real status codes, paging, search, combined endpoints, webhooks and idempotent writes — plus a legacy-compatible mode.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg></div><h4>Built for load</h4><p class="small muted">Go, stateless nodes, streaming JSON, request coalescing. Always-live data; the hardware should be the only bottleneck.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></div><h4>Full audit, optimized</h4><p class="small muted">Every call recorded in full, encrypted — with de-duplication and compression so storage stays small.</p></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: TODAY VS BAWABA ============ -->
+<section class="page" id="compare">
+  <div class="kicker"><span class="section-no">02</span>Why a gateway</div>
+  <h2 class="page-title">Shamel’s API today vs. with Bawaba</h2>
+  <p class="lead">Shamel Pro’s Web API works, but it was built for one trusted integration, not for many tools with different needs. Bawaba keeps Shamel exactly as it is and fixes everything around it.</p>
+  <table class="t">
+    <thead><tr><th style="width:24%">Topic</th><th style="width:38%">Shamel API today</th><th>With Bawaba</th></tr></thead>
+    <tbody>
+      <tr><td>Credentials</td><td>One real Shamel username + password per integration; token from <code>/Main/Login</code></td><td>Unlimited Bawaba tokens; Shamel credentials stay encrypted inside Bawaba and are never shared</td></tr>
+      <tr><td>Permissions</td><td>Only Shamel’s own salesman scoping; <code>getAll=true</code> sees everything</td><td>Scopes, voucher-type rights, data scoping and field hiding per token; deny by default</td></tr>
+      <tr><td>Exposure</td><td>Shamel server must be reachable by every integration</td><td>Shamel reachable only by Bawaba — through an outbound Connector tunnel (no open ports) or an IP-locked direct URL</td></tr>
+      <tr><td>Errors</td><td>Every error is HTTP 500 with raw details (can leak internals)</td><td>Proper status codes and stable error codes in English + Arabic; internals only in the encrypted audit log</td></tr>
+      <tr><td>Parameters</td><td>Filters passed as HTTP headers; writes as a JSON string inside a form field (<code>obj=</code>)</td><td>Query parameters and JSON bodies, validated against a strict schema</td></tr>
+      <tr><td>Large lists</td><td>Everything returned at once, no paging</td><td>Cursor paging over a 60-second snapshot, search (Arabic-aware), sorting</td></tr>
+      <tr><td>Naming</td><td>Typos and inconsistencies (<code>sale_parice1</code>, <code>orgnization_code</code>, <code>refrenceId</code>)</td><td>Consistent snake_case with typos fixed, documented in OpenAPI 3.1</td></tr>
+      <tr><td>Duplicates</td><td>A retried request can post the same invoice twice</td><td><code>Idempotency-Key</code> on every write; optional human approval queue</td></tr>
+      <tr><td>Change tracking</td><td>Clients must poll and diff themselves</td><td>Signed webhooks (customers, items, stock, vouchers, order status)</td></tr>
+      <tr><td>Visibility</td><td>No usage or audit trail</td><td>Per-token analytics, full encrypted audit, e-mail alerts</td></tr>
+      <tr><td>Documentation</td><td>A 20-page PDF</td><td>Interactive bilingual docs, error catalogue, <code>llms.txt</code> for AI agents, sandbox</td></tr>
+    </tbody>
+  </table>
+  <div class="grow"></div>
+  <div class="callout teal mt4"><div class="ci">i</div><div class="small"><b>Nothing changes inside Shamel.</b> Bawaba is a separate layer: Shamel keeps running exactly as today, and existing integrations can migrate gradually by switching to Bawaba’s legacy-compatible paths (same requests, new URL and token).</div></div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: ARCHITECTURE ============ -->
+<section class="page" id="arch">
+  <div class="kicker"><span class="section-no">03</span>Architecture</div>
+  <h2 class="page-title">How the pieces fit together</h2>
+  <p class="lead">Every request enters through Cloudflare, passes Bawaba’s pipeline, and reaches Shamel only through the Connector’s outbound tunnel. The admin side is bound to the server itself and has no public route.</p>
+
+  <svg class="dg" viewBox="0 0 600 372" role="img" aria-label="Bawaba architecture">
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1F6F7F"/></marker>
+      <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#C9803A"/></marker>
+      <linearGradient id="bw" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0B3A47"/><stop offset="1" stop-color="#145E6F"/></linearGradient>
+    </defs>
+    <style>
+      .bx{fill:#fff;stroke:#BFD8DC;stroke-width:1}
+      .tt{font-size:9.6px;font-weight:700;fill:#16232A}
+      .st{font-size:7.6px;fill:#5B6B73}
+      .wt{font-size:10.5px;font-weight:800;fill:#fff}
+      .ws{font-size:7.4px;fill:#BFD6D9}
+      .ln{stroke:#1F6F7F;stroke-width:1.3;fill:none}
+      .lg{stroke:#C9803A;stroke-width:1.4;fill:none}
+      .lbl{font-size:7.2px;fill:#1F6F7F;font-weight:600}
+      .chipr{fill:#E8F2F3;stroke:#9FC3C8;stroke-width:.8}
+      .chipt{font-size:7px;fill:#0F4C5C;font-weight:600}
+    </style>
+
+    <!-- Clients -->
+    <text x="10" y="22" class="st" style="font-weight:700;letter-spacing:.08em">CALLERS</text>
+    <rect x="10" y="32" width="112" height="44" rx="7" class="bx"/><text x="20" y="50" class="tt">Your tools &amp; dashboards</text><text x="20" y="64" class="st">server-side · bwb_live_ / bwb_test_</text>
+    <rect x="10" y="88" width="112" height="44" rx="7" class="bx"/><text x="20" y="106" class="tt">AI agents</text><text x="20" y="120" class="st">off-server · agent token</text>
+    <rect x="10" y="144" width="112" height="44" rx="7" class="bx"/><text x="20" y="162" class="tt">Browser dashboards</text><text x="20" y="176" class="st">opt-in · bwb_pk_ · read-only</text>
+
+    <!-- Cloudflare -->
+    <rect x="142" y="72" width="76" height="76" rx="10" fill="#FBF6EE" stroke="#E9CFA8"/>
+    <path d="M160 100h22a8 8 0 0 0 1-15.8 11 11 0 0 0-21 3.3A6.5 6.5 0 0 0 160 100z" fill="#E0A458" opacity=".9" transform="translate(4,-2)"/>
+    <text x="180" y="118" text-anchor="middle" class="tt">Cloudflare</text>
+    <text x="180" y="130" text-anchor="middle" class="st">TLS · WAF · DDoS</text>
+    <text x="180" y="140" text-anchor="middle" class="st">hides Bawaba’s IP</text>
+    <path class="ln" d="M122 54 C132 54,132 100,142 104" marker-end="url(#ah)"/>
+    <path class="ln" d="M122 110 L142 110" marker-end="url(#ah)"/>
+    <path class="ln" d="M122 166 C132 166,132 120,142 116" marker-end="url(#ah)"/>
+
+    <!-- Bawaba box -->
+    <rect x="236" y="12" width="222" height="352" rx="12" fill="url(#bw)"/>
+    <text x="250" y="32" class="wt">Bawaba</text><text x="296" y="32" class="ws" style="font-size:9px">بوابة</text>
+    <!-- data plane -->
+    <rect x="248" y="42" width="198" height="140" rx="8" fill="#fff" opacity=".97"/>
+    <text x="258" y="58" class="tt">Data plane · bawaba-gateway × N</text>
+    <text x="258" y="70" class="st">public /v1 · /legacy · /docs — stateless</text>
+    <g>
+      <rect x="258" y="78" width="56" height="15" rx="7.5" class="chipr"/><text x="286" y="88.5" text-anchor="middle" class="chipt">IP firewall</text>
+      <rect x="318" y="78" width="56" height="15" rx="7.5" class="chipr"/><text x="346" y="88.5" text-anchor="middle" class="chipt">Auth token</text>
+      <rect x="378" y="78" width="58" height="15" rx="7.5" class="chipr"/><text x="407" y="88.5" text-anchor="middle" class="chipt">Rate &amp; usage</text>
+      <rect x="258" y="98" width="56" height="15" rx="7.5" class="chipr"/><text x="286" y="108.5" text-anchor="middle" class="chipt">Validate</text>
+      <rect x="318" y="98" width="56" height="15" rx="7.5" class="chipr"/><text x="346" y="108.5" text-anchor="middle" class="chipt">Permissions</text>
+      <rect x="378" y="98" width="58" height="15" rx="7.5" class="chipr"/><text x="407" y="108.5" text-anchor="middle" class="chipt">Coalesce</text>
+      <rect x="258" y="118" width="56" height="15" rx="7.5" class="chipr"/><text x="286" y="128.5" text-anchor="middle" class="chipt">Normalize</text>
+      <rect x="318" y="118" width="56" height="15" rx="7.5" class="chipr"/><text x="346" y="128.5" text-anchor="middle" class="chipt">Data scope</text>
+      <rect x="378" y="118" width="58" height="15" rx="7.5" class="chipr"/><text x="407" y="128.5" text-anchor="middle" class="chipt">Field hiding</text>
+    </g>
+    <rect x="258" y="142" width="178" height="30" rx="6" fill="#FBF6EE" stroke="#E9CFA8" stroke-width=".8"/>
+    <text x="268" y="155" class="tt" style="font-size:8.4px">Upstream client</text>
+    <text x="268" y="166" class="st" style="font-size:7px">sessions · concurrency cap · circuit breaker</text>
+    <!-- control plane -->
+    <rect x="248" y="192" width="198" height="56" rx="8" fill="#FBF6EE" stroke="#E0A458" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="258" y="209" class="tt">Control plane · 127.0.0.1 only</text>
+    <text x="258" y="222" class="st">dashboard (ar/en) · CLI · approvals</text>
+    <text x="258" y="234" class="st">tokens · firewall rules · keys · audit search</text>
+    <!-- stores -->
+    <g>
+      <path d="M256 268 a20 6 0 0 1 40 0 v30 a20 6 0 0 1 -40 0z" fill="#E8F2F3" stroke="#9FC3C8"/><ellipse cx="276" cy="268" rx="20" ry="6" fill="#fff" stroke="#9FC3C8"/>
+      <text x="276" y="290" text-anchor="middle" class="chipt">Postgres</text>
+      <path d="M326 268 a20 6 0 0 1 40 0 v30 a20 6 0 0 1 -40 0z" fill="#E8F2F3" stroke="#9FC3C8"/><ellipse cx="346" cy="268" rx="20" ry="6" fill="#fff" stroke="#9FC3C8"/>
+      <text x="346" y="290" text-anchor="middle" class="chipt">Valkey</text>
+      <path d="M396 268 a20 6 0 0 1 40 0 v30 a20 6 0 0 1 -40 0z" fill="#E8F2F3" stroke="#9FC3C8"/><ellipse cx="416" cy="268" rx="20" ry="6" fill="#fff" stroke="#9FC3C8"/>
+      <text x="416" y="287" text-anchor="middle" class="chipt">Audit</text><text x="416" y="296" text-anchor="middle" class="chipt">blobs</text>
+    </g>
+    <text x="250" y="318" class="ws">state · rate limits &amp; snapshots · encrypted audit</text>
+    <rect x="248" y="326" width="198" height="28" rx="7" fill="#fff" opacity=".12" stroke="#7FB7BE" stroke-width=".8"/>
+    <text x="258" y="338" class="wt" style="font-size:8.4px">bawaba-mock · sandbox</text>
+    <text x="258" y="348" class="ws">fake Shamel data for bwb_test_ tokens</text>
+
+    <!-- CF -> data plane -->
+    <path class="ln" d="M218 110 L248 110" marker-end="url(#ah)"/>
+    <text x="222" y="104" class="lbl" style="font-size:6.4px">mTLS</text>
+
+    <!-- Shamel site -->
+    <rect x="474" y="42" width="118" height="150" rx="10" fill="#F6FAFA" stroke="#9FC3C8" stroke-dasharray="4 3"/>
+    <text x="484" y="58" class="st" style="font-weight:700;letter-spacing:.06em">SHAMEL SITE</text>
+    <rect x="484" y="66" width="98" height="40" rx="7" class="bx"/><text x="494" y="83" class="tt">Connector</text><text x="494" y="96" class="st">outbound only</text>
+    <rect x="484" y="140" width="98" height="42" rx="7" fill="#0F4C5C"/><text x="494" y="158" class="wt" style="font-size:9.4px">Shamel Pro API</text><text x="494" y="171" class="ws">unchanged · invisible</text>
+    <path class="ln" d="M533 106 L533 140" marker-end="url(#ah)"/>
+    <text x="538" y="126" class="lbl" style="font-size:6.6px">LAN · allowlisted paths</text>
+    <!-- tunnel -->
+    <path class="lg" d="M484 86 C470 86,462 150,446 156" marker-end="url(#ahg)" stroke-dasharray="5 3"/>
+    <text x="462" y="76" class="lbl" style="fill:#C9803A;font-size:6.8px" text-anchor="middle">dials out</text>
+
+    <!-- owner -->
+    <rect x="474" y="206" width="118" height="40" rx="7" class="bx"/><text x="484" y="223" class="tt">Owner (you)</text><text x="484" y="236" class="st">SSH tunnel → localhost</text>
+    <path class="ln" d="M474 226 L446 222" marker-end="url(#ah)"/>
+
+    <!-- attacker -->
+    <rect x="474" y="292" width="118" height="40" rx="7" fill="#FBEDEA" stroke="#F2D3CC"/><text x="484" y="309" class="tt" style="fill:#9B3B27">Attacker</text><text x="484" y="322" class="st">scans for Shamel</text>
+    <path d="M560 292 L560 262" stroke="#C8553D" stroke-width="1.4" stroke-dasharray="3 3"/>
+    <circle cx="560" cy="256" r="7" fill="#C8553D"/><path d="M556.5 252.5l7 7M563.5 252.5l-7 7" stroke="#fff" stroke-width="1.6"/>
+    <text x="574" y="259" class="st" style="fill:#9B3B27;font-weight:700">no route</text>
+  </svg>
+
+  <div class="legend mt2"><span><i></i>request path</span><span><i class="dash"></i>Connector tunnel (initiated from the Shamel site)</span><span><i class="red" style="border-top-style:dashed"></i>blocked</span></div>
+
+  <div class="grid g3 mt6">
+    <div class="card edge-teal"><h4>Data plane</h4><p class="small muted">Stateless Go nodes behind Cloudflare. Add nodes to scale; any node can serve any request.</p></div>
+    <div class="card edge"><h4>Control plane</h4><p class="small muted">Bound to <code>127.0.0.1</code>; you reach it through an SSH tunnel. Approvals and live-token creation happen only here.</p></div>
+    <div class="card edge-teal"><h4>Connector</h4><p class="small muted">Small service next to Shamel that dials <i>out</i> to Bawaba. Shamel needs no public IP and no open port.</p></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>

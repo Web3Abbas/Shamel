@@ -1,0 +1,54 @@
+<!-- ============ PAGE: DECISIONS ============ -->
+<section class="page" id="decisions">
+  <div class="kicker"><span class="section-no">19</span>Decisions</div>
+  <h2 class="page-title">What you decided</h2>
+  <p class="lead">The design follows your answers from the requirements interview. These are recorded in <code>docs/design/00-decisions.md</code>, which every other document must stay consistent with.</p>
+  <div class="grid g2" style="gap:3mm 5mm">
+    <table class="t compact dec">
+      <tbody>
+        <tr><td>Audience (v1)</td><td>Your own company; selling it comes later</td></tr>
+        <tr><td>Token users</td><td>Tools and dashboards you build, mostly with AI</td></tr>
+        <tr><td>Shamel servers</td><td>One now, more later</td></tr>
+        <tr><td>Language</td><td>Go: chosen for speed and load</td></tr>
+        <tr><td>Load</td><td>Medium now, built for heavy; hardware is the only limit</td></tr>
+        <tr><td>Hosting</td><td>Decide later; Docker + binaries</td></tr>
+        <tr><td>Reaching Shamel</td><td>Connector tunnel (preferred) + direct URL</td></tr>
+        <tr><td>Edge</td><td>Cloudflare in front</td></tr>
+        <tr><td>Master key</td><td>Root-only key file on the server</td></tr>
+        <tr><td>API style</td><td>Clean <code>/v1</code> + optional legacy mode</td></tr>
+        <tr><td>Data freshness</td><td>Always live; 60-second paging snapshots</td></tr>
+        <tr><td>First milestone</td><td>Everything that reads data</td></tr>
+      </tbody>
+    </table>
+    <table class="t compact dec">
+      <tbody>
+        <tr><td>Shamel login</td><td>Configurable per token</td></tr>
+        <tr><td>Permissions</td><td>Scopes, voucher types, data scope, field hiding, presets</td></tr>
+        <tr><td>Token extras</td><td>IP allowlist, usage analytics; no expiry by default</td></tr>
+        <tr><td>Browser tokens</td><td>Supported, off by default</td></tr>
+        <tr><td>AI agents</td><td>Request → you approve on the server</td></tr>
+        <tr><td>Sandbox</td><td>Yes, with fake data</td></tr>
+        <tr><td>Write safety</td><td>Approval queue + undo-friendly audit</td></tr>
+        <tr><td>Admin</td><td>Localhost dashboard (ar/en) + CLI with JSON</td></tr>
+        <tr><td>Alerts</td><td>E-mail</td></tr>
+        <tr><td>Audit</td><td>Everything, full, encrypted, optimized</td></tr>
+        <tr><td>Webhooks</td><td>Change checks every 5 minutes</td></tr>
+        <tr><td>Billing / licensing</td><td>Not in v1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt6">The design documents</h3>
+  <div class="grid g3 docgrid">
+    <div class="doc"><b>00 · Decisions</b><span>The record of your answers</span></div>
+    <div class="doc"><b>01 · Architecture</b><span>Components, pipeline, Connector, scaling, failures</span></div>
+    <div class="doc"><b>02 · Security &amp; firewall</b><span>Threat model, origin hiding, crypto, AI containment</span></div>
+    <div class="doc"><b>03 · Public API</b><span>Every endpoint, errors, paging, writes, webhooks API</span></div>
+    <div class="doc"><b>04 · Tokens &amp; permissions</b><span>Scopes, data scope, field hiding, approvals</span></div>
+    <div class="doc"><b>05 · Operations</b><span>Audit, webhooks engine, alerts, dashboard, CLI, backups</span></div>
+    <div class="doc"><b>07 · Milestones</b><span>Delivery plan and acceptance criteria</span></div>
+    <div class="doc"><b>08 · ISCO questions</b><span>English + Arabic list to send to ISCO</span></div>
+    <div class="doc"><b>Upstream reference</b><span>The Shamel Pro API manual, transcribed</span></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>

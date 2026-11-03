@@ -1,0 +1,278 @@
+<!-- ============ PAGE: TOKENS & PERMISSIONS ============ -->
+<section class="page" id="perms">
+  <div class="kicker"><span class="section-no">07</span>Tokens &amp; permissions</div>
+  <h2 class="page-title">Every tool gets exactly the access it needs</h2>
+  <p class="lead">Create as many tokens as you like. Each one carries its own permission profile, checked on every request and denied by default. Revoking a token takes effect on every node within seconds.</p>
+
+  <div class="tokenbar mb4">
+    <span class="tp a">bwb_</span><span class="tp b">live_</span><span class="tp c">7Kq2…x9Fz</span><span class="tp d">checksum</span>
+  </div>
+  <div class="grid g4 mb4" style="margin-top:-1mm">
+    <div class="tiny muted"><b class="ink">Prefix</b> marks it as a Bawaba token, so it can’t be confused with a Shamel credential</div>
+    <div class="tiny muted"><b class="ink">Environment</b> <code>live_</code> = real Shamel · <code>test_</code> = sandbox · <code>pk_</code> = browser</div>
+    <div class="tiny muted"><b class="ink">256-bit secret</b> shown once, stored only as an HMAC hash</div>
+    <div class="tiny muted"><b class="ink">Checksum</b> lets secret scanners spot a leaked token</div>
+  </div>
+
+  <h3>Four permission layers, applied in order</h3>
+  <div class="funnel mb4">
+    <div class="fl f1"><div class="fn">1</div><div><b>Scopes</b> · which resources, read or write<div class="fx"><span class="chip">customers:read</span><span class="chip">items:read</span><span class="chip">stock:read</span><span class="chip">vouchers:read</span><span class="chip">reports:read</span><span class="chip">webhooks:write</span></div></div></div>
+    <div class="fl f2"><div class="fn">2</div><div><b>Voucher types</b> · which documents it may create<div class="fx"><span class="chip mint">order ✓</span><span class="chip mint">receipt ✓</span><span class="chip rose">sales_invoice ✕</span><span class="chip rose">journal ✕</span></div></div></div>
+    <div class="fl f3"><div class="fn">3</div><div><b>Data scope</b> · which rows it can see<div class="fx"><span class="chip gold">stores 1, 2</span><span class="chip gold">salesman S07</span><span class="chip gold">currency NIS</span><span class="chip gold">price classes</span><span class="chip gold">customers</span></div></div></div>
+    <div class="fl f4"><div class="fn">4</div><div><b>Field hiding</b> · which fields are stripped from responses<div class="fx"><span class="chip ghost">items.purchase_price</span><span class="chip ghost">customers.balance</span><span class="chip ghost">customers.credit_limit</span></div></div></div>
+  </div>
+
+  <div class="grid g3 mb4">
+    <div class="card soft"><h4>Plus, per token</h4><ul class="clean tiny"><li>IP allowlist</li><li>Legacy-mode on/off</li><li>Writes need your approval</li><li>Optional expiry (none by default)</li><li>Own rate limits and usage stats</li></ul></div>
+    <div class="card soft"><h4>Presets</h4><p class="tiny muted mb2">Templates that expand into explicit grants:</p><span class="chip">read-only</span><span class="chip">write-only</span><span class="chip">full access</span><span class="chip">sales dashboard</span><span class="chip">stock monitor</span><span class="chip">accountant reports</span></div>
+    <div class="card soft"><h4>Shamel login per token</h4><p class="tiny muted">Tokens use the default Shamel service account, or can be pinned to a specific Shamel user, such as a salesman, to keep Shamel’s own salesman filtering. <code>getAll</code> is never sent without explicit permission.</p></div>
+  </div>
+
+  <div class="callout teal"><div class="ci">i</div><div class="small"><b>Nothing to probe.</b> Rows outside a token’s data scope are simply absent, and counts include only visible rows. An out-of-scope customer returns the same <code>404</code> as a customer that doesn’t exist. Write permission never implies read permission, which is what makes “write-only” tokens possible.</div></div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: AI AGENTS ============ -->
+<section class="page" id="ai">
+  <div class="kicker"><span class="section-no">08</span>AI agents</div>
+  <h2 class="page-title">AI can ask. Only you can say yes.</h2>
+  <p class="lead">AI agents build your tools, but they never touch Shamel and never see its credentials or address. An agent works against a sandbox with fake data and can <b>request</b> tokens. Nothing goes live until you approve it, on the server.</p>
+
+  <svg class="dg" viewBox="0 0 600 236" role="img" aria-label="AI access request flow">
+    <defs>
+      <marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1F6F7F"/></marker>
+      <marker id="ah8g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#C9803A"/></marker>
+    </defs>
+    <style>.lt{font-size:9.6px;font-weight:700;fill:#16232A}.ls{font-size:7.4px;fill:#5B6B73}.st{font-size:8px;font-weight:700;fill:#16232A}.ss{font-size:7px;fill:#5B6B73}.num{font-size:8px;font-weight:800;fill:#fff}</style>
+    <!-- lanes -->
+    <rect x="0" y="4" width="600" height="70" rx="8" fill="#F3F6F6"/>
+    <rect x="0" y="82" width="600" height="70" rx="8" fill="#E8F2F3"/>
+    <rect x="0" y="160" width="600" height="70" rx="8" fill="#FBF6EE"/>
+    <text x="12" y="34" class="lt">AI agent</text><text x="12" y="47" class="ls">off-server</text><text x="12" y="58" class="ls">agent token</text>
+    <text x="12" y="112" class="lt">Bawaba</text><text x="12" y="125" class="ls">data plane</text>
+    <text x="12" y="190" class="lt">You</text><text x="12" y="203" class="ls">on the server</text><text x="12" y="214" class="ls">dashboard / CLI</text>
+
+    <!-- step 1 -->
+    <rect x="88" y="18" width="104" height="42" rx="7" fill="#fff" stroke="#9FC3C8"/><circle cx="100" cy="30" r="7" fill="#1F6F7F"/><text x="100" y="33" text-anchor="middle" class="num">1</text>
+    <text x="112" y="33" class="st">Build in sandbox</text><text x="96" y="50" class="ss">bwb_test_ · fake data</text>
+    <!-- step 2 -->
+    <rect x="206" y="18" width="104" height="42" rx="7" fill="#fff" stroke="#9FC3C8"/><circle cx="218" cy="30" r="7" fill="#1F6F7F"/><text x="218" y="33" text-anchor="middle" class="num">2</text>
+    <text x="230" y="33" class="st">Request access</text><text x="214" y="50" class="ss">scopes · env · reason</text>
+    <path d="M192 39 L206 39" stroke="#1F6F7F" stroke-width="1.2" marker-end="url(#ah8)"/>
+    <!-- step 3 bawaba subset -->
+    <rect x="206" y="96" width="104" height="42" rx="7" fill="#fff" stroke="#1F6F7F"/><circle cx="218" cy="108" r="7" fill="#1F6F7F"/><text x="218" y="111" text-anchor="middle" class="num">3</text>
+    <text x="230" y="111" class="st">Subset check</text><text x="214" y="128" class="ss">≤ agent’s own rights?</text>
+    <path d="M258 60 L258 96" stroke="#1F6F7F" stroke-width="1.2" marker-end="url(#ah8)"/>
+    <text x="264" y="82" class="ss" style="fill:#9B3B27">no → rejected</text>
+    <!-- step 4 owner -->
+    <rect x="324" y="174" width="112" height="42" rx="7" fill="#fff" stroke="#E0A458"/><circle cx="336" cy="186" r="7" fill="#C9803A"/><text x="336" y="189" text-anchor="middle" class="num">4</text>
+    <text x="348" y="189" class="st">Review &amp; approve</text><text x="332" y="206" class="ss">e-mail alert · may narrow</text>
+    <path d="M310 117 C340 117,350 150,370 174" stroke="#C9803A" stroke-width="1.4" fill="none" marker-end="url(#ah8g)"/>
+    <text x="350" y="146" class="ss" style="fill:#C9803A;font-weight:700">pending</text>
+    <!-- step 5 sealed secret -->
+    <rect x="450" y="96" width="112" height="42" rx="7" fill="#fff" stroke="#1F6F7F"/><circle cx="462" cy="108" r="7" fill="#1F6F7F"/><text x="462" y="111" text-anchor="middle" class="num">5</text>
+    <text x="474" y="111" class="st">Token issued</text><text x="458" y="128" class="ss">sealed to agent’s key</text>
+    <path d="M436 190 C470 190,490 160,500 138" stroke="#1F6F7F" stroke-width="1.2" fill="none" marker-end="url(#ah8)"/>
+    <!-- step 6 claim -->
+    <rect x="450" y="18" width="112" height="42" rx="7" fill="#fff" stroke="#9FC3C8"/><circle cx="462" cy="30" r="7" fill="#1F6F7F"/><text x="462" y="33" text-anchor="middle" class="num">6</text>
+    <text x="474" y="33" class="st">Collect once</text><text x="458" y="50" class="ss">then destroyed on server</text>
+    <path d="M506 96 L506 60" stroke="#1F6F7F" stroke-width="1.2" marker-end="url(#ah8)"/>
+    <!-- going live -->
+    <rect x="450" y="174" width="140" height="42" rx="7" fill="#0F4C5C"/><text x="462" y="191" style="font-size:8px;font-weight:700;fill:#fff">Going live = you issue</text><text x="462" y="203" style="font-size:8px;font-weight:700;fill:#fff">a live token yourself</text>
+  </svg>
+
+  <div class="grid g2 mt4">
+    <div class="card edge-teal">
+      <h4>Rules an agent can’t get around</h4>
+      <ul class="clean small">
+        <li>It can never request more than its own token holds: scopes, data scope, hidden fields, IP rules, environment and expiry are all checked</li>
+        <li>It can’t approve anything; approval exists only on the server</li>
+        <li>The check runs again at approval time, against the agent’s rights at that moment</li>
+        <li>At most 20 pending and 50 requests a day per agent, and widening requests can’t be bulk-approved, so you won’t be worn down into clicking “yes”</li>
+      </ul>
+    </div>
+    <div class="card edge">
+      <h4>Safe defaults</h4>
+      <ul class="clean small">
+        <li>Agent tokens start in the <b>sandbox</b> (<code>bwb_test_</code>, built-in mock Shamel with Arabic fake data)</li>
+        <li>Tokens born from agent requests have writes held for your approval by default</li>
+        <li>You can narrow a request before approving, never widen it</li>
+        <li>A token collected from an unexpected IP raises an alert</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt6">The sandbox</h3>
+  <div class="grid g-1-2">
+    <div class="code"><span class="k">GET</span> /v1/customers?limit=2
+Authorization: Bearer bwb_test_…
+
+<span class="k">200 OK</span>
+Bawaba-Environment: sandbox
+{"data":[{"code":"C1001",
+  "name":"شركة النور للتجارة",
+  "city_name":"نابلس", …}],
+ "page":{"next_cursor":"…"}}</div>
+    <div class="grid g2" style="gap:3mm">
+      <div class="card soft"><h4>Same contract as live</h4><p class="tiny muted">Identical endpoints, fields, errors and limits, so a tool built in the sandbox works unchanged with a live token.</p></div>
+      <div class="card soft"><h4>Realistic fake data</h4><p class="tiny muted">A deterministic dataset with Arabic names, multiple currencies, stores, salesmen and vouchers.</p></div>
+      <div class="card soft"><h4>Can’t cross over</h4><p class="tiny muted">A test token can never reach live Shamel: the token prefix and its stored environment must agree, or the request fails.</p></div>
+      <div class="card soft"><h4>Reset anytime</h4><p class="tiny muted">Each agent gets its own sandbox namespace and can reset it; sandbox audit bodies are kept 14 days.</p></div>
+    </div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: WRITE APPROVALS ============ -->
+<section class="page" id="writes">
+  <div class="kicker"><span class="section-no">09</span>Safe writes</div>
+  <h2 class="page-title">Invoices never post twice, and can wait for you</h2>
+  <p class="lead">Writes (new customers, items, cost centers and all 13 voucher types) come in milestone 2. Every write carries an <code>Idempotency-Key</code>, so a retry can never create a duplicate. For tokens you choose, writes wait in an approval queue until you have looked at them.</p>
+
+  <svg class="dg" viewBox="0 0 600 150" role="img" aria-label="Write approval state machine">
+    <defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1F6F7F"/></marker></defs>
+    <style>.s{font-size:9px;font-weight:700;fill:#16232A}.d{font-size:7px;fill:#5B6B73}.w{font-size:9px;font-weight:700;fill:#fff}</style>
+    <rect x="6" y="46" width="92" height="44" rx="22" fill="#fff" stroke="#9FC3C8"/><text x="52" y="66" text-anchor="middle" class="s">Tool posts</text><text x="52" y="78" text-anchor="middle" class="d">202 + approval id</text>
+    <path d="M98 68 L126 68" stroke="#1F6F7F" stroke-width="1.3" marker-end="url(#ah9)"/>
+    <rect x="128" y="46" width="92" height="44" rx="22" fill="#FBF6EE" stroke="#E0A458"/><text x="174" y="66" text-anchor="middle" class="s">pending</text><text x="174" y="78" text-anchor="middle" class="d">payload frozen + hashed</text>
+    <path d="M220 68 L248 68" stroke="#1F6F7F" stroke-width="1.3" marker-end="url(#ah9)"/><text x="234" y="38" text-anchor="middle" class="d" style="fill:#1F6F7F;font-weight:700">you approve</text><path d="M234 41 L234 64" stroke="#1F6F7F" stroke-width=".8" stroke-dasharray="2 2"/>
+    <rect x="250" y="46" width="92" height="44" rx="22" fill="#E8F2F3" stroke="#1F6F7F"/><text x="296" y="66" text-anchor="middle" class="s">approved</text><text x="296" y="78" text-anchor="middle" class="d">re-validated now</text>
+    <path d="M342 68 L370 68" stroke="#1F6F7F" stroke-width="1.3" marker-end="url(#ah9)"/>
+    <rect x="372" y="46" width="92" height="44" rx="22" fill="#E8F2F3" stroke="#1F6F7F"/><text x="418" y="66" text-anchor="middle" class="s">submitted</text><text x="418" y="78" text-anchor="middle" class="d">with idempotency</text>
+    <path d="M464 60 L492 36" stroke="#1F6F7F" stroke-width="1.3" marker-end="url(#ah9)"/>
+    <path d="M464 76 L492 100" stroke="#1F6F7F" stroke-width="1.3" marker-end="url(#ah9)"/>
+    <rect x="494" y="14" width="100" height="40" rx="20" fill="#0F4C5C"/><text x="544" y="32" text-anchor="middle" class="w">succeeded</text><text x="544" y="44" text-anchor="middle" class="d" style="fill:#BFD6D9">Shamel ref recorded</text>
+    <rect x="494" y="82" width="100" height="40" rx="20" fill="#FBEDEA" stroke="#F2D3CC"/><text x="544" y="100" text-anchor="middle" class="s" style="fill:#9B3B27">failed</text><text x="544" y="112" text-anchor="middle" class="d">reason recorded</text>
+    <path d="M174 90 L174 118" stroke="#C8553D" stroke-width="1.2" marker-end="url(#ah9)"/>
+    <rect x="118" y="120" width="112" height="24" rx="12" fill="#F3F6F6" stroke="#DCE3E5"/><text x="174" y="136" text-anchor="middle" class="d" style="font-weight:700">rejected · expired · cancelled</text>
+  </svg>
+
+  <div class="grid g3 mt4 mb4">
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h12v16H6a2 2 0 0 0-2 2z"/><path d="M8 7h6M8 11h6"/></svg></div><h4>You see a real document</h4><p class="small muted">The dashboard shows the voucher as a business document (type, customer, lines, totals, currency) next to the raw JSON.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5M20 12a8 8 0 0 1-14 5"/><path d="M18 3v4h-4M6 21v-4h4"/></svg></div><h4>Never double-posted</h4><p class="small muted">Same key + same body returns the original result. Same key + different body returns <code>409</code>. A write whose outcome is unknown raises a critical alert instead of a retry.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></div><h4>Undo-friendly audit</h4><p class="small muted">Every write keeps its full payload, who sent it, who approved it, and Shamel’s reference id, so you can find and reverse it in Shamel.</p></div>
+  </div>
+
+  <h3>What a tool sees</h3>
+  <div class="grid g2">
+    <div class="code"><span class="c"># tool</span>
+<span class="k">POST</span> /v1/vouchers/order
+Authorization: Bearer bwb_live_…
+Idempotency-Key: 4f1c-…-order-1093
+
+{"customer_code":"C1001","currency_code":"NIS",
+ "lines":[{"item_code":"A-100","quantity":"12",
+           "price":"8.5","store_id":1}]}</div>
+    <div class="code"><span class="c"># Bawaba</span>
+<span class="k">HTTP/1.1 202 Accepted</span>
+Location: /v1/approvals/apr_51
+
+{"approval": {"id":"apr_51","status":"pending",
+  "expires_at":"2026-11-04T12:00:00+02:00"}}
+
+<span class="c"># later: GET /v1/approvals/apr_51 → "succeeded",</span>
+<span class="c"># "reference_id":"O-10931"  (or a webhook event)</span></div>
+  </div>
+
+  <div class="grid g3 mt4">
+    <div class="card soft"><h4>Batches</h4><p class="tiny muted">Up to 100 writes per request, run one at a time in order (Shamel has no transactions), each with its own idempotency key and an optional stop-on-error.</p></div>
+    <div class="card soft"><h4>Retry rules</h4><p class="tiny muted">A key is kept for 24 hours after the final result. Validation failures release the key, so the same key can be reused once the body is corrected.</p></div>
+    <div class="card soft"><h4>Fails closed</h4><p class="tiny muted">If the idempotency store is unavailable, nothing is sent to Shamel: <code>503 idempotency_unavailable</code>.</p></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: THE API ============ -->
+<section class="page" id="api">
+  <div class="kicker"><span class="section-no">10</span>The API</div>
+  <h2 class="page-title">A clean <code style="font-size:inherit;background:none;color:inherit;padding:0">/v1</code> API, with a bridge for old integrations</h2>
+  <p class="lead">Ordinary query parameters, JSON bodies and real status codes. A per-token <b>legacy mode</b> keeps Shamel’s original paths, so existing integrations switch by changing only the URL and token. Both go through the same permissions, firewall and audit.</p>
+
+  <div class="grid g2 mb4">
+    <div>
+      <div class="tag grey mb2">Shamel today</div>
+      <div class="code"><span class="k">GET</span> /Customer/GetCustomers
+username: api-user
+token: 9f8e…   <span class="c"># Shamel session</span>
+code: C1001
+getBalance: true
+getContacts: true
+
+<span class="c">→ 200 [ { "code":"C1001", "price_class": 2.0,</span>
+<span class="c">        "orgnization_code": … } ]</span>
+<span class="c">→ any error: 500 + raw exception text</span></div>
+    </div>
+    <div>
+      <div class="tag mint mb2">Bawaba /v1</div>
+      <div class="code"><span class="k">GET</span> /v1/customers/C1001?include=balance,contacts
+Authorization: Bearer bwb_live_…
+
+<span class="c">→ 200 { "code":"C1001", "name":"شركة النور…",</span>
+<span class="c">        "price_class_id": 2,</span>
+<span class="c">        "credit_limit": "5000", … }</span>
+<span class="c">→ 404 not_found · 403 insufficient_scope</span>
+<span class="c">→ 503 upstream_unavailable + Retry-After</span></div>
+    </div>
+  </div>
+
+  <div class="grid g3 mb4 compact-cards">
+    <div class="card soft"><h4>Consistent naming</h4><p class="tiny muted">snake_case everywhere and Shamel’s typos fixed: <code>sale_parice</code> → <code>sale_price</code>, <code>orgnization</code> → <code>organization</code>, <code>refrenceId</code> → <code>reference_id</code>.</p></div>
+    <div class="card soft"><h4>Exact money</h4><p class="tiny muted">Amounts, prices, quantities and rates are decimal <b>strings</b> (<code>"8.5"</code>), so no JavaScript tool can lose precision through floating point.</p></div>
+    <div class="card soft"><h4>Dates &amp; text</h4><p class="tiny muted"><code>YYYY-MM-DD</code> dates, RFC 3339 timestamps, Asia/Hebron business time, full UTF-8 Arabic with Arabic-aware search.</p></div>
+    <div class="card soft"><h4>Bilingual errors</h4><p class="tiny muted">Stable <code>code</code> + English <code>message</code> + Arabic <code>message_ar</code> + <code>request_id</code> + a docs link for every error.</p></div>
+    <div class="card soft"><h4>Lists that page</h4><p class="tiny muted"><code>?limit=&amp;cursor=</code> over a 60-second snapshot, plus filters, sorting, <code>q=</code> search and <code>updated_since</code>.</p></div>
+    <div class="card soft"><h4>Combined endpoints</h4><p class="tiny muted">Customer overview (profile, balances, recent vouchers, statement), stock across all stores, item overview.</p></div>
+  </div>
+
+
+  <h3 class="mt4">Status codes at a glance</h3>
+  <table class="t compact" style="font-size:7.8pt">
+    <thead><tr><th style="width:9%">Status</th><th style="width:43%">Typical codes</th><th>Meaning for the tool</th></tr></thead>
+    <tbody>
+      <tr><td>400</td><td><code>invalid_request</code> <code>unknown_parameter</code></td><td>Fix the request; unknown fields are rejected, not ignored</td></tr>
+      <tr><td>401</td><td><code>unauthenticated</code> <code>invalid_token</code> <code>token_expired</code></td><td>Same answer on every path, so routes can’t be discovered</td></tr>
+      <tr><td>403</td><td><code>insufficient_scope</code> <code>ip_blocked</code> <code>origin_not_allowed</code></td><td>Token lacks the right; missing scopes are listed in the details</td></tr>
+      <tr><td>404</td><td><code>not_found</code></td><td>Missing <i>or</i> outside the token’s data scope (indistinguishable)</td></tr>
+      <tr><td>409 / 422</td><td><code>idempotency_conflict</code> <code>validation_failed</code> <code>upstream_rejected</code></td><td>Business or consistency problem; the message explains it in English and Arabic</td></tr>
+      <tr><td>429</td><td><code>rate_limited</code> + <code>Retry-After</code></td><td>Slow down; warnings usually arrive well before this</td></tr>
+      <tr><td>502–504</td><td><code>upstream_error</code> <code>upstream_unavailable</code> <code>upstream_busy</code> <code>upstream_timeout</code></td><td>Shamel side; retry reads after <code>Retry-After</code>, never blindly retry writes</td></tr>
+    </tbody>
+  </table>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: ENDPOINT MAP ============ -->
+<section class="page" id="endpoints">
+  <div class="kicker"><span class="section-no">11</span>The API</div>
+  <h2 class="page-title">Endpoint map</h2>
+  <p class="lead">Every Shamel endpoint has a <code>/v1</code> home. Milestone 1 delivers all the reads; writes, access requests and webhooks follow.</p>
+
+  <div class="grid g3 epgrid">
+    <div class="ep"><div class="eh"><span>Master data</span><span class="chip">master_data:read</span></div>
+      <div class="el"><b>GET</b> /v1/currencies</div><div class="el"><b>GET</b> /v1/currency-rates</div><div class="el"><b>GET</b> /v1/banks</div><div class="el"><b>GET</b> /v1/bank-branches</div><div class="el"><b>GET</b> /v1/cities</div><div class="el"><b>GET</b> /v1/stores</div><div class="el"><b>GET</b> /v1/price-classes</div><div class="el"><b>GET</b> /v1/salesmen</div></div>
+    <div class="ep"><div class="eh"><span>Customers</span><span class="chip">customers:read</span></div>
+      <div class="el"><b>GET</b> /v1/customers</div><div class="el"><b>GET</b> /v1/customers/{code}</div><div class="el"><b>GET</b> /v1/customer-balances</div><div class="el"><b>GET</b> /v1/customers/{code}/balances</div><div class="el"><b>GET</b> /v1/customer-prices</div><div class="el"><b>GET</b> /v1/customers/{code}/prices</div><div class="el star"><b>GET</b> /v1/customers/{code}/overview</div></div>
+    <div class="ep"><div class="eh"><span>Items</span><span class="chip">items:read</span></div>
+      <div class="el"><b>GET</b> /v1/items</div><div class="el"><b>GET</b> /v1/items/{code}</div><div class="el star"><b>GET</b> /v1/items/{code}/overview</div><div class="el"><b>GET</b> /v1/item-groups · /tree</div><div class="el"><b>GET</b> /v1/item-serials</div><div class="el"><b>GET</b> /v1/items/{code}/serials</div><div class="el"><b>GET</b> /v1/item-images</div><div class="el"><b>GET</b> /v1/media/{media_id}</div></div>
+    <div class="ep"><div class="eh"><span>Stock</span><span class="chip">stock:read</span></div>
+      <div class="el"><b>GET</b> /v1/stock</div><div class="el star"><b>GET</b> /v1/items/{code}/stock</div></div>
+    <div class="ep"><div class="eh"><span>Vouchers (read)</span><span class="chip">vouchers:read</span></div>
+      <div class="el"><b>GET</b> /v1/vouchers</div><div class="el"><b>GET</b> /v1/vouchers/{code}</div><div class="el"><b>GET</b> /v1/voucher-summaries</div><div class="el"><b>GET</b> /v1/deliveries/prepared</div><div class="el"><b>GET</b> /v1/order-status</div></div>
+    <div class="ep"><div class="eh"><span>Reports</span><span class="chip">reports:read</span></div>
+      <div class="el"><b>GET</b> /v1/reports/account-statement</div><div class="el"><b>GET</b> /v1/reports/last-prices</div><div class="el"><b>GET</b> /v1/reports/cost-center-statement</div></div>
+    <div class="ep m2"><div class="eh"><span>Writes · M2</span><span class="chip gold">…:write</span></div>
+      <div class="el"><b>POST</b> /v1/customers</div><div class="el"><b>POST</b> /v1/items</div><div class="el"><b>POST</b> /v1/cost-centers</div><div class="el"><b>POST</b> /v1/vouchers/{voucher_type}</div><div class="el"><b>POST</b> /v1/batch</div><div class="el"><b>GET</b> /v1/approvals/{id}</div></div>
+    <div class="ep m2"><div class="eh"><span>Self-service &amp; agents</span><span class="chip gold">any / agent</span></div>
+      <div class="el"><b>GET</b> /v1/me · /v1/me/requests</div><div class="el"><b>GET</b> /v1/event-types</div><div class="el"><b>POST</b> /v1/access-requests</div><div class="el"><b>POST</b> …/{id}/claim-secret</div></div>
+    <div class="ep m3"><div class="eh"><span>Webhooks · M3</span><span class="chip">webhooks:*</span></div>
+      <div class="el"><b>CRUD</b> /v1/webhooks</div><div class="el"><b>POST</b> …/{id}/test</div><div class="el"><b>POST</b> …/{id}/rotate-secret</div><div class="el"><b>GET</b> …/{id}/deliveries</div><div class="el"><b>GET</b> …/{id}/events (pull)</div></div>
+  </div>
+
+  <div class="grid g2 mt4">
+    <div class="card sand"><h4>13 voucher types</h4><p class="tiny muted mb2">Each create permission is separate: <code>vouchers:write:&lt;type&gt;</code></p>
+      <span class="chip ghost">order · طلبية</span><span class="chip ghost">sales_invoice · فاتورة مبيعات</span><span class="chip ghost">sales_return · مردودات</span><span class="chip ghost">receipt · قبض</span><span class="chip ghost">payment · صرف</span><span class="chip ghost">journal · قيد</span><span class="chip ghost">credit_note</span><span class="chip ghost">debit_note</span><span class="chip ghost">sales_delivery</span><span class="chip ghost">purchase_delivery</span><span class="chip ghost">internal_delivery</span><span class="chip ghost">stockout</span><span class="chip ghost">returned_pending_sales_delivery</span>
+    </div>
+    <div class="card teal"><h4>Legacy mode · <code>/legacy/&lt;Controller&gt;/&lt;Action&gt;</code></h4><p class="tiny muted">For existing integrations: the same Shamel paths and shapes, authenticated with a Bawaba token (never Shamel credentials). Off by default and allowlisted per token. Responses are still rebuilt, filtered and audited; nothing is passed through raw.</p><p class="tiny muted"><span class="star-k">★</span> marks combined endpoints that gather several Shamel calls into one response.</p></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>

@@ -1,0 +1,163 @@
+<!-- ============ PAGE: SECURITY LAYERS ============ -->
+<section class="page" id="sec-layers">
+  <div class="kicker"><span class="section-no">04</span>Security &amp; firewall</div>
+  <h2 class="page-title">Seven layers between an attacker and Shamel</h2>
+  <p class="lead">Every layer enforces its own allowlist, so if one layer fails the next still holds. The outermost layers hide where things are. The inner layers decide what each token may do. The innermost layer means Shamel is never reachable from the internet at all.</p>
+
+  <div class="layers">
+    <div class="ly l1"><div class="lh"><span class="ln">1</span>Cloudflare edge</div><div class="ld">TLS 1.3 · WAF rules · DDoS absorption · edge rate limits · hides Bawaba’s own IP</div></div>
+    <div class="ly l2"><div class="lh"><span class="ln">2</span>Origin lock</div><div class="ld">Bawaba accepts connections only from Cloudflare (IP ranges + authenticated origin pull mTLS), or through a Cloudflare Tunnel with no open ports</div></div>
+    <div class="ly l3"><div class="lh"><span class="ln">3</span>Gateway firewall</div><div class="ld">Global &amp; per-token IP allow/deny · auto-ban on auth failures, scanning and injection probes · size &amp; time limits · strict schemas</div></div>
+    <div class="ly l4"><div class="lh"><span class="ln">4</span>Identity &amp; policy</div><div class="ld">Token checked before routing · scopes · voucher types · data scoping · field hiding · deny by default</div></div>
+    <div class="ly l5"><div class="lh"><span class="ln">5</span>Rebuild, never relay</div><div class="ld">Requests and responses rebuilt from typed structures · errors mapped to fixed codes · scan for origin markers</div></div>
+    <div class="ly l6"><div class="lh"><span class="ln">6</span>Connector tunnel</div><div class="ld">End-to-end mTLS · outbound only · forwards only allowlisted Shamel paths · remote kill switch</div></div>
+    <div class="ly l7"><div class="lh"><span class="ln">7</span>Shamel</div><div class="ld">Unchanged · no public IP needed · its address is known only to the Connector</div></div>
+  </div>
+
+  <div class="grid g2 mt4">
+    <div class="card sand">
+      <h4>What an attacker can see</h4>
+      <ul class="clean small">
+        <li>A Cloudflare IP address, not Bawaba’s and never Shamel’s</li>
+        <li>The same <code>401</code> for every path, whether it exists or not</li>
+        <li>No <code>Server</code>, <code>X-Powered-By</code> or version headers</li>
+        <li>Generic error codes, never upstream text, paths or SQL</li>
+      </ul>
+    </div>
+    <div class="card teal">
+      <h4>What a stolen token can do</h4>
+      <ul class="clean small">
+        <li>Only what its scopes, data scope and hidden fields allow</li>
+        <li>Only from its IP allowlist, if one is set</li>
+        <li>Writes can be held in the approval queue for your review</li>
+        <li>Revoke it instantly; every node drops it within seconds</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt4">Encryption &amp; keys</h3>
+  <div class="keyrow">
+    <div class="kb dark"><b>Master key file</b><span>root-only file on the server, outside the database; backed up separately</span></div>
+    <div class="ka">→</div>
+    <div class="kb"><b>Key-encryption keys</b><span>derived per purpose, rotatable</span></div>
+    <div class="ka">→</div>
+    <div class="kb"><b>Data keys · AES-256-GCM</b><span>Shamel passwords · audit bodies · snapshots · pending secrets</span></div>
+  </div>
+  <div class="grid g3 mt4">
+    <div class="card soft"><h4>API tokens</h4><p class="tiny muted">256-bit random with a checksum (so leaked tokens can be spotted by secret scanners). Stored only as an HMAC hash and shown once.</p></div>
+    <div class="card soft"><h4>Stolen backup?</h4><p class="tiny muted">Without the separate key file, a copy of the database or blob store can’t be read: credentials, audit and secrets are all encrypted.</p></div>
+    <div class="card soft"><h4>Owner login</h4><p class="tiny muted">Password hashed with argon2id plus optional TOTP. The dashboard is reachable only on <code>127.0.0.1</code> through SSH.</p></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: ORIGIN HIDING ============ -->
+<section class="page" id="sec-origin">
+  <div class="kicker"><span class="section-no">05</span>Security &amp; firewall</div>
+  <h2 class="page-title">Shamel stays invisible</h2>
+  <p class="lead">Eight principles govern the code. The core one: Bawaba <b>rebuilds</b> every request and response from its own types and never copies upstream bytes across, so Shamel’s details have no way out.</p>
+
+  <div class="grid g4 mb4 pcards">
+    <div class="card"><div class="tag">P1</div><h4 class="mt2">Origin can’t be addressed</h4><p class="tiny muted">No byte a client sees comes from Shamel’s address, software, headers or errors.</p></div>
+    <div class="card"><div class="tag">P2</div><h4 class="mt2">Rebuild, never relay</h4><p class="tiny muted">Typed structs in both directions, including the legacy mode.</p></div>
+    <div class="card"><div class="tag">P3</div><h4 class="mt2">Deny by default</h4><p class="tiny muted">Closed allowlists for routes, fields, headers, origins and webhook targets.</p></div>
+    <div class="card"><div class="tag">P4</div><h4 class="mt2">Authenticate first</h4><p class="tiny muted">Anonymous callers get the same 401 everywhere and never trigger a Shamel call.</p></div>
+    <div class="card"><div class="tag">P5</div><h4 class="mt2">Fail closed</h4><p class="tiny muted">Missing key, unknown peer or stale policy means the request is rejected, never passed through.</p></div>
+    <div class="card"><div class="tag gold">P6</div><h4 class="mt2">Owner power stays on the server</h4><p class="tiny muted">Approvals, firewall changes and live tokens exist only in the control plane.</p></div>
+    <div class="card"><div class="tag">P7</div><h4 class="mt2">Bounded blast radius</h4><p class="tiny muted">Each component’s compromise is documented and contained.</p></div>
+    <div class="card"><div class="tag">P8</div><h4 class="mt2">Encrypted everywhere</h4><p class="tiny muted">TLS 1.3/mTLS on every hop; AES-256-GCM at rest; keys kept apart from data.</p></div>
+  </div>
+
+  <h3>The same failure, before and after</h3>
+  <div class="grid g2 mb4">
+    <div>
+      <div class="tag rose mb2">Shamel directly · leaks internals</div>
+      <div class="code"><span class="r">HTTP/1.1 500 Internal Server Error</span>
+<span class="c">Server: Microsoft-IIS/10.0</span>
+<span class="c">X-Powered-By: ASP.NET</span>
+
+System.Data.SqlClient.SqlException: Invalid
+object name 'dbo.tblCustomers'. at
+<span class="r">C:\inetpub\Shamel\Api\…</span> on <span class="r">SHAMEL-SRV</span></div>
+      <p class="tiny muted mt2">Illustrative example of the kind of response the manual describes (every error is HTTP 500 with details).</p>
+    </div>
+    <div>
+      <div class="tag mint mb2">Through Bawaba · nothing to learn</div>
+      <div class="code"><span class="k">HTTP/1.1 502 Bad Gateway</span>
+Bawaba-Request-Id: req_7Hc2…
+
+{"error": {
+  "code": <span class="s">"upstream_error"</span>,
+  "message": <span class="s">"The accounting system returned an unexpected response."</span>,
+  "message_ar": <span class="s">"…"</span>,
+  "request_id": <span class="s">"req_7Hc2…"</span> }}</div>
+      <p class="tiny muted mt2">The full details go to the encrypted audit log, which only you can read on the server.</p>
+    </div>
+  </div>
+
+  <div class="card soft">
+    <div style="display:flex;align-items:baseline;gap:4mm;margin-bottom:2mm"><div style="font-size:22pt;font-weight:800;color:var(--brand);line-height:1">28</div><h4>leak vectors listed, closed, and checked by an origin-leak test suite that blocks every pull request</h4></div>
+    <div>
+      <span class="chip">error bodies</span><span class="chip">stack traces &amp; SQL</span><span class="chip">server headers</span><span class="chip">NTLM challenges</span><span class="chip">paths in payloads</span><span class="chip">redirects</span><span class="chip">DNS records</span><span class="chip">TLS certs / CT logs</span><span class="chip">timing</span><span class="chip">Connector visibility</span><span class="chip">docs &amp; OpenAPI</span><span class="chip">tool-visible logs</span><span class="chip">webhooks</span><span class="chip">CORS</span><span class="chip">health &amp; metrics</span><span class="chip">version strings</span><span class="chip">reflected input</span><span class="chip">internal ids</span><span class="chip">cursors</span><span class="chip">load signals</span><span class="chip">sandbox cross-talk</span><span class="chip">trace ids</span><span class="chip">image EXIF</span><span class="chip">e-mail headers</span><span class="chip">legacy passthrough</span><span class="chip">Shamel credentials</span>
+    </div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
+
+<!-- ============ PAGE: CONNECTOR ============ -->
+<section class="page" id="connector">
+  <div class="kicker"><span class="section-no">06</span>Reaching Shamel</div>
+  <h2 class="page-title">The Connector: zero open ports at the Shamel site</h2>
+  <p class="lead">A small Bawaba service runs next to Shamel, on Windows or Linux. It makes an <b>outbound</b> HTTPS connection to Bawaba, and Bawaba sends its Shamel requests back through that connection. Nothing on the internet can start a connection to the Shamel site.</p>
+
+  <svg class="dg" viewBox="0 0 600 175" role="img" aria-label="Connector tunnel">
+    <defs>
+      <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1F6F7F"/></marker>
+      <marker id="ah2g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#C9803A"/></marker>
+    </defs>
+    <style>.t1{font-size:10px;font-weight:700;fill:#16232A}.t2{font-size:7.8px;fill:#5B6B73}.t3{font-size:7.4px;font-weight:700;fill:#C9803A}.w1{font-size:10px;font-weight:700;fill:#fff}.w2{font-size:7.6px;fill:#BFD6D9}</style>
+    <!-- office -->
+    <rect x="6" y="16" width="230" height="148" rx="12" fill="#F6FAFA" stroke="#9FC3C8" stroke-dasharray="4 3"/>
+    <text x="18" y="34" class="t2" style="font-weight:700;letter-spacing:.08em">OFFICE / SHAMEL SITE · NO INBOUND PORTS</text>
+    <rect x="20" y="56" width="92" height="62" rx="9" fill="#0F4C5C"/><text x="32" y="80" class="w1">Shamel</text><text x="32" y="94" class="w2">Pro API</text><text x="32" y="106" class="w2">LAN only</text>
+    <rect x="132" y="56" width="92" height="62" rx="9" fill="#fff" stroke="#9FC3C8"/><text x="144" y="80" class="t1">Connector</text><text x="144" y="94" class="t2">Windows service</text><text x="144" y="106" class="t2">or Linux</text>
+    <path d="M132 87 L114 87" stroke="#1F6F7F" stroke-width="1.4" marker-end="url(#ah2)"/>
+    <text x="20" y="140" class="t2">Connector forwards only to its one configured</text>
+    <text x="20" y="151" class="t2">Shamel URL, and only allowlisted Shamel paths.</text>
+    <!-- tunnel -->
+    <path d="M224 76 L388 76" stroke="#C9803A" stroke-width="2.2" marker-end="url(#ah2g)"/>
+    <text x="306" y="68" class="t3" text-anchor="middle">① dials out · HTTPS 443</text>
+    <rect x="240" y="88" width="132" height="22" rx="11" fill="#FBF6EE" stroke="#E9CFA8"/>
+    <text x="306" y="102" text-anchor="middle" class="t2" style="font-size:7px">WebSocket · mTLS 1.3 · multiplexed</text>
+    <path d="M388 124 L226 124" stroke="#1F6F7F" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#ah2)"/>
+    <text x="306" y="138" class="t2" text-anchor="middle" style="fill:#1F6F7F;font-weight:600">② requests come back inside it</text>
+    <!-- cloud + bawaba -->
+    <rect x="390" y="40" width="70" height="100" rx="10" fill="#FBF6EE" stroke="#E9CFA8"/>
+    <text x="425" y="86" text-anchor="middle" class="t1" style="font-size:8.6px">Cloudflare</text><text x="425" y="98" text-anchor="middle" class="t2" style="font-size:7px">sees only</text><text x="425" y="108" text-anchor="middle" class="t2" style="font-size:7px">ciphertext</text>
+    <rect x="474" y="30" width="120" height="120" rx="12" fill="#0F4C5C"/>
+    <text x="488" y="54" class="w1">Bawaba</text><text x="488" y="70" class="w2">gateway nodes</text>
+    <text x="488" y="94" class="w2">never learns</text><text x="488" y="105" class="w2">Shamel’s address</text>
+    <text x="488" y="128" class="w2">relay: any node can</text><text x="488" y="139" class="w2">use the tunnel</text>
+    <path d="M460 90 L474 90" stroke="#C9803A" stroke-width="2.2"/>
+  </svg>
+
+  <div class="grid g3 mt4">
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div><h4>Enrollment</h4><p class="small muted">A one-time enrollment code gives the Connector its own mTLS certificate from Bawaba’s internal CA. You confirm it on the server before it goes live.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg></div><h4>Contained</h4><p class="small muted">Even a compromised gateway can only ask for allowlisted Shamel paths. Writes through the Connector are switched off until you enable them locally.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v10"/></svg></div><h4>Kill switch</h4><p class="small muted"><code>bawaba connector kill</code> revokes the certificate at once. Cloned certificates used from a new location raise a critical alert.</p></div>
+  </div>
+
+  <h3 class="mt6">Two ways to reach Shamel</h3>
+  <table class="t">
+    <thead><tr><th style="width:22%">Mode</th><th>How it works</th><th style="width:30%">When to use</th></tr></thead>
+    <tbody>
+      <tr><td>Connector <span class="tag mint" style="margin-left:1mm">preferred</span></td><td>Outbound tunnel from the Shamel site; Shamel stays on the LAN with no public IP</td><td>You can install a small service next to Shamel</td></tr>
+      <tr><td>Direct URL</td><td>Bawaba calls Shamel’s URL directly; Shamel’s firewall allows only Bawaba’s outbound IP; TLS if Shamel supports it</td><td>Installing the Connector isn’t possible (e.g. ISCO-hosted)</td></tr>
+    </tbody>
+  </table>
+  <div class="grid g2 mt6">
+    <div class="callout teal"><div class="ci">⇄</div><div class="small"><b>High availability.</b> Run two Connectors side by side; each keeps its own tunnel. Any gateway node can use whichever tunnel is up, relaying through the node that holds it.</div></div>
+    <div class="callout"><div class="ci">!</div><div class="small"><b>If the tunnel drops.</b> Tools get a clean <code>503 upstream_unavailable</code> with <code>Retry-After</code>; the Connector reconnects with backoff, and you get an e-mail if it stays down for 2 minutes.</div></div>
+  </div>
+  <div class="page-foot"><span><b>Bawaba</b> · Visual design overview</span><span class="pn"></span></div>
+</section>
