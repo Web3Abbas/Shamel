@@ -2089,7 +2089,8 @@ The mechanism is 02 §9.5; operations adds tracking:
 - `bawaba key verify --file <backup> --record` checks the backup against `kcv` and records the verification date;
   until that happens after `init` or `key rotate-master`, `key_backup_unverified` (high) fires and `doctor` warns.
 - After `key rotate-master` the backup must contain both keys until `key retire-master` *and* until the last data
-  archive wrapped by the old key has expired (§9.1).
+  archive wrapped by the old key has expired (§9.1). `key rotate-data-key` and the monthly `audit_seal` rotation need
+  no new key backup (both are protected by MK).
 - Monthly automated restore drills (§9.4) exceed 02 §9.5's quarterly minimum; a manual drill with the paper key on a
   scratch host is recommended once a year.
 
@@ -2097,18 +2098,22 @@ The mechanism is 02 §9.5; operations adds tracking:
 
 1. Provision the host (same topology or a new one), install the same Bawaba version as the backup (manifest records
    it) or newer.
-2. Place the master key from the key backup: `bawaba key restore --file <backup>` writes the master key file with
-   the ownership and mode required by 02 §9.4 (or re-seals it with TPM2).
+2. Place the master key from the key backup: `bawaba key restore --file <backup>` writes `master.key` with the
+   ownership and mode required by 02 §9.4 (or re-seals it with TPM2), for the control-plane unit only.
 3. `bawaba restore --from <bkp_id|path> --target-dsn …`: verifies manifest signature and hashes, decrypts, restores
    PostgreSQL, restores bootstrap config; then `bawaba migrate up` if the binary is newer.
-4. Point the blob configuration at the restored/synced blob target (or `bawaba backup blobs sync --reverse`).
+4. `bawaba key reissue-data-key` (control plane, step-up): generates a new `data.key` for the data-plane unit and
+   wraps KEK_data under it; the DK wrapping in the restored rows is deleted, so an old `data.key` that may survive
+   elsewhere is useless against the restored database (02 §9.5, §9.6).
+5. Point the blob configuration at the restored/synced blob target (or `bawaba backup blobs sync --reverse`).
    Packs referenced by `audit_blobs` but missing at the target (created after the last sync) are recorded in
-   `audit_gaps` by `bawaba audit blobs reindex --check`.
-5. Re-issue the excluded secrets: a new Cloudflare Origin CA certificate (AOP mode) or new `cloudflared` tunnel
+   `audit_gaps` by `bawaba audit blobs reindex --check`. Stored audit content stays readable because the
+   `audit_epoch_keys` rows and the `audit_seal` private keys (under KEK_control, unwrapped by MK) are in the dump.
+6. Re-issue the excluded secrets: a new Cloudflare Origin CA certificate (AOP mode) or new `cloudflared` tunnel
    credentials (tunnel mode), and the gateway's own TLS keys.
-6. Start Valkey empty and the gateway. Connectors reconnect on their own once the public hostname points at the new
+7. Start Valkey empty and the gateway. Connectors reconnect on their own once the public hostname points at the new
    origin; their certificates remain valid because the internal CA key lives (encrypted) in PostgreSQL.
-7. `bawaba doctor`, then spot checks: a sandbox request, a live read, a webhook test delivery.
+8. `bawaba doctor`, then spot checks: a sandbox request, a live read, a webhook test delivery, one audit body view.
 
 ### 9.4 Restore drills
 
