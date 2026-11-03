@@ -131,7 +131,7 @@ How to read it:
 | [`04-permissions-and-tokens.md`](04-permissions-and-tokens.md) | Token record and lifecycle, scopes and presets, data scoping, field hiding, Shamel identity binding, policy compilation, agent access requests and the subset rule, write approval queue, per-token rate limits. |
 | [`05-operations.md`](05-operations.md) | Audit log storage, webhooks engine, e-mail alerts, "inform the AI", observability, admin dashboard, CLI, documentation site, backups, disaster recovery and upgrades. |
 | [`07-milestones.md`](07-milestones.md) | Delivery plan M0–M4: deliverables, acceptance criteria, tests, risks, ISCO and owner dependencies, effort estimate. |
-| [`08-isco-questions.md`](08-isco-questions.md) | The question list to send to ISCO (Arabic and English cover message, 53 questions, 10 marked priority), with a traceability appendix. |
+| [`08-isco-questions.md`](08-isco-questions.md) | The question list to send to ISCO (Arabic and English cover message, 55 questions, 10 marked priority), with a traceability appendix. |
 | [`../upstream/shamel-api.md`](../upstream/shamel-api.md) | Transcription of ISCO's Shamel Pro Web API manual: endpoints, models, enumerations, and the quirks and gaps list (`Qnn`). |
 | [`../pdf/Bawaba-Visual-Overview.pdf`](../pdf/Bawaba-Visual-Overview.pdf) | About 20 hand-designed pages summarising the design visually. The best starting point for the owner. |
 | [`../pdf/Bawaba-Design-Reference.pdf`](../pdf/Bawaba-Design-Reference.pdf) | This README, every design document and the upstream reference in one PDF, with rendered diagrams and bookmarks. |
@@ -236,7 +236,7 @@ header, then the cross-document notes at the end of 02, 03, 04, 05 and 07.
 
 **ISCO**
 
-- [`08-isco-questions.md`](08-isco-questions.md) holds the merged ISCO list (53 questions, 10 priority: session
+- [`08-isco-questions.md`](08-isco-questions.md) holds the merged ISCO list (55 questions, 10 priority: session
   lifetime, HTTPS, error format, rate limits, paging, `lastupdatedate`, `GetSalesmen`, duplicate prevention,
   versioning, licensing). The answers gate M1-β, M1 GA, M2 and M3 by question set (07 §10). Still to decide: whether
   to ask about future commercial use now (08 §0, ISCO-53).

@@ -694,7 +694,7 @@ first (unknown, Q14), independent logins would kick each other out continuously.
 
 In direct mode the gateway's own cluster-wide session cache with serialized login (01 §7.1) solves the same problem.
 `bawaba upstream calibrate` tests the behaviour (login twice, then check whether the first session still works) and
-recommends the mode; the question is also on the ISCO list (§20.2).
+recommends the mode; the question is also on the ISCO list (§20.2 #3, 08 ISCO-01).
 
 ### 7.6 Lifecycle and kill switch
 
@@ -1554,7 +1554,7 @@ with `legacyRE = ^/legacy/[A-Za-z0-9]{1,64}/[A-Za-z0-9]{1,64}$`.
 
 | Role | Privileges |
 |---|---|
-| `bawaba_data` | **SELECT** on `compiled_config`, tokens, token policies, firewall rules, upstreams, credentials (ciphertext), connectors, approvals, the view `crypto_keys_data` (wrapped `plane = 'data'` keys and the DK wrapping of KEK_data only) and the `audit_seal` public keys. **INSERT** on audit index, `audit_epoch_keys`, usage rollups, security events, ip_bans, cert_requests, media_objects, approval_items (status column excluded, defaults to `pending`), access_requests (status forced to `pending` by default and trigger). **SELECT** on its own access requests, and **EXECUTE** only on the `SECURITY DEFINER` functions `cancel_access_request` and `claim_access_request_secret` (04 §10.4) and the approval executor's claim and finalize functions (04 §11.6). **Column-level UPDATE** only on `tokens(last_used_at)` and `connectors(last_seen_at, last_ip)`. No DELETE except on its own expiring work tables. No DDL. The operations document lists further worker-table grants (05 §10). |
+| `bawaba_data` | **SELECT** on `compiled_config`, tokens, token policies, firewall rules, upstreams, credentials (ciphertext), connectors, approvals, the view `crypto_keys_data` (wrapped `plane = 'data'` keys and the DK wrapping of KEK_data only) and the `audit_seal` public keys. **INSERT** on audit index, `audit_epoch_keys`, usage rollups, security events, ip_bans, cert_requests, media_objects, approval_items (status column excluded, defaults to `pending`), access_requests (status forced to `pending` by default and trigger). **SELECT** on its own access requests, and **EXECUTE** only on the `SECURITY DEFINER` functions `cancel_access_request` and `claim_access_request_secret` (04 §10.4) and the approval executor's claim and finalize functions (04 §11.6). **Column-level UPDATE** only on `tokens(last_used_at)` and `connectors(last_seen_at, last_ip)`. **Audit and worker grants (05 §10):** `SELECT (id, retain_until)` and `UPDATE (retain_until)` on `audit_blobs`; INSERT on `audit_blobs`, `audit_batches`, `audit_gaps` and `audit_segments` (`segment_first` mode); INSERT and `UPDATE (state, bytes_total, epoch_key_ids, sealed_at)` on its own (`node_id`) `audit_packs` rows; SELECT on `audit_zstd_dicts` (ciphertext under `audit_dict`, §9.2); INSERT on `alert_outbox` (state forced to `raw` by default and trigger) and `webhook_target_requests`; DML on the worker tables `webhook_streams`, `webhook_ledger`, `webhook_events`, `webhook_deliveries`, `webhook_delivery_attempts`, `webhook_tracked_orders`, `token_flags` and `usage_*`; SELECT on `webhook_target_approvals` and `upstream_endpoint_scoping`. **No** grant on `alert_instances` or `alert_digest_items` (control plane only), and no write on `webhook_target_approvals`, so the data plane can file a target request but never approve one. No DELETE except on its own expiring work tables. No DDL. |
 | `bawaba_control` | DML on policy, registry, approvals and keys. No DDL. |
 | `bawaba_migrate` | Schema owner, used only by migrations. |
 
@@ -2168,46 +2168,42 @@ config.
 
 | To | Requirement |
 |---|---|
-| Architecture | In connector mode, **the connector performs the Shamel login and holds the Shamel session**. Credentials arrive sealed (§7.5). With several connectors per upstream, the session holder protocol (`SessionRole`, `credential_session_mode`) decides which connector may log in for each credential (§7.5). The tunnel is end-to-end inner TLS 1.3 inside WSS through Cloudflare, with an explicitly framed protocol (§7.4). CA signing happens only in the control plane, through a PostgreSQL work queue (§7.2). The data plane and control plane are separate processes and users with no network path from data to control (§12.1). |
+| Architecture | In connector mode, **the connector performs the Shamel login and holds the Shamel session**. Credentials arrive sealed (§7.5). With several connectors per upstream, the session holder protocol (`SessionRole`, `credential_session_mode`) decides which connector may log in for each credential (§7.5). The tunnel is end-to-end inner TLS 1.3 inside WSS through Cloudflare, with an explicitly framed protocol (§7.4). CA signing happens only in the control plane, through a PostgreSQL work queue (§7.2). The data plane and control plane are separate processes and users with no network path from data to control (§12.1). **Adopted in 01 v2** (§5.1–§5.3, §7.1, §8). |
 | Architecture | **Key split (§9.2), adopted in 01 v2 (§5.1, §15.3):** the data-plane role receives `data.key` (`security.data_key_file`), never `master.key`; the two-KEK hierarchy replaces single-file delivery and direct HKDF derivation of every purpose from the master key, and the control plane is the only process that loads MK. The SMTP sender and Cloudflare ban sync run in the control plane. Audit bodies and audit metadata are written under per-node epoch DEKs sealed to the control plane (§9.2). |
-| Architecture | The **coalescing key** MUST include `upstream_id`, `cred_id` (the Shamel user), env, endpoint id and canonical upstream parameters. Requests made as different Shamel users are never coalesced (salesman scoping, Q17). Policy is applied per requesting token after the shared fetch. |
+| Architecture | The **coalescing key** MUST include `upstream_id`, `cred_id` (the Shamel user), env, endpoint id and canonical upstream parameters. Requests made as different Shamel users are never coalesced (salesman scoping, Q17). Policy is applied per requesting token after the shared fetch. **Adopted in 01 v2** (§9.1). |
 | Architecture | **Snapshots** follow 01 §9: one unfiltered, encrypted snapshot per coalesced fetch (AAD `snapshot/<sid>/<n>` and `snapshot/<sid>/k`), never exposed directly; token-bound views (AAD `view/<vid>/<token_id>/<policy_version>/<suffix>`, suffix `m`, `p/<n>` or `c/<n>`) and cursors carrying `sid` and `chunk_hint` inside the seal (01 §9.4–§9.6); S14/S15 applied with the token's current policy on every page; cursors honored only while the token is active and its policy is unchanged (§9.10, 01 §9.7). |
 | Architecture | **Idempotency records** are keyed by token lineage: Valkey `bwb:<t>:idem:<lineage_id>:<sha256(key)>`, AAD `idem/<lineage_id>/<sha256(key)>` (§9.3, §9.10; 03 §15.2; 04 §2.4.5). **Adopted in 01 v2** (§6.4 step 3, with the PostgreSQL backstop keyed `(tenant_id, lineage_id, key_hash)`; `LineageID` is in the compiled policy, 04 §9.1). Views and cursors stay token-bound. |
-| Architecture | **Registry and limits:** `Operation.MaxResponseBytes` by class (§10.6); per-operation upstream budgets of at most 80 s under `server.request_timeout` 90 s; legacy response assembly with spill-to-disk (§10.8). Configuration keys to accept: `security.data_key_file`, `security.audit_epoch`, `security.rotation.*`, `config.blind_staleness`, `http.*` limits of §10.6, `upstreams[].credential_session_mode`. Valkey key `bwb:<t>:credrole:<upstream>:<cred_id>` and the `credrole_changed` event (§7.5). The connector's `hello` advertises its endpoint table; `welcome` carries its credential roles. |
+| Architecture | **Registry and limits:** `Operation.MaxResponseBytes` by class (§10.6); per-operation upstream budgets of at most 80 s under `server.request_timeout` 90 s; legacy response assembly with spill-to-disk (§10.8). Configuration keys to accept: `security.data_key_file`, `security.audit_epoch`, `security.rotation.*`, `config.blind_staleness`, `http.*` limits of §10.6, `upstreams[].credential_session_mode`. Valkey key `bwb:<t>:credrole:<upstream>:<cred_id>` and the `credrole_changed` event (§7.5). The connector's `hello` advertises its endpoint table; `welcome` carries its credential roles. **Adopted in 01 v2** (§6.1, §7.1, §7.7, §8.3, §15.2). |
 | API | **Resolved in 03, nothing open.** Error catalog entries (English and Arabic messages, `docs_url`) for every code in §10.9 with the same statuses, including the approval and secret-delivery `409`s, `429 approval_limit_reached` and `duplicate_code` as `422` (03 §22.2, §27.1 item 9). Codes for expired and invalidated cursors (`snapshot_expired`, `cursor_invalidated`, `cursor_expired`). The public paths list for WAF rule R2 (03 §6.5). The webhook signature format of §9.9 documented for receivers (03 §17.4). The `/v1/media/{id}` presigned contract (§5.4; 03 §10.6). Public docs do not name the upstream product or version (LV-13; 03 §24.5). The legacy reference only at the authenticated `GET /v1/docs/legacy`, never under `/docs` (03 §20.5), asserted by §18.3. `scope_probe` surfaces to the tool as `Bawaba-Warning: repeated_error` (03 §23.4). Late secret claims return `409 secret_delivery_expired` (03 §18.3). Idempotency keyed by `lineage_id` (03 §15.2), as in §9.3 and §9.10. |
 | Permissions | **Resolved in 04, nothing open.** Atomic expansion of scopes and voucher types into a bitset so the subset rule can be evaluated (04 §3.1, §3.3, §9.1). 04 §10.3 is the authoritative subset rule; its conformance table maps every property of §13.2, including `public_fields_exposed`, the `public_exposure` approval gate (04 §10.5) and agent requests never setting `writes_require_approval=false`. Publishable tokens limited to the 7 business read atoms (04 §13). `access_requests:write` agent-only and never grantable (04 §3.1, §10.3). Per-token IP rules in the policy spec (04 §7; §10.2 here). Auto-suspension per §10.3: never publishable, secret tokens only for probes from inside their allowlist unless opted in (04 §2.4.6). Data-role privileges through `SECURITY DEFINER` functions (04 §10.4, §11.6; §12.4 here). Idempotency namespace by `lineage_id` (04 §2.4.5), adopted in the §9.3 binding and §9.10. `approval_items` encrypted columns and hash names (`payload_sha256`, `upstream_request_sha256`, `approved_upstream_sha256`; 04 §11.2), adopted in §9.3 and §9.10. **Standing:** any change to 04 §10.3 must keep every property of §13.2. |
-| Operations | Backups exclude `master.key` and `data.key` (§9.4, §14). Key backup and restore drills (§9.5), including `bawaba key reissue-data-key` after a restore. The incident runbook commands (§17). The daily security digest with audit anchors (§12.5). Audit encryption (05 §1.4.5) uses epoch DEKs whose key id is the envelope key id, `audit_epoch_keys` retention follows the objects that reference them, and monthly rotation applies to the `audit_seal` key pair (§9.2, §9.6). New alert `token_probe_suspected` (warning, per token) next to `token_auto_suspended`, whose trigger becomes the §10.3 rule. Grants for `audit_epoch_keys` (§12.4). |
+| Operations | Backups exclude `master.key` and `data.key` (§9.4, §14). Key backup and restore drills (§9.5), including `bawaba key reissue-data-key` after a restore. The incident runbook commands (§17). The daily security digest with audit anchors (§12.5). Audit encryption (05 §1.4.5) uses epoch DEKs whose key id is the envelope key id, `audit_epoch_keys` retention follows the objects that reference them, and monthly rotation applies to the `audit_seal` key pair (§9.2, §9.6). New alert `token_probe_suspected` (warning, per token) next to `token_auto_suspended`, whose trigger becomes the §10.3 rule. Grants for `audit_epoch_keys` (§12.4). **Adopted from 05 §10:** the data-plane purpose `audit_dict` (§9.2, §9.3), the audit and worker grants of `bawaba_data` (§12.4), gateway-side target validation with `CONNECT <validated-IP>` and owner-approved target hosts in every egress mode (§5.5), and the key names `webhooks.delivery.timeout` / `webhooks.delivery.max_response_bytes` (§19). |
 
-### 20.2 Questions for ISCO (security-related; add them to the ISCO list)
+### 20.2 Questions for ISCO (security-related)
 
-1. Does the Shamel Web API support **HTTPS**, and with which certificate options? (Q11)
-2. What exactly does `ItemCatalog.image_path` contain: a URL, a local path or a UNC path? Is there an endpoint that
-   returns image bytes? (Q26)
-3. Shamel session token lifetime. **Does a second login for the same user invalidate the first session?** (The
-   answer switches `credential_session_mode` between `single_holder` and `per_connector`, §7.5; `bawaba upstream
-   calibrate` also measures it.) Can sessions be revoked server-side, and is there a logout? (Q14)
-4. Does the API site use IIS **Windows authentication** (NTLM/Negotiate) anywhere, or anonymous authentication plus
-   Shamel tokens only?
-5. Are API users the same accounts as Shamel desktop users (password reuse)? Can API access be enabled per user, and
-   can an API-only user be created with minimal Shamel permissions?
-6. Can the API site be bound to `127.0.0.1` only, so that a connector on the same host is the only client?
-7. Does Shamel or IIS log request headers (which would put `username` and `token` in its logs)? Where, and for how
-   long?
-8. Which IIS, ASP.NET and Shamel versions are deployed? What is the security patch cadence, and how are
-   vulnerabilities reported?
-9. Rate and concurrency limits (Q47), so the global upstream cap (which the connectors follow through `cap_share`)
-   and any local connector ceiling can be sized. Largest expected response sizes for `GetItems` and `GetCustomers`, to
-   confirm the per-operation caps of §10.6.
-10. Is SQL Server reachable from the LAN, and does the API host run any other exposed services (RDP, file shares) that
-    the deployment guide should tell the owner to firewall?
+These questions are asked in the consolidated list [`08-isco-questions.md`](08-isco-questions.md) (ids ISCO-01 …
+ISCO-53). The numbers below stay stable because 08 Appendix A.3 maps "02 §20.2 #n" to its questions; record answers
+in 08, then update the section named here.
+
+| # | Topic (short) | 08 id | Affects |
+|---|---|---|---|
+| 1 | Does the Shamel Web API support HTTPS, and with which certificate options? (Q11) | ISCO-05 | DU-3, §7.4 |
+| 2 | Format of `ItemCatalog.image_path` (URL, local or UNC path); any image-bytes endpoint? (Q26) | ISCO-34 | §5.4 |
+| 3 | Session token lifetime; **does a second login for the same user invalidate the first?**; logout and server-side revocation (Q14) | ISCO-01, ISCO-02 | `credential_session_mode` (§7.5), §20.3 |
+| 4 | IIS Windows authentication (NTLM/Negotiate) anywhere, or anonymous plus Shamel tokens only? | ISCO-06 | §11.1 |
+| 5 | API users vs desktop users (password reuse); per-user API enablement; a minimal API-only user | ISCO-04 | §7.5, §7.8 |
+| 6 | Can the API site be bound to `127.0.0.1` only, so the co-located connector is the only client? | ISCO-07 | §7.9 |
+| 7 | Do Shamel or IIS log request headers (`username`, `token`)? Where, and for how long? | ISCO-08 | §14 |
+| 8 | Deployed IIS, ASP.NET and Shamel versions; patch cadence; vulnerability reporting | ISCO-10, ISCO-50 | §15.3, §17 |
+| 9 | Rate and concurrency limits (Q47), to size the global cap and `cap_share`; largest `GetItems` / `GetCustomers` responses, to confirm the §10.6 caps | ISCO-20, ISCO-21 | §7.4, §10.6 |
+| 10 | Is SQL Server reachable from the LAN; which other services (RDP, file shares) run on the API host? | ISCO-09 | DU-7, §7.9 |
 
 ### 20.3 Design assumptions made here
 
 - **Connector-held Shamel credentials (§7.5)** is a designer decision: it shrinks the gateway's blast radius. With
   several active connectors per upstream it needs the session holder protocol of §7.5 (default `single_holder`) so
-  that connectors do not invalidate each other's sessions. If the architecture document cannot adopt it, direct-mode
-  custody (gateway envelope encryption, cluster-wide shared session, 01 §7.1) applies to both modes, and the §7.8
-  table changes accordingly.
+  that connectors do not invalidate each other's sessions. **Adopted in 01 v2** (§7.1, §8.5: connector-held
+  sessions, holder election and `cap_share` allocation); direct-mode custody (gateway envelope encryption,
+  cluster-wide shared session, 01 §7.1) applies only to direct upstreams.
 - **Two root key files (§9.2)** is a designer decision implementing the owner's "key file on the server" with plane
   separation: only `master.key` must be backed up; `data.key` is re-issuable from it.
 - **Connector writes default to `deny`.** Enabling writes is a deliberate local act on the Shamel host. This matches

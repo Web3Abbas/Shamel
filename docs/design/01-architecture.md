@@ -68,7 +68,7 @@
 | Component | Artifact | Responsibility | Network exposure |
 |---|---|---|---|
 | **bawaba-gateway** (data plane) | binary `bawaba-gateway` (`serve --plane=data`), image `bawaba/gateway` | Serves `/v1`, `/legacy`, `/docs`; runs the pipeline; terminates connector tunnels; data-plane background workers. Stateless, horizontally scalable. OS user `bawaba-data`, key file `data.key`. | Public ingress for the `api.` and `connect.` hostnames (Cloudflare Tunnel unix socket by default, or an AOP listener); optional private relay listener. |
-| **Control plane** | same binary, `serve --plane=control`; always a separate process | Admin API, bilingual (ar/en, RTL) web dashboard, owner auth, approvals, token issuance, config compilation, PKI signer, alert e-mail sender, Cloudflare ban sync, key management. OS user `bawaba-control`; the only process that loads `master.key`. | `127.0.0.1` TCP + Unix socket (`0600 root:root`) only. Reached via SSH tunnel. |
+| **Control plane** | same binary, `serve --plane=control`; always a separate process | Admin API, bilingual (ar/en, RTL) web dashboard, owner auth, approvals, token issuance, config compilation, PKI signer, alert manager and e-mail sender, audit maintenance (GC, compaction, dictionary training), Cloudflare ban sync, key management. OS user `bawaba-control`; the only process that loads `master.key`. | `127.0.0.1` TCP + Unix socket (`0600 root:root`) only. Reached via SSH tunnel. |
 | **bawaba-connector** | binary `bawaba-connector`, image `bawaba/connector`, Windows service | Runs next to Shamel; dials **out** to the gateway; opens the sealed Shamel credentials, logs in and holds the Shamel session; executes typed calls from its compiled endpoint table against its single, locally configured Shamel base URL (never sent to the gateway); scrubs origin markers and compresses responses. | **No listening ports.** Outbound HTTPS only. |
 | **bawaba** (CLI) | binary `bawaba` | Owner operations on the server (root via the control socket, or `bawaba login` over `127.0.0.1:7443`); agent operations over the network (agent token); `--json` everywhere. | Client only. |
 | **bawaba-mock** | binary `bawaba-mock`, image `bawaba/mock`; also embedded in the gateway | Emulates the Shamel HTTP surface and quirks with a deterministic fake dataset (Arabic names). Used for tests and the sandbox. | Loopback / internal network only. |
@@ -291,7 +291,7 @@ override. A single-node install therefore always runs **two processes**: `bawaba
 | `data` | Public ingress for `edge.public_hosts`: `/v1`, `/legacy`, `/docs`, `/llms.txt`, `/healthz`; the full pipeline. |
 | `tunnel` | Connector endpoints on `edge.connector_hosts` (`/connector/tunnel`, `/connector/enroll`); tunnel sessions; registry; relay server (if the `relay` listener is set). |
 | `worker` | Data-plane lease-based singleton/background jobs (§5.6). Safe to run on every data node. |
-| `control` | Control listener (loopback TCP + Unix socket): admin API, dashboard, config compiler, approvals, and the control-only jobs of §5.6 (PKI signer, alert mailer, Cloudflare ban sync, key rotation). |
+| `control` | Control listener (loopback TCP + Unix socket): admin API, dashboard, config compiler, approvals, and the control-only jobs of §5.6 (PKI signer, alert manager and mailer, audit maintenance, Cloudflare ban sync, key rotation). |
 
 In Docker the control service uses `network_mode: host` so that its loopback bind means host loopback (02 §12.1).
 
@@ -358,9 +358,10 @@ compiled_config(version BIGINT PK, created_at, sections JSONB  -- per-section ve
                 )
 ```
 
-Sections: `tokens`, `policies`, `firewall`, `upstreams`, `connectors`, `rate_defaults`, `cors`, `alerts`. A node
-reloads only sections whose hash changed. High-frequency data-plane-generated state (auto-bans, usage) is **not**
-part of compiled config; it flows through Valkey (§6, S3).
+Sections: `tokens`, `policies`, `firewall`, `upstreams`, `connectors`, `rate_defaults`, `cors`, `alerts`, `webhooks`
+(05 §2.9), `audit` (`audit_retention`, `audit_caps`, 05 §1.11). A node reloads only sections whose hash changed.
+High-frequency data-plane-generated state (auto-bans, usage) is **not** part of compiled config; it flows through
+Valkey (§6, S3).
 
 ```mermaid
 sequenceDiagram
@@ -407,21 +408,26 @@ node count, node registry and tunnel registry are retained, §8.6, §13.2).
 
 Data-plane jobs run under the `worker` role. Singleton jobs hold a Valkey lease `bwb:lease:<job>`
 (`SET NX PX 30000`, renewed every 10 s, fencing token = lease generation written into job output); parallel jobs
-consume Valkey Streams with consumer groups.
+consume Valkey Streams with consumer groups. Control-plane jobs run in the one control-plane process on the control
+node (§5.1, §5.4). Jobs that read stored audit content or delete audit objects run there, because only the control
+plane holds the `audit_seal` keys, blob-store read credentials and `DELETE` on `audit_blobs` (05 §1.10).
 
 | Job | Plane | Kind | Notes |
 |---|---|---|---|
 | Webhook change detection per poll stream (05 §2: upstream, identity, request variant, detector) | data | singleton per stream | Polls Shamel every 5 min (configurable) only for subscribed events; `background` class with cluster-wide background slots (§7.6). |
-| Webhook delivery | data | parallel (`bwb:q:webhooks`) | HMAC `Bawaba-Signature`, retries with backoff; events also persisted in PostgreSQL. |
+| Webhook delivery | data | parallel (`bwb:q:webhooks`) | HMAC `Bawaba-Signature`, retries with backoff; events also persisted in PostgreSQL. Timeouts, retries and limits are `webhooks.delivery.*` (05 §2.9). |
 | Approved-write executor | data | parallel (`bwb:q:approved_writes`) | Executes writes the owner approved through the claim/finalize functions of 04 §11.6; `write` priority class. |
 | Audit pipeline flusher | data | per node | §10.2. |
 | Usage rollup flush | data | per node | Every 10 s into `usage_1m`. |
-| Alert emitter | data | per node | Evaluates alert rules and writes `alert_outbox` (PostgreSQL); never sends mail. |
-| Retention / partition maintenance | data | singleton | Audit partitions, blob GC, snapshot of usage. |
+| Alert emitters | data (every process) | per node | Event-driven `alerts.Emit`: a per-node buffer flushed every 1 s as raw rows into `alert_outbox`; spills to `bwb:q:alerts` while PostgreSQL is down; never sends mail (05 §3.1). |
+| Alert threshold evaluator | data | singleton (`bwb:lease:alert_eval`) | Threshold rules every 30 s over cluster-wide counters; writes raw alerts like the emitters; never sends mail (05 §3.1). |
+| Partition maintenance | data | singleton | Creates audit partitions 7 days ahead through the `SECURITY DEFINER` function `audit_ensure_partitions(days)` owned by `bawaba_migrate`, because neither runtime role has DDL (02 §12.4, 05 §1.3.1); usage snapshots. Blob GC is a control-plane job (below). |
 | Stale token flagger | data | singleton, daily | Flags tokens unused for 90 days. |
 | Config compiler | control | on change | §5.4. |
 | PKI signer | control | polls `cert_requests` (2 s and `LISTEN`) | Signs connector, gateway-tunnel and relay certificates with `pki_ca` (§8.2). |
-| Alert mailer (SMTP sender) | control | reads `alert_outbox` | SMTP via the relay; de-duplicated per alert key and window (05 §3). |
+| Alert manager and digest job | control | singleton | Deduplicates, throttles, escalates and routes raw alerts from `alert_outbox` and `bwb:q:alerts`; maintains `alert_instances`; builds digests (05 §3.1–§3.2). |
+| Alert mailer (SMTP sender) | control | reads ready rows of `alert_outbox` | SMTP via the relay with retries (1 min → 30 min, for 24 h); the only process that holds `smtp_password` (05 §3.1, §3.5). |
+| Audit maintenance | control | singletons | Daily blob GC and pack consolidation/compaction (`audit.blob_gc.schedule`, 05 §1.6.2); cold-segment writing and the drop of hot partitions whose segment is verified (05 §1.8); weekly compression-dictionary training (05 §1.4.4); in `segment_first` mode also hourly segment compaction and object-index merge (05 §1.12). |
 | Cloudflare ban sync | control | optional | Mirrors bans ≥ 24 h from `ip_bans` to Cloudflare (`cf_api_token`, 02 §10.3). |
 | Key maintenance | control | scheduled | Monthly `audit_seal` rotation, KEK/DEK rotations, retirement of epoch keys no longer referenced (02 §9.6). |
 
@@ -1413,6 +1419,12 @@ upstream_call_signature = endpoint_id ‖ sorted(param_id=value…) ‖ canonica
 
 - **Identity (`cred_id`) is in the key** because Shamel applies salesman scoping per identity: two tokens share a
   fetch only if they would receive byte-identical upstream data (02 §20.1).
+- **Future optimization (not in v1):** poll streams drop the identity for Shamel endpoints that calibration has
+  marked `identity_sensitive = false` (05 §2.3), and the coalescing key could do the same (constant in place of
+  `cred_id`, with the flag's verification generation in the key so that a flip back to `true` stops sharing at
+  once). It is not adopted yet because 02 §20.1 requires `cred_id` in the key and §9.7 relies on byte-identical
+  upstream data; adopting it needs 02 to accept S14's data scope (including a pinned credential's effective
+  salesman set, 04 §4) as the boundary instead.
 - **Pushdown filters are in the key** automatically (they are header parameters/body fields).
 - **Token-specific policy is deliberately *not* in the key**: the shared object is the *unfiltered* upstream
   result, and S14/S15 apply each requester's data scope and field mask afterwards. Sharing therefore never widens
@@ -1584,6 +1596,14 @@ Indicative per-stage p99 budget (small request): S1–S5 ≤ 50 µs, S6 ≤ 5 µ
 synchronous refill is needed), S7–S10 ≤ 100 µs, S11 ≤ 1 ms (distributed path) / ≤ 5 µs (local), S13–S15 ≤ 200 µs +
 size-proportional, S16 ≤ 20 µs.
 
+**Cluster-wide audited throughput.** The throughput targets above are per node. In the default
+`audit.metadata_mode: postgres` every audited request adds ≈ 2.8 index rows on the one PostgreSQL primary, which
+caps the whole cluster at ≈ 2,000 audited req/s (05 §1.12: rating for a dedicated 8 vCPU / NVMe primary, to be
+confirmed by the `audit-pg-ingest` load test before release), far below 8 nodes × 5,000 req/s. The per-node targets
+and the 85 % scaling target therefore hold cluster-wide only in `audit.metadata_mode: segment_first`, the opt-in
+alternative for heavy load, in which metadata goes to per-node segments in the blob store (05 §1.12). In `postgres`
+mode the alert `audit_ingest_near_capacity` fires at 70 % of `audit.capacity.pg_rows_per_second` (05 §1.12).
+
 ### 10.2 Techniques
 
 - **Stateless nodes** (§1): scale by adding nodes; no affinity required (cursors work on any node).
@@ -1602,12 +1622,18 @@ size-proportional, S16 ≤ 20 µs.
   auto-pipelining for hot-path commands on one client and a separate client for snapshot/view chunk I/O.
 - **Tunnel efficiency:** zstd-compressed bodies, 4 MiB receive window, a dedicated bulk session per connector
   instance (§8.3, §8.5).
-- **Async audit pipeline:** S16 enqueues into a bounded MPSC ring (default 65,536 events/node). Workers:
-  canonicalize body → keyed content address (`audit_addr` MAC key) → dedupe check (local LRU of recent addresses,
-  then `audit_blobs` existence) → zstd → AES-256-GCM under the node's current epoch DEK (sealed to the control
-  plane, 02 §9.2) → blob put → batched `COPY` of index rows into time-partitioned PostgreSQL tables every 250 ms or
-  1,000 rows. Back-pressure: ring full → append to the local encrypted spool (`audit.spool_dir`, WAL and spool
-  share `audit.spool_max_bytes`, default 10 GiB) and replay later. Details in the operations document (05 §1).
+- **Async audit pipeline** (05 §1.5, authoritative): S16 enqueues into a bounded MPSC ring (`audit.ring_size`,
+  65,536 events, and `audit.ring_max_bytes`, 256 MiB of body charge, per node; bodies ≤ `audit.copy_max` (64 KiB)
+  are copied, larger pooled buffers are reference-counted). Workers: strip transport framing (chunked encoding,
+  gzip; body bytes are otherwise stored exactly as sent and received, never re-formatted, 05 §1.2) → record-aligned
+  chunking of JSON arrays (05 §1.4.3), which is what makes repeated records dedupe → keyed object ids (`audit_addr`
+  MAC key) → dedup check (node LRU of recent ids, then `audit_blobs`) → zstd with trained dictionaries →
+  AES-256-GCM under the node's current epoch DEK (sealed to `audit_seal`, 02 §9.2) → local WAL → pack, plus batched
+  `COPY` of index rows into time-partitioned PostgreSQL tables every 250 ms or 1,000 rows. Back-pressure: ring full
+  → spill queue (`audit.spill_queue`) → local encrypted spool (`audit.spool_dir`; WAL, spool and capture temp files
+  share `audit.spool_max_bytes`, default 10 GiB), replayed later; spool full → `audit.on_spool_full`. In
+  `audit.metadata_mode: segment_first` metadata goes to per-node Parquet segments instead of per-request rows
+  (05 §1.12). Details in 05 §1.
 - **No per-request PostgreSQL** on reads; usage and audit are batched.
 - **GC tuning:** `GOMEMLIMIT` set from the container limit (80 %), `GOGC` default; profile-guided optimization
   (PGO) profile from load tests committed under `cmd/bawaba-gateway/default.pgo`.
@@ -1758,9 +1784,9 @@ erDiagram
 | Shamel session sharing (direct mode) | degrade | Per-node sessions and logins (risk of token churn if Shamel allows one session per user — 08 ISCO-01). |
 | Session-holder records (tunnel mode) | degrade | Last known holder kept; a change only if exactly one instance is connected (§7.1). |
 | Distributed concurrency lease (direct mode) | degrade | Local `floor(cap / last_known_N)`, min 1. Tunnel mode is unaffected (connector cap). |
-| Background slots | pause | Webhook detection needs leases and pauses with them. |
+| Background slots | pause | Webhook detection and the alert threshold evaluator need leases and pause with them. |
 | Tunnel registry / relay | degrade | Last-known registry and holders used for `tunnel.registry_grace` (10 min) with peer pushes and `no_session` answers; then only nodes with a local session serve that upstream (§8.6). |
-| Queues (webhooks, approved writes) | pause | Producers write the PostgreSQL record (source of truth) and enqueue later; consumers resume on recovery. Alerts go to `alert_outbox` directly. |
+| Queues (webhooks, approved writes) | pause | Producers write the PostgreSQL record (source of truth) and enqueue later; consumers resume on recovery. Alerts are unaffected: emitters write `alert_outbox` rows in PostgreSQL first (05 §3.1). |
 | Sandbox overlay | degrade | Sandbox writes `503`; reads use the deterministic base dataset. |
 
 Valkey deployment requirement: AOF `appendfsync everysec` (idempotency records and queues must survive a Valkey
@@ -1816,12 +1842,12 @@ Single Go module (module path TBD, placeholder `github.com/<org>/bawaba`), Go �
 │   ├── coalesce/              # local single-flight, distributed election and follower registration
 │   ├── snapshot/              # snapshot build/store, views, cursors, local chunk cache
 │   ├── normalize/             # Shamel DTO -> v1 resources; generated AppendJSON encoders
-│   ├── audit/                 # emitter, ring, workers, spool, CAS blobs, epoch keys
+│   ├── audit/                 # emitter, ring, workers, spool, CAS blobs, epoch keys; reader, GC (control)
 │   ├── blob/                  # fs + s3 backends
 │   ├── idempotency/
 │   ├── approvals/
 │   ├── webhooks/              # change detection, delivery, signing
-│   ├── alerts/                # rules and emitter (data plane), SMTP mailer (control plane)
+│   ├── alerts/                # emitters, evaluator (data plane); manager, digests, mailer (control)
 │   ├── workers/               # leases, stream consumers
 │   ├── controlplane/          # admin API, owner auth, dashboard handlers, config compiler
 │   ├── configsync/            # compiled config loader, invalidation subscriber
@@ -1877,7 +1903,7 @@ Single Go module (module path TBD, placeholder `github.com/<org>/bawaba`), Go �
 | Kind | Where | Contents | Changed by |
 |---|---|---|---|
 | **Bootstrap** | `/etc/bawaba/bawaba.yaml` (data plane) or `/etc/bawaba/control.yaml` (control plane) + env overrides + secret files | node id/roles, listeners, TLS files, edge mode, PostgreSQL/Valkey/blob connection, key file paths, spool dirs, sandbox mode, memory budgets, tunnel transport, logging, limits that require restart | Operator (file), restart or SIGHUP for reloadable keys |
-| **Runtime** | PostgreSQL → compiled config | upstreams (incl. `direct.*`, `credential_session_mode`, concurrency, fairness and share settings), identities, connectors, tokens, policies, firewall lists, rate defaults and cost weights (`limits.*`, 03 §23.3), voucher range and slice sizes, CORS origins, alert rules, error mappings, auth signatures, webhook poll interval, pagination TTL/limits, retention | Owner via control plane (dashboard/CLI); versioned and audited; propagates in < 1 s |
+| **Runtime** | PostgreSQL → compiled config | upstreams (incl. `direct.*`, `credential_session_mode`, concurrency, fairness and share settings), identities, connectors, tokens, policies, firewall lists, rate defaults and cost weights (`limits.*`, 03 §23.3), voucher range and slice sizes, CORS origins, alert rules, error mappings, auth signatures, webhook settings (`webhooks.*`: poll interval, detectors, `webhooks.delivery.*`, `max_pending_target_requests_per_token`, 05 §2.9), pagination TTL/limits, audit retention and caps (`audit_retention`, `audit_caps`, 05 §1.11) | Owner via control plane (dashboard/CLI); versioned and audited; propagates in < 1 s |
 
 Keys written `upstreams[].…` in 02 §19 and 03 §26 are runtime upstream settings (compiled config section
 `upstreams`, set with `bawaba upstream set`), not bootstrap YAML.
@@ -1899,7 +1925,16 @@ Keys written `upstreams[].…` in 02 §19 and 03 §26 are runtime upstream setti
   `queue_timeout` + the largest operation budget must fit `server.request_timeout` and no budget may exceed 80 s.
 - Each file accepts the keys of 02 §19, 03 §26 and 05 that apply to its plane; the data-plane file below shows the
   keys this document owns or that 02 asked it to accept (`security.data_key_file`, `security.audit_epoch`,
-  `security.rotation.*`, `config.blind_staleness`, the `http.*` limits).
+  `security.rotation.*`, `config.blind_staleness`, the `http.*` limits) and the audit keys 05 asked it to accept
+  (`audit.metadata_mode`, `audit.ring_max_bytes`, `audit.copy_max`, `audit.spill_queue`, `audit.blocked.*`,
+  `audit.capacity.*`, `audit.segment_first.*`; full list and defaults in 05 §1.11). Audit keys used only by
+  control-node jobs (dictionary training, pack consolidation/compaction, `audit.blob_gc.*`, `audit.deep_search.*`)
+  are read from `control.yaml` (05 §1.11).
+- Webhook settings are runtime keys (§15.1, 05 §2.9). Delivery timeouts and limits are nested under
+  `webhooks.delivery.*`, the one accepted spelling: 02 §19's `webhooks.timeout` and `webhooks.max_response_read` are
+  written `webhooks.delivery.timeout` and `webhooks.delivery.max_response_bytes`; API re-sends of delivered events
+  are bounded by `webhooks.delivery.replay_delivered_max_age`, and pending webhook target requests per token by
+  `webhooks.max_pending_target_requests_per_token`.
 
 ```yaml
 # /etc/bawaba/bawaba.yaml (data plane, user bawaba-data)
@@ -1924,7 +1959,18 @@ security:
 postgres: { dsn: "postgres://bawaba_data@db:5432/bawaba?sslmode=verify-full", password_file: /run/secrets/pg_data_password, max_conns: 20 }
 valkey:   { addrs: ["valkey:6379"], username: data, password_file: /run/secrets/valkey_data_password, tls: true }
 blob:     { backend: fs, fs: { root: /var/lib/bawaba/blobs } }
-audit:    { spool_dir: /var/lib/bawaba/spool, spool_max_bytes: 10GiB, on_spool_full: reject }
+audit:
+  metadata_mode: postgres       # postgres | segment_first (05 §1.12)
+  ring_size: 65536              # events
+  ring_max_bytes: 256MiB        # body bytes charged to queued events
+  copy_max: 64KiB               # larger bodies are reference-counted, not copied
+  spill_queue: { events: 4096, max_bytes: 64MiB }
+  spool_dir: /var/lib/bawaba/spool
+  spool_max_bytes: 10GiB        # WAL + spool + capture temp files
+  on_spool_full: reject         # reject | metadata_only
+  blocked: { aggregate_above: 120/min }
+  capacity: { pg_rows_per_second: 5600 }
+  segment_first: { roll_interval: 5m, roll_bytes: 64MiB, index_shards: 256 }
 server:   { request_timeout: 90s }
 http:     { read_header_timeout: 5s, write_timeout: 95s, idle_timeout: 120s, max_body_bytes: 256KiB, max_response_bytes: 256MiB, response_spill_bytes: 8MiB }
 upstream: { max_response_bytes: 256MiB, max_header_value_bytes: 4096, max_header_total_bytes: 8192 }
@@ -1948,6 +1994,8 @@ postgres: { dsn: "postgres://bawaba_control@db:5432/bawaba?sslmode=verify-full",
 valkey:   { addrs: ["valkey:6379"], username: control, password_file: /run/secrets/valkey_control_password, tls: true }
 control:  { session_idle: 30m, session_max: 12h, stepup_window: 5m }
 alerts:   { smtp: { host: smtp.example.com, port: 587, username: bawaba, password_file: /run/secrets/smtp_password } }
+audit:    { blob_gc: { schedule: "23 4 * * *", grace: 7d }, deep_search: { max_bytes: 2GiB, max_duration: 10m } }
+          # plus the dictionary-training and pack-compaction keys of 05 §1.11
 log:      { level: info, format: json }
 ```
 
@@ -1986,7 +2034,7 @@ Summary of 02 §9.2–§9.6, which is authoritative.
 
 | Setting | Hot (no restart) | Mechanism |
 |---|---|---|
-| Tokens, policies, firewall, rate defaults, CORS, upstream settings, connectors, alert rules, error mappings | yes | Compiled config + `bwb:events` |
+| Tokens, policies, firewall, rate defaults, CORS, upstream settings, connectors, alert rules, error mappings, webhook settings (`webhooks.*`), audit retention and caps | yes | Compiled config + `bwb:events` |
 | Auto-bans | yes | Valkey + `bwb:events` |
 | TLS certificate/key files (`aop` origin certificate), internal tunnel/relay certificates | yes | File watch / signer result → `tls.Config.GetCertificate` swap |
 | Cloudflare range list | yes | `bawaba edge sync-cloudflare-ips` or SIGHUP |
@@ -1994,6 +2042,7 @@ Summary of 02 §9.2–§9.6, which is authoritative.
 | Log level | yes | SIGHUP or control API |
 | Sandbox seed/dataset version | yes (resets sandbox overlays) | Control API |
 | Listener addresses, roles, edge mode, tunnel transport, memory budgets | no | restart |
+| Audit pipeline keys (`audit.*` bootstrap keys, 05 §1.11) | no | restart (rolling); a changed `audit.metadata_mode` applies from the next UTC day boundary (05 §1.12), so every node should run the new value before then |
 | PostgreSQL/Valkey/blob endpoints and credentials | no | restart (rolling in topology C) |
 | `master.key` / `data.key` contents | no (the new key is loaded on restart of that plane's units; the old line remains during rotation, 02 §9.6) | restart |
 

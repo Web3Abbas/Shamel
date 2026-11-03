@@ -115,7 +115,9 @@ CREATE TABLE audit_events (
   selects the partition (or cold segment) and a ±2 s `ts` range, and the unique index answers in one probe.
 - Partitions are created 7 days ahead by the retention/partition singleton (01 §5.6) through the `SECURITY DEFINER`
   function `audit_ensure_partitions(days)` owned by `bawaba_migrate` (neither runtime role has DDL, 02 §12.4), and
-  are append-only.
+  are append-only. Dropping a hot partition (§1.6.2, §1.8) uses the matching `SECURITY DEFINER` function
+  `audit_drop_partition(day)`, also owned by `bawaba_migrate` and executable only by `bawaba_control`; it refuses
+  unless the day's cold segment is recorded as verified and the day is older than `audit_retention.metadata_hot`.
 
 #### 1.3.2 `audit_upstream_calls` (one row per upstream call)
 
@@ -435,7 +437,7 @@ This describes the `postgres` metadata mode; `segment_first` replaces steps 1 an
    finish).
 3. Packs with live ratio < `compact_live_ratio` (0.5) → live objects copied verbatim into a new pack, index rows
    repointed in one transaction, old pack deleted after the delay.
-4. Metadata: partitions older than `metadata_hot` are dropped after their cold segment is verified (§1.8);
+4. Metadata: partitions older than `metadata_hot` are dropped (via `audit_drop_partition(day)`, §1.3.1) after their cold segment is verified (§1.8);
    segments older than `metadata` are deleted.
 5. The 7-day grace makes the reuse race safe: a writer only trusts a cached object if its `retain_until ≥ today + 1`,
    otherwise it extends via `UPDATE … RETURNING`; zero rows (already deleted) → it stores the object again.
