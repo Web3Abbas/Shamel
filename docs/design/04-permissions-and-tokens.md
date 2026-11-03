@@ -767,7 +767,7 @@ errors / requests per window.
 |---|---|
 | Dashboard → Tokens list | last used, 24 h requests, error rate, p95, flags (`unused_90d`, `buggy_pattern`, …) |
 | Dashboard → Token detail | charts per operation (requests, errors by code, latency percentiles, 429s, warnings), behaviour tab (05 §4.5), recent requests (audit) |
-| `bawaba usage [--token] [--op] [--window] [--by op|status|hour] --json` | same data, machine-readable |
+| `bawaba usage [--token] [--op] [--window] [--by op\|status\|hour] --json` | same data, machine-readable |
 | `GET /v1/me`, `GET /v1/me/requests` | the token's own usage, only LV-14 fields (no upstream latency split, 02 LV-14; publishable tokens get no usage, 03 §18.1) |
 | E-mail | `abusive_tool`, `rate_limited_sustained`, unused-token digest (05 §3.3) |
 
